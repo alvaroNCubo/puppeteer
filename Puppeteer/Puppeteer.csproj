@@ -40,8 +40,8 @@
     <AssemblyVersion>2.0.1</AssemblyVersion>
     <PackageId>Ncubo.Puppeteer</PackageId>
     <Authors>NCubo Ideas</Authors>
-    <PackageProjectUrl>https://github.com/alvaroNCubo/puppeteer-github-public</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/alvaroNCubo/puppeteer-github-public</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/alvaroNCubo/puppeteer</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/alvaroNCubo/puppeteer</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <IncludeSymbols>false</IncludeSymbols>
