@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+
+# Test infrastructure — must never cross the public boundary.
+# Test projects live in Pacifico (private) and are mirrored into
+# tests-local/ only for local validation against this public clone.
+tests-local/
+*.WithTests.sln
+
+# Signing keys — strong-name private keys must stay private.
+# The public Puppeteer.csproj drops SignAssembly entirely, so the
+# .snk has no business living here. These guards block accidental
+# crossings.
+PuppeteerKey.snk
+*.snk
+
+# IDE / user-local
+.vs/
+*.user
+*.suo
+.idea/
+*.DotSettings.user
+
+# OS junk
+Thumbs.db
+.DS_Store
