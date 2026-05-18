@@ -156,6 +156,23 @@ namespace Choreography.Transport.SimpleX
             return Org.BouncyCastle.X509.SubjectPublicKeyInfoFactory.CreateSubjectPublicKeyInfo(param).GetEncoded();
         }
 
+        // Decodifica una pubkey X25519 envuelta en ASN.1 DER X.509 SubjectPublicKeyInfo
+        // (formato que el servidor SMP envia para ServerDhPublicKey en IDS) y devuelve
+        // los 32 bytes raw aptos para crypto_box.
+        public static byte[] DecodeX25519PublicKeyDer(byte[] derBytes)
+        {
+            if (derBytes == null) throw new ArgumentNullException(nameof(derBytes));
+            // Si ya viene en formato raw 32 bytes (caso degenerado), devolverlo tal cual.
+            if (derBytes.Length == 32) return derBytes;
+
+            var spki = Org.BouncyCastle.Asn1.X509.SubjectPublicKeyInfo.GetInstance(derBytes);
+            var keyParam = Org.BouncyCastle.Security.PublicKeyFactory.CreateKey(spki);
+            if (keyParam is X25519PublicKeyParameters x25519)
+                return x25519.GetEncoded();
+            throw new ArgumentException(
+                $"DER no contiene una pubkey X25519 valida: {keyParam.GetType().Name}");
+        }
+
         // --- Hash + encoding helpers (managed nativo, no cambian) ---
 
         public static byte[] ComputeFingerprint(byte[] publicKeyBytes)

@@ -180,6 +180,32 @@ namespace Choreography.Transport.SimpleX
             return WrapInBatch(transmission);
         }
 
+        // SEND unsigned v6: sender anonimo envia mensaje a queue NO secured (sin KEY emitido).
+        // Usado en el handshake bidireccional para el primer envelope antes de que las pubkeys
+        // esten cableadas. Format identico a SEND pero con signature vacia (length 0 prefix).
+        // El server SMP v6 acepta SENDs unsigned mientras la queue no haya recibido KEY;
+        // post-KEY, todo SEND requiere firma valida del sender registrado.
+        public static byte[] BuildSendUnsigned(byte[] sessionId, byte[] corrId, byte[] senderQueueId,
+            byte[] encryptedMessage)
+        {
+            if (sessionId == null) throw new ArgumentNullException(nameof(sessionId));
+            if (corrId == null || corrId.Length != CorrIdSize) throw new ArgumentException($"corrId must be {CorrIdSize} bytes");
+            if (senderQueueId == null || senderQueueId.Length == 0) throw new ArgumentException("senderQueueId required for SEND");
+            if (encryptedMessage == null) throw new ArgumentNullException(nameof(encryptedMessage));
+
+            using var bodyMs = new MemoryStream();
+            bodyMs.Write(Encoding.ASCII.GetBytes("SEND"));
+            bodyMs.WriteByte((byte)' ');
+            bodyMs.WriteByte((byte)'F');
+            bodyMs.WriteByte((byte)' ');
+            bodyMs.Write(encryptedMessage);
+            byte[] commandBody = bodyMs.ToArray();
+
+            byte[] transmissionForAuth = BuildTransmissionForAuth(sessionId, corrId, senderQueueId, commandBody);
+            byte[] transmission = PrependByteString(Array.Empty<byte>(), transmissionForAuth);
+            return WrapInBatch(transmission);
+        }
+
         // ACK v6: recipient confirma recepcion de message identificado por msgId.
         // Format: "ACK " + smpEncode(msgId).
         public static byte[] BuildAck(byte[] sessionId, byte[] corrId, byte[] recipientQueueId,

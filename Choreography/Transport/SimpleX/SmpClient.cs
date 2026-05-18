@@ -161,6 +161,14 @@ namespace Choreography.Transport.SimpleX
                 queue.ServerDhPublicKey = ids.ServerDhPublicKey;
                 queue.State = SmpQueueState.Active;
                 queue.Role = SmpQueueRole.Recipient;
+
+                // NEW v6 usa subMode='S' (SMSubscribe): el server empieza a entregar MSGs
+                // inmediatamente sin esperar un SUB explicito. Registramos el Channel local
+                // ya mismo para evitar la race window donde un MSG temprano se droppea
+                // porque la entrada del diccionario aun no existia.
+                string queueKey = SmpCrypto.ToBase64Url(ids.RecipientId);
+                _queueSubscriptions.GetOrAdd(queueKey, _ => Channel.CreateUnbounded<SmpMsg>());
+
                 return ids;
             }
 
@@ -169,15 +177,6 @@ namespace Choreography.Transport.SimpleX
 
             throw new InvalidOperationException($"Unexpected response to NEW: {response.GetType().Name}");
         }
-
-        // Compat overload para callers existentes (SimplexTransport joiner+creator paths).
-        // En v6 el sender NO puede securizar la queue por si mismo (SKEY existe desde v9).
-        // El recipient debe usar la overload con senderSignPubKey, obtenido out-of-band.
-        // Este overload queda como fail-fast hasta que Fase 7 cablee el envelope flow.
-        public Task SecureQueueAsync(SmpQueue queue, CancellationToken ct = default)
-            => throw new NotImplementedException(
-                "SecureQueueAsync(queue) requires SKEY (v9+) or out-of-band senderSignPubKey via " +
-                "the overload SecureQueueAsync(queue, senderSignPubKey, ct). Wired in Fase 7.");
 
         // SecureQueue (rol Recipient): registra el sender's signing pub key en la queue
         // identificada por rcvId. El recipient debe haber obtenido senderSignPubKey
@@ -233,6 +232,8 @@ namespace Choreography.Transport.SimpleX
             if (plaintext == null) throw new ArgumentNullException(nameof(plaintext));
             if (queue.SenderId == null) throw new InvalidOperationException("Queue has no SenderId");
             if (queue.SenderSignSecretKey == null) throw new InvalidOperationException("Queue has no SenderSignSecretKey");
+            if (queue.SenderDhSecretKey == null) throw new InvalidOperationException("Queue has no SenderDhSecretKey");
+            if (queue.RecipientDhPublicKey == null) throw new InvalidOperationException("Queue has no RecipientDhPublicKey");
 
             // Encrypt with NaCl crypto_box (recipient's DH pub from invitation URI)
             byte[] nonce = SmpCrypto.GenerateNonce();
@@ -254,6 +255,35 @@ namespace Choreography.Transport.SimpleX
 
             if (response is SmpErr err)
                 throw new InvalidOperationException($"SMP SEND failed: {err.ErrorType}");
+        }
+
+        // SEND unsigned: usado en handshake bidireccional para los envelopes de bootstrap
+        // antes de que la queue tenga KEY. El sender es anonimo (firma vacia) y el payload
+        // viaja plaintext sin crypto_box.
+        //
+        // Razon del plaintext: el chicken-and-egg de crypto_box durante el handshake. El
+        // receptor necesita la senderDhPub del emisor para decryptar, pero la senderDhPub
+        // es PRECISAMENTE lo que el handshake transporta. Los envelopes solo llevan pubkeys
+        // publicas + queue URIs publicas, por lo que mandarlos plaintext no compromete
+        // secrecy. Una vez completado el handshake, los SENDs subsiguientes usan
+        // SendMessageAsync con crypto_box completo.
+        public async Task SendMessageUnsignedAsync(SmpQueue queue, byte[] payload, CancellationToken ct = default)
+        {
+            if (queue == null) throw new ArgumentNullException(nameof(queue));
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
+            if (queue.SenderId == null) throw new InvalidOperationException("Queue has no SenderId");
+
+            byte[] corrId = SmpCrypto.RandomBytes(SmpCommandBuilder.CorrIdSize);
+            byte[] cmd = SmpCommandBuilder.BuildSendUnsigned(_sessionId, corrId, queue.SenderId, payload);
+
+            var response = await SendAndWaitAsync(corrId, cmd, ct);
+
+            if (response is SmpOk)
+                return;
+
+            if (response is SmpErr err)
+                throw new InvalidOperationException($"SMP SEND unsigned failed: {err.ErrorType}");
+            throw new InvalidOperationException($"Unexpected response to SEND unsigned: {response.GetType().Name}");
         }
 
         public async Task AcknowledgeAsync(SmpQueue queue, byte[] msgId, CancellationToken ct = default)
