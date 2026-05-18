@@ -1,0 +1,288 @@
+# Gramática BNF del Pattern Matching DSL
+
+## Expresiones Base (Commit 2.2)
+
+```bnf
+<pattern> ::= <pattern-list>
+
+<pattern-list> ::= <expression> (<separator> <expression>)*
+
+<separator> ::= ' '         # Espacio: patrones en la misma línea
+              | '...'       # Tres puntos: azúcar sintáctico equivalente a espacio
+              | '\n'        # Nueva línea: patrones en diferentes líneas
+
+<expression> ::= <assignment>
+               | <instance-access>
+               | <type-access>
+               | <constructor-call>
+
+<assignment> ::= <variable> '=' <assignment-value> ';'
+
+<assignment-value> ::= <partial-pattern>
+                     | <pattern-sequence>
+                     | <instance-access>
+                     | <type-access>
+                     | <constructor-call>
+
+<partial-pattern> ::= '...' <pattern-sequence>
+                    | <pattern-sequence> '...'
+                    | '...' <pattern-sequence> '...'
+
+<pattern-sequence> ::= <pattern-element> ('...' <pattern-element>)*
+
+<pattern-element> ::= <instance-access>
+                    | <type-access>
+                    | <constructor-call>
+
+<instance-access> ::= '[' <instance-name> ':' <type-name> ']' <member-access>?
+
+<type-access> ::= '[' <type-name> ']' <member-access>?
+
+<constructor-call> ::= <type-name> '(' <parameter-list>? ')'
+                     | '[' <type-name> ']' '(' <parameter-list>? ')'
+
+<instance-name> ::= <identifier>
+                  | '_'
+
+<type-name> ::= <identifier>
+
+<member-access> ::= '.' <identifier> <method-call>?
+                  | '.' <identifier> <member-access>?
+
+<method-call> ::= '(' <parameter-list>? ')'
+
+<parameter-list> ::= <parameter> (',' <parameter>)*
+
+<parameter> ::= <typed-parameter>
+              | <literal>
+              | <variable>
+              | '_'
+
+<typed-parameter> ::= <identifier> ':' <type-name>
+                    | <literal> ':' <type-name>
+
+<variable> ::= '$' <identifier>
+
+<literal> ::= <string-literal>
+            | <number-literal>
+            | <bool-literal>
+            | <datetime-literal>
+            | <null-literal>
+
+<identifier> ::= [a-zA-Z_#@][a-zA-Z0-9_#@]*
+
+<string-literal> ::= "'" <any-char>* "'"
+
+<number-literal> ::= <integer> | <double> | <decimal>
+
+<integer> ::= [0-9]+
+
+<double> ::= [0-9]+ '.' [0-9]+ ('d' | 'D')?
+           | [0-9]+ ('d' | 'D')
+
+<decimal> ::= [0-9]+ '.' [0-9]+ ('m' | 'M')
+            | [0-9]+ ('m' | 'M')
+
+<bool-literal> ::= 'true' | 'false'
+
+<null-literal> ::= 'null'
+
+<datetime-literal> ::= <date-literal>
+                     | <time-literal>
+                     | <date-literal> ' ' <time-literal>
+
+<date-literal> ::= <month> '/' <day> '/' <year>
+
+<time-literal> ::= <hour> ':' <minute> ':' <second>
+
+<month> ::= [0-9] | [0-1][0-9]
+
+<day> ::= [0-9] | [0-3][0-9]
+
+<year> ::= [0-9][0-9][0-9][0-9]
+
+<hour> ::= [0-9] | [0-2][0-9]
+
+<minute> ::= [0-9] | [0-5][0-9]
+
+<second> ::= [0-9] | [0-5][0-9]
+```
+
+## Notas:
+
+### Separadores de Patrones
+- **Espacio (' ')**: Separa patrones en la misma línea/comando. Ejemplo: `[A].X() [B].Y()` busca ambos en el mismo comando.
+- **Tres puntos ('...')**: En contexto de separadores, es azúcar sintáctico equivalente a espacio. Ejemplo: `[A].X() ... [B].Y()` es idéntico a `[A].X() [B].Y()`.
+  - **Nota**: Los tres puntos requieren espacios alrededor cuando se usan como separadores (no pueden pegarse directamente a los identificadores).
+- **Nueva línea ('\n')**: Separa patrones en diferentes líneas/comandos. Permite escribir patrones multilinea.
+
+**IMPORTANTE**: Los tres puntos `...` tienen **diferente significado según el contexto**:
+- **Fuera de asignaciones**: Son azúcar sintáctico para separar patrones (equivalente a espacio)
+- **Dentro de asignaciones**: Indican partial matching (ver sección Asignaciones y Partial Matching)
+
+### Ejemplos de Separadores
+```
+# Estos son EQUIVALENTES (todos buscan ambos patrones en el mismo comando):
+[A].X() [B].Y()
+[A].X() ... [B].Y()
+
+# Patrón multilinea (busca X en una línea, Y en otra):
+[A].X()
+[B].Y()
+```
+
+### Asignaciones y Partial Matching (Commit 2.5 y 2.6)
+Las asignaciones capturan valores durante el matching y deben terminar con punto y coma (`;`) para mayor legibilidad.
+
+**Sintaxis básica:**
+```
+$variable = <expresion>;
+```
+
+**Partial Matching con `...`:**
+Dentro de una asignación, `...` indica que puede haber cualquier expresión antes, después, o entre los patrones especificados.
+
+**Semántica:**
+- `$x = ... patron;` → El patrón está en alguna parte del lado derecho de la asignación
+- `$x = patron ...;` → El patrón está justo después del `=`, puede haber más expresiones después
+- `$x = ... patron;` → El patrón está al final del lado derecho
+- `$x = ... patron1 ... patron2 ...;` → Ambos patrones están presentes, con cualquier expresión antes, entre, o después
+
+**Ejemplos:**
+
+1. **Asignación simple (sin partial matching):**
+   ```
+   $x = [String].Length;
+   ```
+   Hace match exacto con: `$x = [String].Length`
+
+2. **Partial matching - patrón en cualquier parte:**
+   ```
+   $x = ... [String].Length ...;
+   ```
+   Hace match con:
+   - `$x = [String].Length`
+   - `$x = [objeto:Objeto].Propiedad + [String].Length`
+   - `$x = [String].Length * 2`
+   - `$x = [objeto:Objeto].Propiedad + [String].Length * 2`
+
+3. **Partial matching - patrón al inicio:**
+   ```
+   $x = [String].Length ...;
+   ```
+   Hace match con:
+   - `$x = [String].Length`
+   - `$x = [String].Length * 2`
+   - `$x = [String].Length + [otra:Clase].Valor`
+
+   NO hace match con:
+   - `$x = 10 + [String].Length`
+
+4. **Partial matching - patrón al final:**
+   ```
+   $x = ... [String].Length;
+   ```
+   Hace match con:
+   - `$x = [String].Length`
+   - `$x = 10 + [String].Length`
+   - `$x = [objeto:Objeto].Propiedad + [String].Length`
+
+   NO hace match con:
+   - `$x = [String].Length * 2`
+
+5. **Múltiples patrones con partial matching:**
+   ```
+   $resultado = ... [texto:String].ToUpper() ... [String].Length ...;
+   ```
+   Hace match con cualquier asignación que contenga ambas llamadas en alguna parte, en ese orden
+
+### Parámetros Tipados (Commit 2.3)
+Los parámetros pueden especificar opcionalmente su tipo mediante la sintaxis `:tipo`:
+
+**Sintaxis:**
+- Identificador con tipo: `identificador:Tipo` (ej: `fecha:DateTime`, `cantidad:int`)
+- Literal con tipo: `literal:Tipo` (ej: `10:int`, `3.14:double`, `100:decimal`)
+- Sin tipo: El parser infiere el tipo de la literal automáticamente
+
+**Reglas de Validación:**
+- Una literal debe ser compatible con el tipo especificado
+- `10:int` es válido
+- `10:decimal` es **inválido** (debe ser `10m:decimal`)
+- `3.14:double` es válido
+- `3.14:int` es **inválido** (no se puede convertir un double a int)
+
+**Casos de Uso:**
+- **Forzar tipo específico:** `[Clase].Metodo(10:decimal)` solo hace match si el parámetro es decimal
+- **Evitar ambigüedad:** `fecha:DateTime` vs una variable llamada `fecha`
+- **Validar sobrecarga:** Ayuda a distinguir entre sobrecargas de métodos
+
+**IMPORTANTE:** Para evitar confusión, cuando se usa un identificador (no literal) en un parámetro, se **debe** especificar el tipo con `:`.
+- `[Clase].Metodo(fecha:DateTime, _)` ✅ Correcto - busca un parámetro de tipo DateTime
+- `[Clase].Metodo(fecha, _)` ❌ Incorrecto - buscaría una variable llamada `fecha`
+
+**Tipos soportados:**
+- **Tipos primitivos:** `int`, `string`, `bool`, `double`, `decimal`, `datetime`, `object`
+- **Tipos de dominio:** Cualquier nombre de clase del DLL de lógica de negocios (ej: `Carrito`, `Producto`, `Orden`)
+  - En fase de parsing, los tipos de dominio NO se validan contra las DLLs cargadas
+  - La validación de tipos de dominio se realiza posteriormente en la fase de matching
+  - Ejemplo: `[Orden].AgregarItem(producto:Producto, cantidad:int)`
+
+### Method/Property Chaining (Commit 2.4)
+El DSL soporta completamente el encadenamiento (chaining) de métodos y propiedades, reflejando patrones comunes en C# y LINQ.
+
+**Sintaxis:**
+```
+[Type].Member1.Member2.Member3(...)
+[Type].Method1().Property.Method2(...)
+[instance:Type].Property.Method().Property
+```
+
+**Ejemplos:**
+
+1. **Chaining de propiedades:**
+   ```
+   [Carrito].Cliente.Direccion.Ciudad
+   ```
+   Busca acceso a la propiedad Ciudad de Direccion de Cliente en Carrito
+
+2. **Chaining mixto (propiedades y métodos):**
+   ```
+   [Orden].Items.First().Producto.ObtenerPrecio()
+   ```
+   - `Items` - propiedad
+   - `First()` - método
+   - `Producto` - propiedad
+   - `ObtenerPrecio()` - método
+
+3. **Chaining con parámetros:**
+   ```
+   [Orden].Items.Where($condicion).Select(item:Item).ToList()
+   ```
+   Patrón LINQ típico con parámetros variables y tipados
+
+4. **Chaining profundo:**
+   ```
+   [Sistema].Clientes.Find(_).Ordenes.Last().Items.Sum()
+   ```
+   Múltiples niveles de navegación y operaciones
+
+5. **Chaining con literales:**
+   ```
+   [String].Substring(0,10).ToUpper().Replace('A','B')
+   ```
+   Operaciones secuenciales con parámetros literales
+
+**Implementación:**
+- El nodo `MemberAccessNode` tiene una propiedad `NextAccess` que permite recursión
+- Distingue automáticamente entre propiedades (sin parámetros) y métodos (con paréntesis)
+- Soporta cualquier profundidad de encadenamiento
+
+### Otros
+- El constructor se reconoce como una llamada a la clase con los parámetros: `Clase(param1, param2, ...)` o `[Clase](param1, param2, ...)`.
+- Las invocaciones de métodos siempre son de la forma `instancia.Metodo(...)`.
+- Los wildcards '_' pueden aparecer en lugar de nombres de instancia o como parámetros.
+- Las variables '$identifier' capturan valores durante el matching.
+- Los comentarios // y /* */ son ignorados por el lexer.
+- Literales double pueden terminar opcionalmente con 'd' o 'D' (ej: 3.14d, 10d).
+- Literales decimal deben terminar con 'm' o 'M' en lugar de '%' (ej: 3.14m, 100m).
+- Literales datetime soportan: solo fecha (MM/DD/YYYY o M/D/YYYY), solo hora (HH:MM:SS o H:MM:SS o H:M:S), o fecha con hora (MM/DD/YYYY HH:MM:SS).

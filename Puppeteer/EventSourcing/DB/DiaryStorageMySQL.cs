@@ -1,0 +1,1863 @@
+using MySql.Data.MySqlClient;
+using Puppeteer;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.Common;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Puppeteer.EventSourcing.DB
+{
+	internal class DiaryStorageMySQL : DiaryStorage
+	{
+		private readonly string mySqlWriteScriptCommand;
+		private readonly string mySqlWriteDefineCommand;
+		private readonly string mySqlWriteInvocationCommand;
+		private readonly string mySqlWriteScriptCommandWithExposeData;
+		private readonly string mySqlWriteDefineCommandWithExposeData;
+		private readonly string mySqlWriteInvocationCommandWithExposeData;
+		// Phase 6 of the Action refactor: dropped mySqlWriteActionCommand,
+		// mySqlWriteNewActionCommand, and their *WithExposeData variants. The
+		// post-refactor write API is WriteScriptEntry / WriteDefineEntry /
+		// WriteInvocationEntry / WriteDefineWithFirstInvocation.
+
+		// Requiere AllowMultipleStatements = true en la connection string de MySQL: "Server=...;Database=...;AllowMultipleStatements=true;..."
+		internal DiaryStorageMySQL(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
+		{
+			mySqlWriteScriptCommand = $"insert into `{Name}` (id, OccurredAt, Ip, User, Script) values (@id, @OccurredAt, @Ip, @User, @Script)";
+
+			// Define rows: script = canonical sentence, action = actionId,
+			// arguments = NULL. The first invocation lives in a separate
+			// Invocation row.
+			mySqlWriteDefineCommand = $"INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL)";
+
+			// Invocation rows: script = NULL, action = actionId, arguments = args.
+			mySqlWriteInvocationCommand = $"INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments)";
+
+			mySqlWriteScriptCommandWithExposeData = $@"
+				BEGIN;
+				{mySqlWriteScriptCommand};
+				INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@DiaryId, @ExposeJson);
+				COMMIT;";
+
+			mySqlWriteDefineCommandWithExposeData = $@"
+				BEGIN;
+				{mySqlWriteDefineCommand};
+				INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@DiaryId, @ExposeJson);
+				COMMIT;";
+
+			mySqlWriteInvocationCommandWithExposeData = $@"
+				BEGIN;
+				{mySqlWriteInvocationCommand};
+				INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@DiaryId, @ExposeJson);
+				COMMIT;";
+
+			eventElisionStorage = new EventElisionStorageMySQL(eventJournalClient, connectionString);
+			eventMaterializationStorage = new EventMaterializationStorageMySQL(eventJournalClient, connectionString);
+			materializationCheckpointStorage = new MaterializationCheckpointStorageMySQL(eventJournalClient, connectionString);
+		}
+
+		private async Task<bool> CreateDiaryAsync(String nombreDelDiario)
+		{
+			StringBuilder statement = new StringBuilder();
+			bool created = false;
+
+			statement
+				.Append("SELECT count(TABLE_NAME) alreadyexists FROM information_schema.TABLES WHERE TABLE_NAME = ")
+				.Append('\'').Append(nombreDelDiario).Append('\'')
+				.Append(" AND TABLE_SCHEMA in (SELECT DATABASE());");
+
+			statement
+				.Append("create table IF NOT EXISTS `").Append(nombreDelDiario).Append('`')
+				.Append('(')
+				.Append("	id BIGINT NOT NULL,")
+				.Append("	OccurredAt DATETIME(3) NOT NULL,")
+				.Append("	Ip VARCHAR(39) NULL,")
+				.Append("	User VARCHAR(45) NULL,")
+				.Append("	Script TEXT NULL,")
+				.Append("	Action INT NULL,")
+				.Append("	Arguments TEXT NULL,")
+				.Append("	Skip TINYINT(1) NOT NULL DEFAULT 0,")
+				.Append("	PRIMARY KEY (id)")
+				.Append(") ENGINE=InnoDB CHARSET=utf8;");
+
+			// Phase 6 of the Action refactor: dropped CREATE TABLE _ACTION.
+			// Action definitions live in the journal as Define records.
+
+			statement.Append(@"
+				create table IF NOT EXISTS Follower
+				(
+					FollowerId INT NOT NULL,
+					EntryId BIGINT NOT NULL,
+					Description VARCHAR(45) NULL,
+					PRIMARY KEY (FollowerId)
+				) ENGINE=InnoDB CHARSET=utf8;
+			");
+
+			statement.Append(@"
+				CREATE TABLE IF NOT EXISTS Reaction (
+					Id INT NOT NULL,
+					Reaction TEXT NOT NULL,
+					PRIMARY KEY (Id)
+				) ENGINE=InnoDB CHARSET=utf8;"
+			);
+
+			statement
+				.Append(@"CREATE TABLE IF NOT EXISTS ReactionCheckpoint (
+					ReactionId INT NOT NULL,
+					Pattern INT NOT NULL,
+					DiaryId BIGINT NOT NULL DEFAULT 0,
+					ConfirmedDiaryId BIGINT NOT NULL DEFAULT 0,
+					PRIMARY KEY (ReactionId, Pattern)
+				) ENGINE=InnoDB CHARSET=utf8;");
+
+			string sql = statement.ToString();
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				await connection.OpenAsync();
+				using (MySqlCommand command = new MySqlCommand(sql, connection))
+				using (DbDataReader reader = await command.ExecuteReaderAsync())
+				{
+					await reader.ReadAsync();
+					created = reader.GetInt32(0) == 0;
+
+					await reader.CloseAsync();
+				}
+				await connection.CloseAsync();
+			}
+
+			return created;
+		}
+
+		private bool CreateDiary(String nombreDelDiario)
+		{
+			StringBuilder statement = new StringBuilder();
+			bool created = false;
+
+			statement
+				.Append("SELECT count(TABLE_NAME) alreadyexists FROM information_schema.TABLES WHERE TABLE_NAME = ")
+				.Append('\'').Append(nombreDelDiario).Append('\'')
+				.Append(" AND TABLE_SCHEMA in (SELECT DATABASE());");
+
+			statement
+				.Append("create table IF NOT EXISTS `").Append(nombreDelDiario).Append('`')
+				.Append('(')
+				.Append("	id BIGINT NOT NULL,")
+				.Append("	OccurredAt DATETIME(3) NOT NULL,")
+				.Append("	Ip VARCHAR(39) NULL,")
+				.Append("	User VARCHAR(45) NULL,")
+				.Append("	Script TEXT NULL,")
+				.Append("	Action INT NULL,")
+				.Append("	Arguments TEXT NULL,")
+				.Append("	Skip TINYINT(1) NOT NULL DEFAULT 0,")
+				.Append("	PRIMARY KEY (id)")
+				.Append(")	ENGINE=InnoDB CHARSET=utf8;");
+
+			// Phase 6 of the Action refactor: dropped CREATE TABLE _ACTION.
+			// Action definitions live in the journal as Define records.
+
+			statement.Append(@"
+				create table IF NOT EXISTS Follower
+				(
+					FollowerId INT NOT NULL,
+					EntryId BIGINT NOT NULL,
+					Description VARCHAR(45) NULL,
+					PRIMARY KEY (FollowerId)
+				) ENGINE=InnoDB CHARSET=utf8;
+			");
+
+			statement.Append(@"
+				CREATE TABLE IF NOT EXISTS Reaction (
+					Id INT NOT NULL,
+					Reaction TEXT NOT NULL,
+					PRIMARY KEY (Id)
+				) ENGINE=InnoDB CHARSET=utf8;"
+			);
+
+			statement.Append(@"
+				CREATE TABLE IF NOT EXISTS ReactionCheckpoint (
+					ReactionId INT NOT NULL,
+					Pattern INT NOT NULL,
+					DiaryId BIGINT NOT NULL DEFAULT 0,
+					ConfirmedDiaryId BIGINT NOT NULL DEFAULT 0,
+					PRIMARY KEY (ReactionId, Pattern)
+				) ENGINE=InnoDB CHARSET=utf8;"
+			);
+
+			string sql = statement.ToString();
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					using (DbDataReader reader = command.ExecuteReader())
+					{
+						reader.Read();
+						created = reader.GetInt32(0) == 0;
+
+						reader.Close();
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return created;
+		}
+
+		// Phase 6 of the Action refactor: dropped LoadSingleAction +
+		// LoadActionsWithExitStatus (sync + async). The lateral _ACTION table is
+		// gone; Define entries in the journal populate the cache via
+		// AddKnownActionFromDefine.
+
+
+		protected internal override long RehydrateFromEvent(long afterEntryId = 0, bool includeExposeData = false)
+		{
+			return RehydrateFromEvent(afterEntryId, RehydrateDirection.Forward, includeExposeData);
+		}
+
+		protected internal override long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		{
+			EventJournalClient.IsNew = CreateDiary(this.Name);
+
+			bool canContinueReplay = false;
+			long ultimoId = afterEntryId;
+			long delta = 0;
+			bool salir = false;
+			int cantidadDeLeaderInitialization = 0;
+
+			// Pick the ORDER BY direction.
+			string orderByClause = direction == RehydrateDirection.Forward ? "ORDER BY d.id ASC" : "ORDER BY d.id DESC";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					// Materialize v2 / Fase 0.5: la columna Skip del journal es autoritativa
+					// for rehydration. Replaces LEFT JOIN EventElision with WHERE d.Skip = 0.
+					// EventElisionStorageMySQL.MarkEventsAsElided poble Skip = 1 transaccionalmente.
+					string sqlCount = $@"
+						SELECT Count(*) Cantidad
+						FROM `{base.Name}` d
+						WHERE d.Skip = 0 AND d.id > {ultimoId}";
+					using (MySqlCommand command = new MySqlCommand(sqlCount, connection))
+					using (DbDataReader reader = command.ExecuteReader())
+					{
+						reader.Read();
+						long totalDeRegistros = reader.GetInt64(0);
+						EventJournalClient.BeginJournalReplay(totalDeRegistros);
+						reader.Close();
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			try
+			{
+				int fails = 0;
+				long entryId = 0;
+
+				while (!salir && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+				{
+					// Phase 5 of the Action refactor: legacy LoadActionsWithExitStatus
+					// (pre-load the _ACTION lateral table) is dropped. Define entries
+					// in the journal populate the cache via AddKnownActionFromDefine
+					// in entry-id order — Define always precedes Invocation by
+					// construction (atomic write + monotonic ordering).
+
+					string sql = includeExposeData
+						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.User, d.Action, d.Arguments, ed.ExposeJson
+							FROM `{base.Name}` d
+							LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
+							WHERE d.Skip = 0 AND d.id > {ultimoId}
+							{orderByClause}"
+						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.User, d.Action, d.Arguments
+							FROM `{base.Name}` d
+							WHERE d.Skip = 0 AND d.id > {ultimoId}
+							{orderByClause}";
+
+					using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+					{
+						try
+						{
+							connection.Open();
+
+							using (MySqlCommand command = new MySqlCommand(sql, connection))
+							using (DbDataReader reader = command.ExecuteReader())
+							{
+								try
+								{
+									bool salirRead = false;
+									int intentos = 5;
+									while (!salirRead && intentos > 0 && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+									{
+										try
+										{
+											while (reader.Read() && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+											{
+
+												fails = 0;
+
+												entryId = reader.GetInt64(0);
+
+												DateTime occurredAt = reader.GetDateTime(1);
+
+												string ip = reader.IsDBNull(3) ? IpAddress.DEFAULT.Ip : reader.GetString(3);
+
+												string user = reader.IsDBNull(4) ? UserInLog.ANONYMOUS.Id : reader.GetString(4);
+
+												bool scriptIsNull = reader.IsDBNull(2);
+												bool actionIsNull = reader.IsDBNull(5);
+
+												// Phase 4 of the Action refactor: process Define rows.
+												if (!scriptIsNull && !actionIsNull)
+												{
+													int defineActionId = reader.GetInt32(5);
+													string defineStatementText = reader.GetString(2);
+													EventJournalClient.AddKnownActionFromDefine(defineActionId, defineStatementText);
+													continue;
+												}
+
+												if (scriptIsNull)
+												{
+													int actionId = reader.GetInt32(5);
+
+													// Phase 5: legacy LoadSingleAction recovery lookup
+													// dropped — Define entries in the journal populate
+													// the cache by construction.
+
+													string arguments = reader.GetString(6);
+
+													string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+
+												var actionData = base.EventDataPool.RentAction();
+													actionData.EntryId = entryId;
+													actionData.Ip = ip;
+													actionData.User = user;
+													actionData.OccurredAt = occurredAt;
+													actionData.ActionId = actionId;
+													actionData.Arguments = arguments;
+													actionData.ExposeData = exposeJson;
+
+													EventJournalClient.ReplayEvent(actionData);
+												}
+												else
+												{
+													string script = reader.GetString(2);
+													string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+
+													var scriptData = base.EventDataPool.RentScript();
+													scriptData.EntryId = entryId;
+													scriptData.Ip = ip;
+													scriptData.User = user;
+													scriptData.OccurredAt = occurredAt;
+													scriptData.Script = script;
+													scriptData.ExposeData = exposeJson;
+
+													EventJournalClient.ReplayEvent(scriptData);
+												}
+											}
+											salirRead = true;
+										}
+										catch (MySqlException mysqlException)
+										{
+											intentos--;
+											fails++;
+											Console.WriteLine($"Current fails : {fails} Error in : {base.Name}.");
+											Console.WriteLine(mysqlException);
+											Console.WriteLine();
+										}
+									}
+								}
+								catch (Exception e)
+								{
+									Console.WriteLine($"Error in : {base.Name}.");
+									Console.WriteLine(e);
+								}
+								finally
+								{
+									reader.Close();
+								}
+							}
+						}
+						finally
+						{
+							connection.Close();
+						}
+					}
+
+					delta = ultimoId - entryId;
+					ultimoId = entryId;
+
+					if (delta == 0)
+					{
+						const bool AT_LEAST_IS_NECESSARY_ONE_MORE_TIME = false;
+						if (cantidadDeLeaderInitialization < 1)
+						{
+							EventJournalClient.EndJournalReplay(forcedToEnd: !canContinueReplay);
+							salir = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
+							cantidadDeLeaderInitialization++;
+						}
+						else
+						{
+							salir = delta == 0;
+						}
+					}
+					else
+					{
+						salir = delta == 0;
+					}
+				}
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine($"Error in : {base.Name}.");
+				Console.WriteLine(e);
+			}
+
+			return ultimoId;
+		}
+
+		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		{
+			return Task.FromResult(RehydrateFromEvent(afterEntryId, direction));
+		}
+
+		protected internal override long GetLastProcessedEntryId(int followerId)
+		{
+			string sql = $"SELECT DiaryId FROM Follower WHERE FollowerId = {followerId}";
+			long result = 0;
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							result = reader.GetInt64("DiaryId");
+						}
+						reader.Close();
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+			return result;
+		}
+
+		protected internal override void SaveLastProcessedEntryId(int followerId, long lastEntryId)
+		{
+			if (followerId <= 0) throw new LanguageException("Follower Id must be upper than zero");
+			if (lastEntryId <= 0) throw new LanguageException($"Last processed entry id '{lastEntryId}' must be greater than zero");
+
+			long lastProcessedEntryId = EventJournalClient.GetLastProcessedEntryId(followerId);
+			if (lastEntryId > lastProcessedEntryId)
+			{
+				string sql;
+				if (lastProcessedEntryId != 0)
+					sql = $"UPDATE Follower SET DiaryId = {lastEntryId} WHERE FollowerId = {followerId}";
+				else
+					sql = $"INSERT INTO Follower (FollowerId, DiaryId, Description) VALUES ({followerId}, {lastEntryId}, '{EventJournalClient.ActorName} Follower')";
+
+				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+				{
+					try
+					{
+						connection.Open();
+						using (MySqlCommand command = new MySqlCommand(sql, connection))
+						{
+							command.CommandType = CommandType.Text;
+							command.ExecuteNonQuery();
+						}
+					}
+					finally
+					{
+						connection.Close();
+					}
+				}
+			}
+		}
+
+		protected internal override async Task WriteScriptEntryAsync(long entryId, string script, string ip, string user, DateTime now, string exposeData)
+		{
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					await connection.OpenAsync();
+
+					string sql;
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+
+					if (hasExposeData)
+					{
+						sql = mySqlWriteScriptCommandWithExposeData;
+					}
+					else
+					{
+						sql = mySqlWriteScriptCommand;
+					}
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@id", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@Script", script);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						await command.ExecuteNonQueryAsync();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					await connection.CloseAsync();
+				}
+			}
+		}
+
+		// Phase 6 of the Action refactor: dropped WriteActionEntryAsync +
+		// WriteNewActionEntryAsync overrides. Use WriteInvocationEntryAsync /
+		// WriteDefineEntryAsync / WriteDefineWithFirstInvocationAsync.
+
+		protected internal override void WriteScriptEntry(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		{
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					string sql;
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+
+					if (hasExposeData)
+					{
+						sql = mySqlWriteScriptCommandWithExposeData;
+					}
+					else
+					{
+						sql = mySqlWriteScriptCommand;
+					}
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@id", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@Script", script);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						command.ExecuteNonQuery();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		// Phase 6 of the Action refactor: dropped WriteActionEntry and
+		// WriteNewActionEntry overrides. The post-cutover write API is
+		// WriteScriptEntry / WriteDefineEntry / WriteInvocationEntry /
+		// WriteDefineWithFirstInvocation.
+
+		// Phase 3 of the Action refactor (project_puppeteer_action_refactor_plan.md):
+		// new write APIs for the post-cutover path. WriteDefineEntry inserts a row
+		// in the journal with `script` populated by the canonical Define sentence
+		// and `action` populated by actionId — the post-cutover discriminator
+		// (script != NULL ∧ action != NULL → Define). NO INSERT into the lateral
+		// _ACTION table — that is the legacy WriteNewActionEntry's job, and
+		// Phase 6 drops the table entirely. Replay silently skips Define rows in
+		// Phase 3 (see the discriminator update in RehydrateFromEvent).
+		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		{
+			ArgumentNullException.ThrowIfNull(defineStatementText);
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+					string sql = hasExposeData ? mySqlWriteDefineCommandWithExposeData : mySqlWriteDefineCommand;
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@EntryId", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						command.ExecuteNonQuery();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir Define entry en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		{
+			ArgumentNullException.ThrowIfNull(defineStatementText);
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					await connection.OpenAsync();
+
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+					string sql = hasExposeData ? mySqlWriteDefineCommandWithExposeData : mySqlWriteDefineCommand;
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@EntryId", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						await command.ExecuteNonQueryAsync();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir Define entry async en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					await connection.CloseAsync();
+				}
+			}
+		}
+
+		// WriteInvocationEntry inserts an invocation row in the journal:
+		// script = NULL, action = actionId, arguments = args. Phase 6 of the
+		// Action refactor dropped the legacy WriteActionEntry — this is the
+		// only path for invocations post-cutover.
+		protected internal override void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		{
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+					string sql = hasExposeData ? mySqlWriteInvocationCommandWithExposeData : mySqlWriteInvocationCommand;
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@EntryId", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+						command.Parameters.AddWithValue("@Arguments", arguments);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						command.ExecuteNonQuery();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir Invocation entry en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		{
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					await connection.OpenAsync();
+
+					bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+					string sql = hasExposeData ? mySqlWriteInvocationCommandWithExposeData : mySqlWriteInvocationCommand;
+
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@EntryId", entryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+						command.Parameters.AddWithValue("@Arguments", arguments);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@DiaryId", entryId);
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						await command.ExecuteNonQueryAsync();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception("Error al escribir Invocation entry async en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					await connection.CloseAsync();
+				}
+			}
+		}
+
+		// Phase 4 atomic write — see DiaryStorage.cs for the contract. Wraps the
+		// two INSERTs in an explicit BEGIN/COMMIT pair so the pair is transactional
+		// — either both rows land in the journal or neither does.
+		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		{
+			ArgumentNullException.ThrowIfNull(defineStatementText);
+			ArgumentNullException.ThrowIfNull(arguments);
+
+			bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+			string sql = hasExposeData
+				? $@"
+					BEGIN;
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);
+					COMMIT;"
+				: $@"
+					BEGIN;
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					COMMIT;";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
+						command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+						command.Parameters.AddWithValue("@Arguments", arguments);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						command.ExecuteNonQuery();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception($"Error al escribir Define+Invocation atomic en MySQL (actionId={actionId}). {e.Message}");
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		{
+			ArgumentNullException.ThrowIfNull(defineStatementText);
+			ArgumentNullException.ThrowIfNull(arguments);
+
+			bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
+			string sql = hasExposeData
+				? $@"
+					BEGIN;
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);
+					COMMIT;"
+				: $@"
+					BEGIN;
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					COMMIT;";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					await connection.OpenAsync();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
+						command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
+						command.Parameters.AddWithValue("@OccurredAt", now);
+						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
+						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
+						command.Parameters.AddWithValue("@ActionID", actionId);
+						command.Parameters.AddWithValue("@Arguments", arguments);
+
+						if (hasExposeData)
+						{
+							command.Parameters.AddWithValue("@ExposeJson", exposeData);
+						}
+
+						await command.ExecuteNonQueryAsync();
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+					throw new Exception($"Error al escribir Define+Invocation atomic async en MySQL (actionId={actionId}). {e.Message}");
+				}
+				catch (Exception e)
+				{
+					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
+					throw;
+				}
+				finally
+				{
+					await connection.CloseAsync();
+				}
+			}
+		}
+
+		internal override void ChangePrimaryKey()
+		{
+			Debug.WriteLine("Mysql tables doesn't need any change.");
+		}
+
+		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
+		{
+			return RehydrateFromEventAsync(afterEntryId, RehydrateDirection.Forward, includeExposeData);
+		}
+
+		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
+		{
+			IEnumerable<string> actorsNames = ListActorNames(Name);
+			if (actorsNames == null) return null;
+
+			//ClearZipStream();
+			MemoryStream compressedFileForArchive = new MemoryStream();
+			ZipArchive archive = new ZipArchive(compressedFileForArchive, ZipArchiveMode.Create, false);
+
+			StringBuilder insertString = new StringBuilder();
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				insertString.Append("USE ");
+				insertString.Append(connection.Database);
+				insertString.AppendLine(";");
+
+				try
+				{
+					connection.Open();
+					foreach (var aName in actorsNames)
+					{
+						msDairyPeriodRangeToExport = new MemoryStream();
+						swDairyPeriodRangeToExport = new StreamWriter(msDairyPeriodRangeToExport, Encoding.UTF8);
+
+
+						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd") + "_bak.sql";
+						string sql = $"SELECT OccurredAt, Ip, User, Script, Skip, Id FROM `{aName}` WHERE OccurredAt >= '{fechaInicio.ToString("yyyy-MM-dd HH:mm:ss")}' AND OccurredAt < '{fechaFin.ToString("yyyy-MM-dd HH:mm:ss")}' AND Skip = 1 ORDER BY id";
+						using (MySqlCommand command = new MySqlCommand(sql, connection))
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							if (!reader.HasRows) continue;
+
+							command.CommandTimeout = 60;
+							while (reader.Read())
+							{
+								DateTime occurredAt = reader.GetDateTime(0);
+								string script = reader.GetString(3);
+
+								string ip = reader.GetString(1);
+
+								UserInLog user = UserInLog.GenerateUserBasedOn(reader.GetString(2));
+								byte skip = Convert.ToByte(reader.GetBoolean(4));
+								int id = reader.GetInt32(5);
+
+								insertString.Append("INSERT INTO ");
+								insertString.Append(aName);
+								insertString.Append("(id, OccurredAt, Ip1, Ip2, Ip3, Ip4, User, Script, Skip) ");
+								insertString.Append("VALUES (");
+								insertString.Append(id);
+								insertString.Append(',');
+								insertString.Append("STR_TO_DATE('"); insertString.Append(occurredAt); insertString.Append("','%m/%d/%Y %h:%i:%s %p')");   //STR_TO_DATE('4/23/2019 9:37:16 AM','%m/%d/%Y %h:%i:%s %p')
+								insertString.Append(',');
+								insertString.Append(ip);
+								insertString.Append(',');
+								insertString.Append(user);
+								insertString.Append(',');
+								insertString.Append("'" + script.Replace("'", "\\\'").Replace("\"", "\\\"") + "'");
+								insertString.Append(',');
+								insertString.Append(skip);
+								insertString.AppendLine(");");
+
+								swDairyPeriodRangeToExport.Write(insertString);
+								swDairyPeriodRangeToExport.Flush();
+
+								insertString.Clear();
+							}
+							reader.Close();
+
+							if (msDairyPeriodRangeToExport != null) SaveTempFileToZip(archive, fileName);
+						}
+
+					}
+				}
+				finally
+				{
+					connection.Close();
+					archive.Dispose();
+					compressedFileForArchive.Dispose();
+				}
+			}
+
+			return compressedFileForArchive;
+		}
+
+		protected override internal IEnumerable<string> ListActorNames(string name)
+		{
+			List<string> actors = new List<string>();
+
+			var existActor = ProbarSiEsTablaNueva(name);
+			if (existActor && name != "general")
+			{
+				actors.Add(name);
+			}
+			else if (ProbarSiEsTablaNueva("general"))
+			{
+				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+				{
+					StringBuilder sql = new StringBuilder();
+
+					sql.Append("SELECT TABLE_NAME FROM ");
+					sql.Append(connection.Database);
+					sql.Append(".INFORMATION_SCHEMA.TABLES WHERE (TABLE_NAME LIKE 'C%' AND TABLE_NAME NOT LIKE 'C%[_]%')");
+					try
+					{
+						connection.Open();
+						using (MySqlCommand command = new MySqlCommand(sql.ToString(), connection))
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							while (reader.Read())
+							{
+								actors.Add(reader.GetString(0));
+							}
+							reader.Close();
+						}
+					}
+					finally
+					{
+						connection.Close();
+					}
+				}
+			}
+
+			return actors;
+		}
+
+		private bool ProbarSiEsTablaNueva(string tableName)
+		{
+			bool esTablaNueva = true;
+			string sql = $"SELECT 1 FROM `{tableName}` LIMIT 1";
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						var dataReader = command.ExecuteReader();
+						dataReader.Close();
+					}
+				}
+				catch
+				{
+					esTablaNueva = false;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return esTablaNueva;
+		}
+
+		protected internal override void Trim(DateTime trimmedDown)
+		{
+			IEnumerable<string> actorsNames = ListActorNames(Name);
+
+			StringBuilder sql = new StringBuilder();
+			const string POSTFIX = "_$OLD";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					foreach (var aName in actorsNames)
+					{
+						bool needsTrim = NeedsTrim(aName, trimmedDown);
+
+						if (needsTrim)
+						{
+							/*ARMA EL SCRIPT EL RENAME*/
+							sql.Append("RENAME TABLE ");
+							sql.Append(aName);
+							sql.Append(" TO ");
+							sql.Append(aName);
+							sql.Append(POSTFIX);
+							sql.Append(';');
+
+							using (MySqlCommand command = new MySqlCommand(sql.ToString(), connection))
+							{
+								command.ExecuteNonQuery();
+							}
+
+							sql.Clear();
+
+							CreateDiary(aName);
+
+							/*ARMA EL SCRIPT DE CRATE TABLE, INDICES Y DATA*/
+							sql.Append("INSERT INTO ");
+							sql.Append('`');
+							sql.Append(aName);
+							sql.Append('`');
+							sql.Append("(id, OccurredAt, Ip, User, Script, Skip) ");
+							sql.Append(" SELECT id, OccurredAt, Ip, User, Script, Skip FROM ");
+							sql.Append('`');
+							sql.Append(aName);
+							sql.Append(POSTFIX);
+							sql.Append('`');
+							sql.Append(" WHERE (Skip = 0");
+							sql.Append(" AND OccurredAt < '");
+							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss"));
+							sql.Append("') OR OccurredAt >= '");
+							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss"));
+							sql.Append("' ORDER BY id;");
+
+							/*ARMA EL SCRIPT DE DROP TABLE*/
+							sql.AppendLine();
+							sql.Append("DROP TABLE ");
+							sql.Append(aName);
+							sql.Append(POSTFIX);
+							sql.Append(';');
+
+							using (MySqlCommand command = new MySqlCommand(sql.ToString(), connection))
+							{
+								command.CommandTimeout = 200;
+								command.CommandType = CommandType.Text;
+								command.ExecuteNonQuery();
+							}
+						}
+					}
+				}
+				catch (MySqlException e)
+				{
+					Loggers.GetIntance().Db.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
+
+					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + sql + "]. " + e.Message);
+				}
+				finally
+				{
+					connection.Close();
+					sql.Clear();
+				}
+			}
+		}
+
+		private bool NeedsTrim(string aName, DateTime trimmedDown)
+		{
+			bool needsTrim = false;
+
+			string sql = $"SELECT * FROM `{aName}` WHERE Skip = 1 AND OccurredAt > '{trimmedDown.ToString("yyyy-M-dd HH:mm:ss.fff")}' LIMIT 1;";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql.ToString(), connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							needsTrim = true;
+						}
+						reader.Close();
+					}
+				}
+				catch
+				{
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return needsTrim;
+		}
+
+		protected internal static IEnumerable<string> GetActorsToLoad(string connectionString, double minimumContributionPercent)
+		{
+			if (minimumContributionPercent < 0 && minimumContributionPercent > 100) throw new ArgumentNullException(nameof(minimumContributionPercent));
+
+			List<int> acumuladoPorDia = new List<int>();
+			List<string> result = new List<string>(); ;
+
+
+			string statement = "SELECT DATEDIFF(CURDATE(), OccurredAt) As Dias, COUNT(*) As CuentasPorDia FROM accountsLRU GROUP BY DATEDIFF(CURDATE(), OccurredAt) ORDER BY Dias ASC;";
+			using (MySqlConnection connection = new MySqlConnection(connectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(statement, connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							var cuentasPorDia = reader.GetInt32(1);
+							acumuladoPorDia.Add(cuentasPorDia);
+						}
+						reader.Close();
+					}
+
+					int topDeCuentasACargar = CalcularMaximoDeActoresACargar(acumuladoPorDia, minimumContributionPercent);
+
+					statement = $"SELECT Cuenta, OccurredAt, DATEDIFF(CURDATE(), OccurredAt) As Dias FROM accountsLRU ORDER BY Dias Asc LIMIT {topDeCuentasACargar};";
+
+					using (MySqlCommand command = new MySqlCommand(statement, connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							result.Add(reader.GetString(0));
+						}
+						reader.Close();
+					}
+
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return result;
+		}
+
+		protected internal override long GetOrCreateReactionId(string formattedReaction)
+		{
+			ArgumentNullException.ThrowIfNull(formattedReaction);
+
+			// Primero intentar obtener el ID si ya existe
+			string selectSql = "SELECT Id FROM Reaction WHERE Reaction = @FormattedReaction";
+			long existingId = 0;
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					using (MySqlCommand command = new MySqlCommand(selectSql, connection))
+					{
+						command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							if (reader.Read())
+							{
+								existingId = reader.GetInt32("Id");
+							}
+							reader.Close();
+						}
+					}
+
+					if (existingId != 0)
+					{
+						return existingId;
+					}
+
+					// Does not exist: generate a new ID and insert.
+					// Get the current maximum ReactionId.
+					string maxIdSql = "SELECT COALESCE(MAX(Id), 0) FROM Reaction";
+					int newId = 0;
+					using (MySqlCommand command = new MySqlCommand(maxIdSql, connection))
+					{
+						object result = command.ExecuteScalar();
+						newId = Convert.ToInt32(result) + 1;
+					}
+
+					// Insertar el nuevo reaction
+					string insertSql = "INSERT INTO Reaction (Id, Reaction) VALUES (@ReactionId, @FormattedReaction)";
+					using (MySqlCommand command = new MySqlCommand(insertSql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", newId);
+						command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
+						command.ExecuteNonQuery();
+					}
+
+					existingId = newId;
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return existingId;
+		}
+
+		// FASE 5A: Checkpoint de dos fases - retorna tupla (detected, confirmed) en un solo acceso
+		protected internal override (long detected, long confirmed) GetReactionCheckpoint(long reactionId, int seekLevel)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+			if (seekLevel < 0) throw new LanguageException($"SeekLevel '{seekLevel}' must be zero or greater");
+
+			string sql = "SELECT IFNULL(DiaryId, 0), IFNULL(ConfirmedDiaryId, 0) FROM ReactionCheckpoint WHERE ReactionId = @ReactionId AND Pattern = @Pattern";
+			long detected = 0;
+			long confirmed = 0;
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", reactionId);
+						command.Parameters.AddWithValue("@Pattern", seekLevel);
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							if (reader.Read())
+							{
+								detected = reader.GetInt64(0);
+								confirmed = reader.GetInt64(1);
+							}
+							reader.Close();
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return (detected, confirmed);
+		}
+
+		// PHASE 5A: only save Confirmed after PerformCommand executes successfully.
+		protected internal override void SaveReactionConfirmedCheckpoint(long reactionId, int seekLevel, long entryId)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+			if (seekLevel < 0) throw new LanguageException($"SeekLevel '{seekLevel}' must be zero or greater");
+			if (entryId <= 0) throw new LanguageException($"Entry id '{entryId}' must be greater than zero");
+
+			var (detected, currentConfirmed) = GetReactionCheckpoint(reactionId, seekLevel);
+
+			if (entryId > currentConfirmed)
+			{
+				string sql;
+				if (detected != 0)
+				{
+					sql = "UPDATE ReactionCheckpoint SET ConfirmedDiaryId = @ConfirmedDiaryId WHERE ReactionId = @ReactionId AND Pattern = @Pattern";
+				}
+				else
+				{
+					sql = "INSERT INTO ReactionCheckpoint (ReactionId, Pattern, DiaryId, ConfirmedDiaryId) VALUES (@ReactionId, @Pattern, @ConfirmedDiaryId, @ConfirmedDiaryId)";
+				}
+
+				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+				{
+					try
+					{
+						connection.Open();
+						using (MySqlCommand command = new MySqlCommand(sql, connection))
+						{
+							command.Parameters.AddWithValue("@ReactionId", reactionId);
+							command.Parameters.AddWithValue("@Pattern", seekLevel);
+							command.Parameters.AddWithValue("@ConfirmedDiaryId", entryId);
+							command.ExecuteNonQuery();
+						}
+					}
+					finally
+					{
+						connection.Close();
+					}
+				}
+			}
+		}
+
+		// DEPRECATED: Mantener por compatibilidad, retorna Detected
+		protected internal override long GetReactionLastProcessedEntryId(long reactionId, int pattern)
+		{
+			var (detected, _) = GetReactionCheckpoint(reactionId, pattern);
+			return detected; // Retornar solo Detected por compatibilidad
+		}
+
+		// DEPRECATED: Mantener por compatibilidad, guarda ambos (detected = confirmed = lastEntryId)
+		protected internal override void SaveReactionLastProcessedEntryId(long reactionId, int pattern, long lastEntryId)
+		{
+			if (pattern < 0) throw new LanguageException("Pattern must be zero or upper");
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+			if (lastEntryId <= 0) throw new LanguageException($"Last processed entry id '{lastEntryId}' must be greater than zero");
+
+			var (detected, _) = GetReactionCheckpoint(reactionId, pattern);
+			if (lastEntryId > detected)
+			{
+				string sql;
+				if (detected != 0)
+					sql = "UPDATE ReactionCheckpoint SET DiaryId = @DiaryId, ConfirmedDiaryId = @DiaryId WHERE ReactionId = @ReactionId AND Pattern = @Pattern";
+				else
+					sql = "INSERT INTO ReactionCheckpoint (ReactionId, Pattern, DiaryId, ConfirmedDiaryId) VALUES (@ReactionId, @Pattern, @DiaryId, @DiaryId)";
+
+				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+				{
+					try
+					{
+						connection.Open();
+						using (MySqlCommand command = new MySqlCommand(sql, connection))
+						{
+							command.Parameters.AddWithValue("@ReactionId", reactionId);
+							command.Parameters.AddWithValue("@Pattern", pattern);
+							command.Parameters.AddWithValue("@DiaryId", lastEntryId);
+							command.ExecuteNonQuery();
+						}
+					}
+					finally
+					{
+						connection.Close();
+					}
+				}
+			}
+		}
+
+		protected internal override bool MarkEventsAsElidedWithCheckpoint(Follower.CheckpointCommit commit)
+		{
+			ArgumentNullException.ThrowIfNull(commit);
+
+			long reactionId = commit.ReactionId;
+			long[] eventIds = commit.EventIds;
+			DateTime timestamp = commit.Timestamp;
+			Follower.CheckpointVector newCheckpoint = commit.CheckpointVector;
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				connection.Open();
+				using (MySqlTransaction transaction = connection.BeginTransaction())
+				{
+					try
+					{
+						// Lexicographic comparison: allow matches that share events.
+						bool isGreater = false;
+						for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+						{
+							long newEntryId = newCheckpoint.Get(seekLevel);
+
+							string checkSql = "SELECT IFNULL(DiaryId, 0) FROM ReactionCheckpoint WHERE ReactionId = @ReactionId AND Pattern = @Pattern";
+							long currentEntryId = 0;
+
+							using (MySqlCommand checkCmd = new MySqlCommand(checkSql, connection, transaction))
+							{
+								checkCmd.Parameters.AddWithValue("@ReactionId", reactionId);
+								checkCmd.Parameters.AddWithValue("@Pattern", seekLevel);
+								var result = checkCmd.ExecuteScalar();
+								if (result != null && result != DBNull.Value)
+								{
+									currentEntryId = Convert.ToInt64(result);
+								}
+							}
+
+							if (newEntryId > currentEntryId)
+							{
+								isGreater = true;
+								break; // Primer nivel diferente y greaterThan
+							}
+							else if (newEntryId < currentEntryId)
+							{
+								transaction.Rollback();
+								return false; // Primer nivel diferente y lessThan
+							}
+							// Si assign, continuar
+						}
+
+						if (!isGreater)
+						{
+							transaction.Rollback();
+							return false; // Todos iguales o lessThan
+						}
+
+						foreach (long eventId in eventIds)
+						{
+							string insertElisionSql = @"
+								INSERT IGNORE INTO EventElision (DiaryId, ReactionId, Timestamp)
+								VALUES (@DiaryId, @ReactionId, @Timestamp)";
+
+							using (MySqlCommand insertCmd = new MySqlCommand(insertElisionSql, connection, transaction))
+							{
+								insertCmd.Parameters.AddWithValue("@DiaryId", eventId);
+								insertCmd.Parameters.AddWithValue("@ReactionId", reactionId);
+								insertCmd.Parameters.AddWithValue("@Timestamp", timestamp);
+								insertCmd.ExecuteNonQuery();
+							}
+						}
+
+						// Phase 5A: save ONLY Detected (Confirmed is saved after PerformCommand succeeds).
+						for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+						{
+							long newDetected = newCheckpoint.Get(seekLevel);
+
+							string upsertCheckpointSql = @"
+								INSERT INTO ReactionCheckpoint (ReactionId, Pattern, DiaryId, ConfirmedDiaryId)
+								VALUES (@ReactionId, @Pattern, @DiaryId, 0)
+								ON DUPLICATE KEY UPDATE DiaryId = @DiaryId";
+
+							using (MySqlCommand upsertCmd = new MySqlCommand(upsertCheckpointSql, connection, transaction))
+							{
+								upsertCmd.Parameters.AddWithValue("@ReactionId", reactionId);
+								upsertCmd.Parameters.AddWithValue("@Pattern", seekLevel);
+								upsertCmd.Parameters.AddWithValue("@DiaryId", newDetected);
+								upsertCmd.ExecuteNonQuery();
+							}
+						}
+
+						transaction.Commit();
+						return true;
+					}
+					catch
+					{
+						transaction.Rollback();
+						throw;
+					}
+				}
+			}
+		}
+
+		protected internal override long? NextNonElided(long entryId, RehydrateDirection direction)
+		{
+			if (entryId < 0) throw new LanguageException("entryId must be zero or greater.");
+
+			// Materialize v2 / Fase 0.5: Skip column autoritativa, sin LEFT JOIN.
+			string sql;
+			if (direction == RehydrateDirection.Forward)
+			{
+				sql = $@"SELECT MIN(j.id) FROM `{Name}` j
+					WHERE j.Skip = 0 AND j.id > @afterId";
+			}
+			else if (direction == RehydrateDirection.Backward)
+			{
+				sql = $@"SELECT MAX(j.id) FROM `{Name}` j
+					WHERE j.Skip = 0 AND j.id < @afterId";
+			}
+			else
+			{
+				throw new ArgumentException($"Unknown direction '{direction}'.", nameof(direction));
+			}
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@afterId", entryId);
+						object result = command.ExecuteScalar();
+						if (result == null || result == DBNull.Value) return null;
+						return Convert.ToInt64(result);
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		// Etapa 5 del refactor Distill. Reemplaza el throw NotImplementedException
+		// heredado del base. Materializa fisicamente las elisiones acumuladas en
+		// EventElision: borra los rows de `{Name}` cuyos ids estan en EventElision
+		// (junto con sus entradas en EventElision), excepto el record con MAX(id) —
+		// invariante "ultimo record nunca se elide fisicamente".
+		//
+		// Semantica: single transaction. Si falla, rollback completo.
+		// El outer rwLock de ActorHandler ya serializa con WriteScriptEntry /
+		// MarkEventsAsElidedWithCheckpoint, so the SET of IDs to delete does not
+		// puede cambiar mientras corremos.
+		//
+		// EventElision sirve a un solo actor — el principio "one actor per database"
+		// (ver memoria project_actor_per_db_principle.md) garantiza que todos los rows
+		// de la tabla pertenecen a este actor. El INNER JOIN con `{Name}` es defensivo
+		// (evita afectar rows sin journal entry correspondiente) no necesario para
+		// aislamiento cross-actor.
+		protected internal override void Distill()
+		{
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				connection.Open();
+				using (MySqlTransaction transaction = connection.BeginTransaction())
+				{
+					try
+					{
+						// Snapshot del max id (preserve para la invariante).
+						long maxId;
+						string maxIdSql = $"SELECT COALESCE(MAX(id), 0) FROM `{Name}`";
+						using (MySqlCommand cmd = new MySqlCommand(maxIdSql, connection, transaction))
+						{
+							object result = cmd.ExecuteScalar();
+							maxId = (result == null || result == DBNull.Value) ? 0 : Convert.ToInt64(result);
+						}
+
+						if (maxId == 0)
+						{
+							// Journal vacio, nada que destilar.
+							transaction.Commit();
+							return;
+						}
+
+						// Capturar IDs a remover en una tabla temporal. Tiene tres ventajas:
+						//  - Permite el DELETE en `{Name}` sin la restriccion MySQL de "can't
+						//    delete from table referenced in subquery".
+						//  - El conjunto se calcula una sola vez (consistencia entre los dos DELETEs).
+						//  - Acota a IDs presentes en NUESTRO journal (defensiva ante posibles
+						//    DiaryIds colisionantes con otros actores en la tabla global).
+						using (MySqlCommand cmd = new MySqlCommand(
+							$@"CREATE TEMPORARY TABLE _distill_ids_{Name} (id BIGINT PRIMARY KEY) ENGINE=Memory;
+							INSERT INTO _distill_ids_{Name}
+							SELECT j.id FROM `{Name}` j
+							INNER JOIN EventElision e ON j.id = e.DiaryId
+							WHERE j.id <> @MaxId;", connection, transaction))
+						{
+							cmd.Parameters.AddWithValue("@MaxId", maxId);
+							cmd.ExecuteNonQuery();
+						}
+
+						using (MySqlCommand cmd = new MySqlCommand(
+							$@"DELETE FROM EventElision
+							WHERE DiaryId IN (SELECT id FROM _distill_ids_{Name});
+
+							DELETE FROM `{Name}`
+							WHERE id IN (SELECT id FROM _distill_ids_{Name});
+
+							DROP TEMPORARY TABLE _distill_ids_{Name};", connection, transaction))
+						{
+							cmd.ExecuteNonQuery();
+						}
+
+						transaction.Commit();
+					}
+					catch
+					{
+						try { transaction.Rollback(); } catch { }
+						throw;
+					}
+				}
+			}
+		}
+
+		// Paper 5 / Materialize v2 — Fase 2. Read raw records (sin filtrar Skip).
+		// Capa 1 del wire (records solos, sin elision markers ni checkpoints —
+		// esos vienen en Fase 3 via (c)+(d)). Distincion por columna: Script != NULL
+		// AND Action IS NULL = Script entry; Script != NULL AND Action != NULL = Define;
+		// Script IS NULL AND Action != NULL = Invocation.
+		protected internal override void ReadRecordsAfter(long afterEntryId, List<MaterializationRecord> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			if (afterEntryId < 0) throw new LanguageException($"afterEntryId {afterEntryId} must be zero or greater.");
+
+			result.Clear();
+
+			string sql = $@"
+				SELECT d.id, d.OccurredAt, d.Ip, d.User, d.Script, d.Action, d.Arguments, ed.ExposeJson
+				FROM `{Name}` d
+				LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
+				WHERE d.id > @afterId
+				ORDER BY d.id ASC";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@afterId", afterEntryId);
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							while (reader.Read())
+							{
+								result.Add(MapRowToRecord(reader));
+							}
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		protected internal override async Task ReadRecordsAfterAsync(long afterEntryId, List<MaterializationRecord> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			if (afterEntryId < 0) throw new LanguageException($"afterEntryId {afterEntryId} must be zero or greater.");
+
+			result.Clear();
+
+			string sql = $@"
+				SELECT d.id, d.OccurredAt, d.Ip, d.User, d.Script, d.Action, d.Arguments, ed.ExposeJson
+				FROM `{Name}` d
+				LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
+				WHERE d.id > @afterId
+				ORDER BY d.id ASC";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					await connection.OpenAsync();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@afterId", afterEntryId);
+						using (MySqlDataReader reader = (MySqlDataReader)await command.ExecuteReaderAsync())
+						{
+							while (await reader.ReadAsync())
+							{
+								result.Add(MapRowToRecord(reader));
+							}
+						}
+					}
+				}
+				finally
+				{
+					await connection.CloseAsync();
+				}
+			}
+		}
+
+		// Materialize v2 / Fase 3 — wire verb (c) DameCheckpointsHasta.
+		// Snapshot atomic del registry de reactions desde tabla Reaction (schema
+		// global por DB: Id INT PK, Reaction TEXT). Una row por (formattedReaction).
+		protected internal override void ReadReactionRegistry(List<MaterializationReactionDefinition> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			result.Clear();
+
+			string sql = "SELECT Id, Reaction FROM Reaction ORDER BY Id";
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							long id = reader.GetInt32(0);
+							string reactionText = reader.GetString(1);
+							result.Add(new MaterializationReactionDefinition(id, reactionText));
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		// Snapshot atomic de checkpoints. Tabla ReactionCheckpoint(ReactionId,
+		// Pattern, DiaryId, ConfirmedDiaryId). 'DiaryId' es el campo de Detected
+		// (legacy naming); 'ConfirmedDiaryId' es Confirmed.
+		protected internal override void ReadReactionCheckpoints(List<MaterializationReactionCheckpoint> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			result.Clear();
+
+			string sql = "SELECT ReactionId, Pattern, DiaryId, ConfirmedDiaryId FROM ReactionCheckpoint ORDER BY ReactionId, Pattern";
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					using (MySqlDataReader reader = command.ExecuteReader())
+					{
+						while (reader.Read())
+						{
+							long reactionId = reader.GetInt32(0);
+							int seekLevel = reader.GetInt32(1);
+							long detected = reader.GetInt64(2);
+							long confirmed = reader.GetInt64(3);
+							result.Add(new MaterializationReactionCheckpoint(reactionId, seekLevel, detected, confirmed));
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
+		private static MaterializationRecord MapRowToRecord(MySqlDataReader reader)
+		{
+			long entryId = reader.GetInt64(0);
+			DateTime occurredAt = reader.GetDateTime(1);
+			string ip = reader.IsDBNull(2) ? null : reader.GetString(2);
+			string user = reader.IsDBNull(3) ? null : reader.GetString(3);
+			string script = reader.IsDBNull(4) ? null : reader.GetString(4);
+			int? actionId = reader.IsDBNull(5) ? null : reader.GetInt32(5);
+			string arguments = reader.IsDBNull(6) ? null : reader.GetString(6);
+			string exposeData = reader.IsDBNull(7) ? null : reader.GetString(7);
+
+			// Discriminator per Phase 6 of the Action refactor:
+			//   script != NULL ∧ action IS NULL  → Script entry
+			//   script != NULL ∧ action != NULL  → Define entry
+			//   script IS NULL ∧ action != NULL  → Invocation entry
+			if (script != null && actionId == null)
+			{
+				return new MaterializationRecord(
+					entryId, MaterializationRecordKind.Script, occurredAt, ip, user,
+					script, 0, null, null, exposeData);
+			}
+			if (script != null && actionId != null)
+			{
+				return new MaterializationRecord(
+					entryId, MaterializationRecordKind.Define, occurredAt, ip, user,
+					null, actionId.Value, null, script, exposeData);
+			}
+			if (script == null && actionId != null)
+			{
+				return new MaterializationRecord(
+					entryId, MaterializationRecordKind.Invocation, occurredAt, ip, user,
+					null, actionId.Value, arguments, null, exposeData);
+			}
+
+			throw new LanguageException($"Journal row id={entryId} has inconsistent Script/Action shape (both NULL).");
+		}
+
+	}
+
+}

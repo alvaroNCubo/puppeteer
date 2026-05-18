@@ -2,6 +2,9 @@
 bin/
 obj/
 
+# Sync tooling — local cherry-pick script from Pacifico, must not be published.
+sync-from-pacifico.ps1
+
 # Test infrastructure — must never cross the public boundary.
 # Test projects live in Pacifico (private) and are mirrored into
 # tests-local/ only for local validation against this public clone.
@@ -21,6 +24,16 @@ PuppeteerKey.snk
 *.suo
 .idea/
 *.DotSettings.user
+
+# Local build/test logs from `dotnet build` / `dotnet test` runs.
+build.log
+test.log
+
+# Lab tests write their CSV outputs to a sibling-repo relative path
+# (puppeteer-papers/data/...). When run from this clone, that path
+# resolves inside the working tree. The lab data belongs in the
+# puppeteer-papers repo, not here.
+puppeteer-papers/
 
 # OS junk
 Thumbs.db

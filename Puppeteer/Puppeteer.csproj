@@ -1,0 +1,59 @@
+﻿
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <DefineConstants>$(DefineConstants);PUPPETEER_HIDE_INTERNALS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="app.config" />
+    <None Remove="packages.config" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="log4net" Version="3.1.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Abstractions" Version="2.2.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Core" Version="2.2.5" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.2" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" Version="16.4.43" />
+    <PackageReference Include="MySql.Data" Version="9.3.0" />
+    <PackageReference Include="Sodium.Core" Version="1.4.0" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.5" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <GeneratePackageOnBuild>False</GeneratePackageOnBuild>
+    <Title>Puppeteer</Title>
+    <Description>Puppeteer is an orchestration and persistence middleware that combines CQRS (Command Query Responsibility Segregation) with Event Sourcing, designed to deliver transparent, low-latency persistence in distributed applications.</Description>
+    <Company>NCubo Ideas</Company>
+    <Copyright>Copyright © 2025</Copyright>
+    <GenerateDocumentationFile>False</GenerateDocumentationFile>
+    <VersionPrefix>2.0.1</VersionPrefix>
+    <AssemblyVersion>2.0.1</AssemblyVersion>
+    <PackageId>Ncubo.Puppeteer</PackageId>
+    <Authors>NCubo Ideas</Authors>
+    <PackageProjectUrl>https://github.com/alvaroNCubo/puppeteer-github-public</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/alvaroNCubo/puppeteer-github-public</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>false</IncludeSymbols>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);IncluirChoreographyEnPaquete</TargetsForTfmSpecificBuildOutput>
+  </PropertyGroup>
+
+  <Target Name="IncluirChoreographyEnPaquete">
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)..\Choreography\bin\$(Configuration)\$(TargetFramework)\Choreography.dll')"
+           Text="No se encontro Choreography.dll. Antes de 'dotnet pack' ejecuta 'dotnet build Puppeteer.sln --configuration $(Configuration)' para compilar Choreography." />
+    <ItemGroup>
+      <BuildOutputInPackage Include="$(MSBuildThisFileDirectory)..\Choreography\bin\$(Configuration)\$(TargetFramework)\Choreography.dll" />
+    </ItemGroup>
+  </Target>
+
+</Project>

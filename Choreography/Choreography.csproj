@@ -1,0 +1,44 @@
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <GeneratePackageOnBuild>False</GeneratePackageOnBuild>
+    <IsPackable>false</IsPackable>
+    <Title>Choreography</Title>
+    <Description>Patrones de arquitectura distribuida para Puppeteer. StageManager implementa Replicated State Machine over an opportunistic P2P transport.</Description>
+    <Company>NCubo Ideas</Company>
+    <Copyright>Copyright © 2025</Copyright>
+    <GenerateDocumentationFile>False</GenerateDocumentationFile>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <AssemblyVersion>0.1.0</AssemblyVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+  </ItemGroup>
+
+  <!-- Paper 7 Phase 2: HttpsTransport runs on Kestrel with a self-signed
+       TLS certificate so peers in separate Docker containers can connect.
+       Hosts of Choreography therefore need the ASP.NET Core shared
+       framework available at runtime — the same situation as any other
+       .NET 9 web application. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Puppeteer\Puppeteer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="UnitTestChoreography" />
+    <InternalsVisibleTo Include="Choreography.Observability.ElasticApm" />
+    <!-- Paper 7 Phase 1 existence-proof harness needs the same access to
+         InMemoryTransport (sealed internal, exposes the ClearRegistry test
+         helper) that UnitTestChoreography uses. The harness lives outside
+         Puppeteer.sln by design — see UnitTestPaper7EShop/UnitTestPaper7EShop.csproj. -->
+    <InternalsVisibleTo Include="UnitTestPaper7EShop" />
+  </ItemGroup>
+
+</Project>
