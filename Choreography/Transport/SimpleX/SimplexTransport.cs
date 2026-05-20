@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using Choreography.StageManager;
+using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
 {
@@ -177,7 +178,7 @@ namespace Choreography.Transport.SimpleX
             using (var awaitCts = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
             {
                 SmpMsg msg = await reverseReader.ReadAsync(awaitCts.Token);
-                byte[] fkBytes = DecryptServerEnvelope(msg.EncryptedBody, reverseQueue);
+                byte[] fkBytes = DecryptServerEnvelope(msg, reverseQueue);
                 forwardKey = ForwardKeyEnvelope.Deserialize(fkBytes);
                 await _client.AcknowledgeAsync(reverseQueue, msg.MsgId, CancellationToken.None);
             }
@@ -222,11 +223,12 @@ namespace Choreography.Transport.SimpleX
                 firstMsg = await reader.ReadAsync(timeoutCts.Token);
             }
 
-            // 2. C2S decryption + paddedString unwrap. El SMP server encripta MSG bodies
-            //    en delivery con crypto_box(serverDhSec, recipientDhPub). El recipient
-            //    decrypta con crypto_box_open(recipientDhSec, serverDhPub) y luego
-            //    desempaqueta el paddedString del SEND body.
-            byte[] envelopeBytes = DecryptServerEnvelope(firstMsg.EncryptedBody, forwardQueue);
+            // 2. C2S decryption + paddedString unwrap. El SMP server encripta MSG bodies en
+            //    delivery con NaCl crypto_box (X25519(srvDhSec,rcvDhPub) + HSalsa20-zero-nonce)
+            //    y msgId padded-a-24 como nonce. El recipient decripta con la misma derivacion
+            //    sobre su rcvDhSec + serverDhPub, luego unpad del paddedString y skip del meta
+            //    block (SystemTime + MsgFlags + ' ') para recuperar el msgBody original.
+            byte[] envelopeBytes = DecryptServerEnvelope(firstMsg, forwardQueue);
             var envelope = ReverseQueueEnvelope.Deserialize(envelopeBytes);
 
             if (envelope.SenderSignPubKey == null || envelope.SenderDhPubKey == null)
@@ -270,77 +272,36 @@ namespace Choreography.Transport.SimpleX
             return channel;
         }
 
-        // TODO PENDIENTE — Decrypt + unpad MSG body (C2S server-to-recipient layer).
+        // Decrypt + unwrap MSG body (C2S server-to-recipient layer).
         //
-        // El SMP server aplica una capa de cifrado al entregar MSGs al recipient. Sin
-        // implementar esta capa, el body recibido aparece como bytes pseudo-random
-        // (e.g. 16122B vs 222B enviados). La implementacion correcta requiere replicar
-        // exactamente el esquema de simplexmq:
+        // simplexmq Server.hs:2030-2036 — encryptMsg = cbEncryptMaxLenBS rcvDhSecret (cbNonce msgId).
+        // El server toma RcvMsgBody { msgTs, msgFlags, msgBody }, lo encodea como paddedString
+        // de tamano fijo y lo encripta con NaCl crypto_box. La key del shared es el X25519 entre
+        // serverDhSec_per_queue y recipientDhPub_per_queue (con el HSalsa20-zero-nonce wrap de
+        // NaCl crypto_box_beforenm; ver SmpCrypto.DecryptC2SEnvelope). El nonce es el msgId
+        // padeado a 24 bytes con ceros a la derecha. Wire layout:
         //
-        //   - simplexmq Crypto.hs: usa NaCl secretbox (XSalsa20-Poly1305) con una key
-        //     derivada por HKDF a partir del shared X25519 entre serverDhSec_per_queue
-        //     y recipientDhPub_of_queue, mas un "info" string especifico al protocolo.
-        //   - El nonce y formato exacto del wire body estan documentados en simplexmq
-        //     Transport.hs (`smpEncode SrvMessage` / `parseSrvMessage`).
-        //   - El plaintext desempaquetado contiene paddedString:
-        //       [Word16 BE bodyLen][bodyBytes]['#' padding hasta longitud fija]
-        //   - El bodyBytes puede a su vez tener una capa E2E adicional encriptada por
-        //     el sender, con el header e2eSenderDhPub + nonce + ciphertext.
+        //   EncryptedBody = [16-byte Poly1305 tag][16106-byte ciphertext]   (16122B total)
+        //   plaintext     = [Word16 BE bodyLen][rcvMsgBody bytes]['#' padding to 16106]
+        //   rcvMsgBody    = [SystemTime 8B][MsgFlags 1B + extras][' '][... msgBody ...]
         //
-        // Intento ingenuo crypto_box(recipientDhSec, decoded_serverDhPub) sobre
-        // [nonce(24)|ciphertext] falla con "Poly1305 tag mismatch" — el esquema correcto
-        // usa una key derivation distinta que NO esta documentada en el handoff doc del
-        // bug report. Es un workstream separado al envelope flow:
-        //
-        //   Cambios necesarios para validar end-to-end (referencia para devs futuros):
-        //   1. Estudiar simplexmq/src/Simplex/Messaging/Crypto.hs (`secretBox`, `kdfX3DH`).
-        //   2. Implementar mismo HKDF + nonce derivation en SmpCrypto.
-        //   3. Reemplazar el cuerpo de este metodo con la decripcion correcta.
-        //
-        // Lo que SI esta implementado y validado por unit tests:
-        //   - DecodeX25519PublicKeyDer (ASN.1 DER -> raw 32B) — listo para usarse aqui.
-        //   - Envelope serialization (ReverseQueueEnvelope, ForwardKeyEnvelope) — validados.
-        //   - El flow declarativo de handshake (this.AcceptInvitation / WaitForConnection)
-        //     ya cabla las pubkeys correctamente; solo falta el inverso de la capa C2S.
-        internal static byte[] DecryptServerEnvelope(byte[] msgBody, SmpQueue receivingQueue)
+        // Devuelve el msgBody (lo que el sender envio originalmente al SMP server).
+        internal static byte[] DecryptServerEnvelope(SmpMsg msg, SmpQueue receivingQueue)
         {
-            if (msgBody == null) throw new ArgumentNullException(nameof(msgBody));
+            if (msg == null) throw new ArgumentNullException(nameof(msg));
+            if (msg.EncryptedBody == null) throw new ArgumentNullException(nameof(msg) + ".EncryptedBody");
+            if (msg.MsgId == null) throw new ArgumentNullException(nameof(msg) + ".MsgId");
             if (receivingQueue == null) throw new ArgumentNullException(nameof(receivingQueue));
             if (receivingQueue.RecipientDhSecretKey == null)
                 throw new InvalidOperationException("Queue has no RecipientDhSecretKey");
             if (receivingQueue.ServerDhPublicKey == null)
                 throw new InvalidOperationException("Queue has no ServerDhPublicKey (set during NEW)");
 
-            // Intento naive: nonce + crypto_box(recipientDhSec, decoded_serverDhPub).
-            // Como se documenta arriba, este esquema produce Poly1305 mismatch contra el
-            // server real. Conservado como skeleton para el dev que implemente el HKDF
-            // + nonce derivation correctos de simplexmq.
-            if (msgBody.Length < SmpCrypto.NonceSize + 16)
-                throw new InvalidOperationException(
-                    $"MSG body demasiado corto ({msgBody.Length}B) para C2S layer");
-
-            byte[] nonce = new byte[SmpCrypto.NonceSize];
-            Buffer.BlockCopy(msgBody, 0, nonce, 0, SmpCrypto.NonceSize);
-
-            int ctLen = msgBody.Length - SmpCrypto.NonceSize;
-            byte[] ciphertext = new byte[ctLen];
-            Buffer.BlockCopy(msgBody, SmpCrypto.NonceSize, ciphertext, 0, ctLen);
-
-            byte[] serverDhPubRaw = SmpCrypto.DecodeX25519PublicKeyDer(receivingQueue.ServerDhPublicKey);
-            byte[] padded = SmpCrypto.Decrypt(ciphertext, nonce,
-                receivingQueue.RecipientDhSecretKey, serverDhPubRaw);
-
-            if (padded.Length < 2)
-                throw new InvalidOperationException(
-                    "Decrypted paddedString demasiado corto para length prefix");
-            int bodyLen = (padded[0] << 8) | padded[1];
-            if (bodyLen > padded.Length - 2)
-                throw new InvalidOperationException(
-                    $"paddedString bodyLen {bodyLen} excede plaintext disponible {padded.Length - 2}");
-
-            byte[] body = new byte[bodyLen];
-            Buffer.BlockCopy(padded, 2, body, 0, bodyLen);
-            return body;
+            byte[] rcvMsgBody = SmpCrypto.DecryptC2SEnvelope(
+                msg.EncryptedBody, msg.MsgId,
+                receivingQueue.RecipientDhSecretKey,
+                receivingQueue.ServerDhPublicKey);
+            return SmpCrypto.ExtractMsgBodyFromRcvMsgBody(rcvMsgBody);
         }
 
         private sealed class PendingInvitation

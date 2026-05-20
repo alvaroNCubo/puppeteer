@@ -118,6 +118,110 @@ namespace Choreography.Transport.SimpleX
             return SecretBoxOpen(ciphertext.ToArray(), nonce, sharedKey);
         }
 
+        // --- C2S (server-to-recipient) layer decryption ---
+        //
+        // simplexmq encrypta MSG bodies para entrega al recipient con NaCl crypto_box
+        // (XSalsa20-Poly1305 secretbox precedido de HSalsa20 con nonce-16-cero sobre el raw
+        // X25519 shared, conforme a NaCl crypto_box_beforenm). El nonce es el msgId padeado
+        // a 24 bytes con ceros a la derecha. Wire layout:
+        //
+        //   EncryptedBody = [16-byte Poly1305 tag][N-byte XSalsa20 ciphertext]
+        //
+        // Plaintext (post-secretbox_open) es un paddedString:
+        //
+        //   [Word16 BE bodyLen][bodyLen bytes rcvMsgBody]['#' padding hasta tamano fijo]
+        //
+        // rcvMsgBody contiene los meta del server + el body original que envio el sender:
+        //
+        //   [Word64 BE SystemTime (8B)][MsgFlags (1B 'F'/'T' + extras)][' '][... msgBody ...]
+        //
+        // Para handshake bootstrap (SEND unsigned), msgBody es el envelope serializado raw.
+        // Post-handshake (SEND signed), msgBody es a su vez [24B sender-nonce][crypto_box(...)].
+        //
+        // Aclaracion sobre cryptoBox de simplexmq: a primera vista parece usar el raw X25519
+        // shared como key directa de secretbox; en realidad simplexmq/src/Simplex/Messaging/Crypto.hs
+        // xSalsa20 hace XSalsa.initialize 20 secret (16zeros++iv0) seguido de XSalsa.derive iv1
+        // — dos cryptonite_xsalsa_derive consecutivas. La primera (con nonce todo en ceros)
+        // equivale a HSalsa20(secret, 16zeros) = crypto_box_beforenm. La segunda es la
+        // derivacion estandar HSalsa20(subkey, nonce[0..16]). Resultado: cryptoBox secret nonce
+        // = NaCl crypto_box(msg, nonce, recipientPub, senderSec) con secret = X25519 raw shared.
+        // Por eso reutilizamos Decrypt() (que ya hace DeriveSharedKey = HSalsa20 + SecretBoxOpen).
+        //
+        // Referencias simplexmq:
+        //   Server.hs:2030-2036  encryptMsg = cbEncryptMaxLenBS rcvDhSecret (cbNonce msgId)
+        //   Crypto.hs:1314-1316  cbEncryptMaxLenBS = cryptoBox secret nonce . padMaxLenBS
+        //   Crypto.hs            cryptoBox secret nonce s = tag <> c (sin nonce prepended)
+        //   Crypto.hs            cbNonce padea msgId a 24 con ceros a la derecha si es mas corto
+        //   Protocol.hs:313      MaxRcvMessageLen = 16104; padded size = 16106
+        //   Protocol.hs          encodeRcvMsgBody = [SystemTime 8B][MsgFlags + ' '][msgBody Tail]
+        public static byte[] DecryptC2SEnvelope(byte[] wireBody, byte[] msgId,
+            byte[] recipientDhSecretRaw, byte[] serverDhPublicKeyDer)
+        {
+            if (wireBody == null) throw new ArgumentNullException(nameof(wireBody));
+            if (msgId == null) throw new ArgumentNullException(nameof(msgId));
+            if (recipientDhSecretRaw == null) throw new ArgumentNullException(nameof(recipientDhSecretRaw));
+            if (recipientDhSecretRaw.Length != 32)
+                throw new ArgumentException($"recipient DH secret must be 32 bytes, got {recipientDhSecretRaw.Length}");
+            if (serverDhPublicKeyDer == null) throw new ArgumentNullException(nameof(serverDhPublicKeyDer));
+            if (wireBody.Length < MacSize + 2)
+                throw new ArgumentException($"wireBody demasiado corto ({wireBody.Length}B) para tag+lenPrefix");
+
+            // 1. Padear msgId a 24 bytes con ceros a la derecha (cbNonce de simplexmq).
+            byte[] nonce = new byte[NonceSize];
+            int copyLen = Math.Min(msgId.Length, NonceSize);
+            Buffer.BlockCopy(msgId, 0, nonce, 0, copyLen);
+
+            // 2. NaCl crypto_box_open con shared X25519 + HSalsa20(zeros) wrap. Reutiliza el
+            //    Decrypt() existente, que es bit-equivalente a Chaos.NaCl/libsodium per la
+            //    test suite SmpCrypto_*_ByteEqualsChaosNaCl_*.
+            byte[] serverDhPubRaw = DecodeX25519PublicKeyDer(serverDhPublicKeyDer);
+            byte[] padded = Decrypt(wireBody, nonce, recipientDhSecretRaw, serverDhPubRaw);
+
+            // 3. UnPad: [Word16 BE len][body][# padding]  ->  body de "len" bytes.
+            if (padded.Length < 2)
+                throw new InvalidOperationException("padded plaintext demasiado corto para Word16 length prefix");
+            int bodyLen = (padded[0] << 8) | padded[1];
+            if (bodyLen < 0 || bodyLen > padded.Length - 2)
+                throw new InvalidOperationException(
+                    $"paddedString bodyLen {bodyLen} excede plaintext disponible {padded.Length - 2}");
+            byte[] rcvMsgBody = new byte[bodyLen];
+            Buffer.BlockCopy(padded, 2, rcvMsgBody, 0, bodyLen);
+            return rcvMsgBody;
+        }
+
+        // Extrae el msgBody (lo que el sender realmente envio) del rcvMsgBody que el server
+        // encodea (simplexmq Protocol.hs encodeRcvMsgBody + clientRcvMsgBodyP):
+        //
+        //   rcvMsgBody = [SystemTime 8B][MsgFlags (1B boolean + 0..6B extras)][' '][... msgBody ...]
+        //
+        // Quota messages tienen otro prefijo ("QUOTA "); para handshake bootstrap el server
+        // entrega Messages normales, asi que tratamos QUOTA como error explicito.
+        public static byte[] ExtractMsgBodyFromRcvMsgBody(byte[] rcvMsgBody)
+        {
+            if (rcvMsgBody == null) throw new ArgumentNullException(nameof(rcvMsgBody));
+            if (rcvMsgBody.Length >= 6
+                && rcvMsgBody[0] == (byte)'Q' && rcvMsgBody[1] == (byte)'U'
+                && rcvMsgBody[2] == (byte)'O' && rcvMsgBody[3] == (byte)'T'
+                && rcvMsgBody[4] == (byte)'A' && rcvMsgBody[5] == (byte)' ')
+                throw new InvalidOperationException("Server entrego MsgQuota, no Message");
+
+            const int SystemTimeBytes = 8;
+            if (rcvMsgBody.Length < SystemTimeBytes + 2)
+                throw new InvalidOperationException(
+                    $"rcvMsgBody demasiado corto ({rcvMsgBody.Length}B) para meta block");
+
+            int idx = SystemTimeBytes + 1;
+            while (idx < rcvMsgBody.Length && rcvMsgBody[idx] != (byte)' ') idx++;
+            if (idx >= rcvMsgBody.Length)
+                throw new InvalidOperationException("rcvMsgBody sin space separador entre MsgFlags y msgBody");
+            idx++;
+
+            int len = rcvMsgBody.Length - idx;
+            byte[] msgBody = new byte[len];
+            Buffer.BlockCopy(rcvMsgBody, idx, msgBody, 0, len);
+            return msgBody;
+        }
+
         // --- Random ---
 
         public static byte[] GenerateNonce()
