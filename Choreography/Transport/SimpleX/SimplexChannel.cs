@@ -73,14 +73,33 @@ namespace Choreography.Transport.SimpleX
                 {
                     try
                     {
-                        // Decrypt: [nonce(24) | ciphertext]
-                        if (smpMsg.EncryptedBody.Length <= SmpCrypto.NonceSize) continue;
+                        // Wire layout que el SMP server entrega al recipient (mismo formato
+                        // que reciben AcceptInvitationAsync/WaitForConnectionAsync durante el
+                        // handshake):
+                        //
+                        //   Layer 1 (C2S, server-to-recipient):
+                        //     smpMsg.EncryptedBody = [16B Poly1305 tag][16106B padded crypto_box]
+                        //     -> DecryptServerEnvelope hace C2S unwrap + strip del meta block
+                        //        (SystemTime + MsgFlags + ' ') y devuelve el msgBody original
+                        //        que el sender envio.
+                        //
+                        //   Layer 2 (E2E, peer-to-peer):
+                        //     msgBody = [24B sender nonce][crypto_box(stage payload)]
+                        //     -> peer-decrypt con ECDH(myRecDhSec, peerSenderDhPub).
+                        //
+                        // Antes del fix este path aplicaba la Layer 2 directamente al
+                        // EncryptedBody sin haber strippeado el wrap C2S del server, lo que
+                        // disparaba Poly1305 tag mismatch en el primer (y todos los demas)
+                        // mensaje post-handshake (caso reportado en 2-Kora demos).
+                        byte[] msgBody = SimplexTransport.DecryptServerEnvelope(smpMsg, _inboundQueue);
+
+                        if (msgBody.Length <= SmpCrypto.NonceSize) continue;
 
                         byte[] nonce = new byte[SmpCrypto.NonceSize];
-                        Buffer.BlockCopy(smpMsg.EncryptedBody, 0, nonce, 0, SmpCrypto.NonceSize);
+                        Buffer.BlockCopy(msgBody, 0, nonce, 0, SmpCrypto.NonceSize);
 
-                        byte[] ciphertext = new byte[smpMsg.EncryptedBody.Length - SmpCrypto.NonceSize];
-                        Buffer.BlockCopy(smpMsg.EncryptedBody, SmpCrypto.NonceSize, ciphertext, 0, ciphertext.Length);
+                        byte[] ciphertext = new byte[msgBody.Length - SmpCrypto.NonceSize];
+                        Buffer.BlockCopy(msgBody, SmpCrypto.NonceSize, ciphertext, 0, ciphertext.Length);
 
                         // ECDH para decryptar: shared = ECDH(myRecDhSec, peerSenderDhPub).
                         // peerSenderDhPub se aprende del envelope de handshake (ver SimplexTransport).
@@ -107,14 +126,14 @@ namespace Choreography.Transport.SimpleX
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[SimplexChannel] Error processing message: {ex.Message}");
+                        Console.WriteLine($"[SimplexChannel:{Purpose}] Error processing message: {ex.Message}");
                     }
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimplexChannel] ReceivePump error: {ex.Message}");
+                Console.WriteLine($"[SimplexChannel:{Purpose}] ReceivePump error: {ex.Message}");
             }
             finally
             {
