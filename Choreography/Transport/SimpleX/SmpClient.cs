@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
 {
@@ -81,7 +82,9 @@ namespace Choreography.Transport.SimpleX
         // que se valida en SmpHandshake. Aqui simplemente trust-all en TLS.
         private sealed class SmpTlsClient : DefaultTlsClient, ISmpTlsClient
         {
-            public SmpTlsClient(BcTlsCrypto crypto) : base(crypto) { }
+            public SmpTlsClient(BcTlsCrypto crypto) : base(crypto)
+            {
+            }
 
             public bool HandshakeComplete { get; private set; }
 
@@ -357,27 +360,13 @@ namespace Choreography.Transport.SimpleX
                 while (!ct.IsCancellationRequested && IsConnected)
                 {
                     byte[] payload = await SmpBlock.ReadBlockAsync(_tlsStream, ct);
-                    SmpResponse response = SmpResponseParser.Parse(payload);
-
-                    // Route to pending request by corrId, or to subscription by queueId
-                    if (response.CorrelationId != null && response.CorrelationId.Length > 0)
+                    // El server puede batchear varias transmissions en un mismo block
+                    // (e.g. OK de un ACK previo + MSG server-push pendiente). Hay que
+                    // rutear TODAS, no solo la primera. Ver SmpResponseParser.ParseAll
+                    // para el detalle del bug historico (#2).
+                    foreach (var response in SmpResponseParser.ParseAll(payload))
                     {
-                        string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);
-                        if (_pending.TryGetValue(corrKey, out var tcs))
-                        {
-                            tcs.TrySetResult(response);
-                            continue;
-                        }
-                    }
-
-                    // MSG with no pending corrId → subscription delivery
-                    if (response is SmpMsg msg && response.QueueId != null)
-                    {
-                        string queueKey = SmpCrypto.ToBase64Url(response.QueueId);
-                        if (_queueSubscriptions.TryGetValue(queueKey, out var channel))
-                        {
-                            await channel.Writer.WriteAsync(msg, ct);
-                        }
+                        await RouteResponseAsync(response, ct);
                     }
                 }
             }
@@ -390,6 +379,30 @@ namespace Choreography.Transport.SimpleX
             {
                 Console.WriteLine($"[SmpClient] ReceivePump error: {ex.Message}");
                 HandleDisconnect();
+            }
+        }
+
+        private async Task RouteResponseAsync(SmpResponse response, CancellationToken ct)
+        {
+            // Route to pending request by corrId, or to subscription by queueId
+            if (response.CorrelationId != null && response.CorrelationId.Length > 0)
+            {
+                string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);
+                if (_pending.TryGetValue(corrKey, out var tcs))
+                {
+                    tcs.TrySetResult(response);
+                    return;
+                }
+            }
+
+            // MSG with no pending corrId → subscription delivery
+            if (response is SmpMsg msg && response.QueueId != null)
+            {
+                string queueKey = SmpCrypto.ToBase64Url(response.QueueId);
+                if (_queueSubscriptions.TryGetValue(queueKey, out var channel))
+                {
+                    await channel.Writer.WriteAsync(msg, ct);
+                }
             }
         }
 

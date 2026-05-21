@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
@@ -302,21 +303,46 @@ namespace Choreography.Transport.SimpleX
     //   command:  "TAG" [' ' arg1 arg2 ...]  o  "TAG" sin args
     internal static class SmpResponseParser
     {
-        public static SmpResponse Parse(byte[] payload)
+        // Parsea TODAS las transmissions del batch. El server SimpleX puede batchear
+        // varias transmissions en un mismo TLS block (Protocol.hs batchTransmissions_),
+        // tipicamente cuando una respuesta OK (e.g. a un ACK del cliente) coincide en la
+        // ventana de I/O con un MSG server-push pendiente para la misma queue.
+        //
+        // Bug historico (#2): el parser leia "count" pero solo deserializaba la primera
+        // transmission y descartaba el resto, lo que tiraba silenciosamente los MSGs
+        // batcheados con un OK de ACK. Como el server SMP entrega un MSG a la vez por
+        // queue (gated por ACK del cliente), perder un MSG dejaba la queue bloqueada
+        // sin error visible. Sintoma: el Cast recibia N entries y despues "silencio
+        // total", con N intermitente segun el timing de batching del server.
+        public static IReadOnlyList<SmpResponse> ParseAll(byte[] payload)
         {
             if (payload == null || payload.Length == 0)
                 throw new ArgumentException("Empty response");
 
-            // Server siempre envia en BATCH format: [count][Large len][t1]...
-            // Para nuestro flow request-response, recibimos count=1.
             if (payload.Length < 3) throw new IOException("Batch payload too short");
             int count = payload[0];
             if (count < 1) throw new IOException($"Batch count={count} unexpected");
-            int t1Len = (payload[1] << 8) | payload[2];
-            if (t1Len < 1 || t1Len > payload.Length - 3)
-                throw new IOException($"Batch t1 length {t1Len} invalid (payload {payload.Length}B)");
 
-            using var ms = new MemoryStream(payload, 3, t1Len);
+            var responses = new List<SmpResponse>(count);
+            int offset = 1;
+            for (int i = 0; i < count; i++)
+            {
+                if (offset + 2 > payload.Length)
+                    throw new IOException($"Batch transmission {i} length prefix truncated at offset {offset} (payload {payload.Length}B)");
+                int tLen = (payload[offset] << 8) | payload[offset + 1];
+                offset += 2;
+                if (tLen < 1 || offset + tLen > payload.Length)
+                    throw new IOException($"Batch transmission {i} length {tLen} invalid (offset {offset}, payload {payload.Length}B)");
+
+                responses.Add(ParseSingleTransmission(payload, offset, tLen));
+                offset += tLen;
+            }
+            return responses;
+        }
+
+        private static SmpResponse ParseSingleTransmission(byte[] payload, int offset, int tLen)
+        {
+            using var ms = new MemoryStream(payload, offset, tLen);
 
             byte[] _signature = ReadByteString(ms);
             byte[] _sessionId = ReadByteString(ms);
@@ -333,7 +359,7 @@ namespace Choreography.Transport.SimpleX
                 "ERR" => ParseErr(ms),
                 "END" => new SmpEnd(),
                 "PONG" => new SmpPong(),
-                _ => throw new InvalidOperationException($"Unknown SMP response tag: '{tag}' (raw payload prefix: {BitConverter.ToString(payload, 0, Math.Min(40, payload.Length))})")
+                _ => throw new InvalidOperationException($"Unknown SMP response tag: '{tag}' (raw transmission prefix: {BitConverter.ToString(payload, offset, Math.Min(40, tLen))})")
             };
 
             response.CorrelationId = corrId;
