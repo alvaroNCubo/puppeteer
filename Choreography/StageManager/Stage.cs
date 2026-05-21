@@ -310,9 +310,16 @@ namespace Choreography.StageManager
 
             if (IsDirector)
             {
+                // Fire-and-forget: el announce sale ya. El canal de Coordination
+                // es buffered (unbounded), asi que aun si el listener del Cast no
+                // arranco todavia el mensaje queda en queue y se procesa cuando
+                // arranca. Quitamos el Task.Delay(50) que era defensivo sin razon
+                // documentada — con WaitForDirectorAsync en ConnectToDirector el
+                // race del consumer ya esta cerrado por contrato del API, no por
+                // timing. Eliminar el delay tambien acelera el join del Cast en
+                // ~50ms en el caso KoraApp (Director ya activo cuando aparece Cast).
                 _ = Task.Run(async () =>
                 {
-                    await Task.Delay(50);
                     try { await channel.SendAsync(new DirectorAnnounce(Id, Id)); }
                     catch { }
                 });
