@@ -1,0 +1,124 @@
+# Paper 7 Phase 2 — THREE-node Choreography topology over real TLS.
+#
+# Per the Paper 7 thesis (PM addendum 2026-05-16, signed by Alvaro):
+# the demo is THREE RSM peers (not two). The host-side CLI is a
+# membership authority, NOT a peer (D2). To honour the "tres nodos" of
+# the thesis, the cross-container row of the 2×2 matrix runs three
+# PuppeteerHost containers in a full coordination mesh with the
+# Director role rotating across all three — mirroring the in-process
+# F1 test `ThreeStages_DirectorRotation_AllConverge`.
+#
+# Operator workflow (also automated by docker/run-demo.sh):
+#
+#   1. dotnet publish PuppeteerHost/PuppeteerHost.csproj -c Release \
+#                     -o docker/build/host
+#   2. Run the issuer CLI with --count 3 and capture the three share-
+#      links it prints.
+#   3. export ORDERING_A_SHARE_LINK="puppeteer-usher://v1/...A..."
+#      export ORDERING_B_SHARE_LINK="puppeteer-usher://v1/...B..."
+#      export ORDERING_C_SHARE_LINK="puppeteer-usher://v1/...C..."
+#   4. docker compose up --build
+#
+# Each container exposes its onboarding port (6443 inside) on a
+# DISTINCT host port (6443 / 6444 / 6445) so the laptop Usher can
+# POST UsherJoinResponse back to each of the three containers. The
+# peer-to-peer port (5443 inside) is NOT exposed: peer traffic stays
+# on the compose bridge network.
+
+services:
+
+  ordering-a:
+    image: puppeteer-host:paper7
+    build:
+      context: .
+      dockerfile: Dockerfile.host
+    container_name: ordering-a
+    hostname: ordering-a
+    environment:
+      # Peer transport
+      PUPPETEER_LISTEN_URL:               https://0.0.0.0:5443/
+      PUPPETEER_ADVERTISE_URL:            https://ordering-a:5443/
+      # Onboarding transport (TLS endpoint the Usher reaches back to)
+      PUPPETEER_ONBOARDING_LISTEN_URL:    https://0.0.0.0:6443/
+      PUPPETEER_ONBOARDING_ADVERTISE_URL: https://localhost:6443/
+      # Topology
+      PUPPETEER_NODE_ID:                  a
+      PUPPETEER_PEER_IDS:                 b,c
+      PUPPETEER_ROTATION_ORDER:           a,b,c
+      PUPPETEER_DEVICE_NAME:              ordering-a
+      # Workload regime: "inline" (default, used by 3-Docker first-pass
+      # demo) or "parametric" (closes the matrix's cross-container ×
+      # parametric cell). Override by exporting PUPPETEER_WORKLOAD_MODE
+      # before docker compose up; run-demo.sh --parametric does this.
+      PUPPETEER_WORKLOAD_MODE: ${PUPPETEER_WORKLOAD_MODE:-inline}
+      PUPPETEER_SHARE_LINK: ${ORDERING_A_SHARE_LINK?Run host-side CLI first and export ORDERING_A_SHARE_LINK}
+    networks: [puppeteer-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "6443:6443"
+    volumes:
+      - bootstrap:/bootstrap
+      - ordering-a-data:/data
+
+  ordering-b:
+    image: puppeteer-host:paper7
+    container_name: ordering-b
+    hostname: ordering-b
+    environment:
+      PUPPETEER_LISTEN_URL:               https://0.0.0.0:5443/
+      PUPPETEER_ADVERTISE_URL:            https://ordering-b:5443/
+      PUPPETEER_ONBOARDING_LISTEN_URL:    https://0.0.0.0:6443/
+      PUPPETEER_ONBOARDING_ADVERTISE_URL: https://localhost:6444/
+      PUPPETEER_NODE_ID:                  b
+      PUPPETEER_PEER_IDS:                 a,c
+      PUPPETEER_ROTATION_ORDER:           a,b,c
+      PUPPETEER_DEVICE_NAME:              ordering-b
+      PUPPETEER_WORKLOAD_MODE: ${PUPPETEER_WORKLOAD_MODE:-inline}
+      PUPPETEER_SHARE_LINK: ${ORDERING_B_SHARE_LINK?Run host-side CLI first and export ORDERING_B_SHARE_LINK}
+    networks: [puppeteer-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "6444:6443"
+    volumes:
+      - bootstrap:/bootstrap
+      - ordering-b-data:/data
+    depends_on:
+      - ordering-a
+
+  ordering-c:
+    image: puppeteer-host:paper7
+    container_name: ordering-c
+    hostname: ordering-c
+    environment:
+      PUPPETEER_LISTEN_URL:               https://0.0.0.0:5443/
+      PUPPETEER_ADVERTISE_URL:            https://ordering-c:5443/
+      PUPPETEER_ONBOARDING_LISTEN_URL:    https://0.0.0.0:6443/
+      PUPPETEER_ONBOARDING_ADVERTISE_URL: https://localhost:6445/
+      PUPPETEER_NODE_ID:                  c
+      PUPPETEER_PEER_IDS:                 a,b
+      PUPPETEER_ROTATION_ORDER:           a,b,c
+      PUPPETEER_DEVICE_NAME:              ordering-c
+      PUPPETEER_WORKLOAD_MODE: ${PUPPETEER_WORKLOAD_MODE:-inline}
+      PUPPETEER_SHARE_LINK: ${ORDERING_C_SHARE_LINK?Run host-side CLI first and export ORDERING_C_SHARE_LINK}
+    networks: [puppeteer-net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "6445:6443"
+    volumes:
+      - bootstrap:/bootstrap
+      - ordering-c-data:/data
+    depends_on:
+      - ordering-a
+
+networks:
+  puppeteer-net:
+    driver: bridge
+
+volumes:
+  bootstrap:
+  ordering-a-data:
+  ordering-b-data:
+  ordering-c-data:

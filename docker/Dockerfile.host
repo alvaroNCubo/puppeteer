@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+#
+# Paper 7 Phase 2 — runtime image for PuppeteerHost.
+#
+# The container does NOT compile inside Docker. Instead, the operator
+# pre-publishes the host on Windows (where the eShop Ordering.Domain
+# DLL is reachable via its absolute path) and the image just copies
+# the artifacts in:
+#
+#   dotnet publish PuppeteerHost/PuppeteerHost.csproj \
+#                  -c Release -o docker/build/host
+#   cd docker && docker compose build
+#
+# Choreography requires the ASP.NET Core shared framework at runtime
+# (Kestrel TLS); the aspnet:9.0 base image carries it.
+
+FROM mcr.microsoft.com/dotnet/aspnet:9.0
+WORKDIR /app
+COPY build/host/ ./
+
+ENV PUPPETEER_DATA_DIR=/data \
+    PUPPETEER_BOOTSTRAP_DIR=/bootstrap
+
+RUN mkdir -p /data /bootstrap
+
+# 5443 = peer transport (advertised to the other Docker on compose net)
+# 6443 = transient onboarding transport (reached BY the Usher on the host)
+EXPOSE 5443 6443
+
+ENTRYPOINT ["dotnet", "/app/puppeteer-host.dll"]
