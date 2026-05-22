@@ -384,7 +384,44 @@ namespace Choreography.Transport.SimpleX
 
         private async Task RouteResponseAsync(SmpResponse response, CancellationToken ct)
         {
-            // Route to pending request by corrId, or to subscription by queueId
+            // Bug #2-CATCHUP fix (2026-05-22): el SMP server "piggyback"-ea
+            // deliveries de MSG sobre la response del comando que las gatilla
+            // (SUB o ACK). Es decir, en lugar de devolver SmpOk al ACK y mandar
+            // el siguiente MSG aparte, devuelve UN solo SmpMsg con el corrId
+            // del ACK que entrega el OK implicito + el siguiente MSG. Ver
+            // simplexmq Server.hs subscribeQueue / acknowledgeMessage:
+            //   pure $ case mNextMsg of
+            //     Just msg -> Msg msg   -- piggyback en response del command
+            //     Nothing  -> Ok
+            //
+            // Bug previo (master): RouteResponseAsync ruteaba SmpMsg a `_pending`
+            // por corrId si matcheaba. El TCS del ACK recibia el SmpMsg, pero
+            // AcknowledgeAsync ignora SmpMsg (espera SmpOk/SmpErr). La queue
+            // subscription nunca veia el MSG → la entrada se perdia y el server
+            // dejaba de delivery-ar (gated por ACK). Sintoma: en catch-up batch,
+            // Cast aplicaba 1-2 entries de N esperadas, despues silencio total.
+            //
+            // Fix: si la response es SmpMsg, SIEMPRE rutearla a la subscription
+            // por queueId. Si encima tiene corrId pendiente, tambien despertamos
+            // al waiter (AcknowledgeAsync) para que el comando complete.
+            if (response is SmpMsg msg && response.QueueId != null)
+            {
+                string queueKey = SmpCrypto.ToBase64Url(response.QueueId);
+                if (_queueSubscriptions.TryGetValue(queueKey, out var channel))
+                    await channel.Writer.WriteAsync(msg, ct);
+
+                // Piggyback: si el server uso el corrId de un command pendiente,
+                // tambien despertamos al waiter para que el command complete.
+                if (response.CorrelationId != null && response.CorrelationId.Length > 0)
+                {
+                    string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);
+                    if (_pending.TryGetValue(corrKey, out var tcs))
+                        tcs.TrySetResult(response);
+                }
+                return;
+            }
+
+            // No-MSG responses (OK/IDS/ERR/END/PONG): solo van por corrId.
             if (response.CorrelationId != null && response.CorrelationId.Length > 0)
             {
                 string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);
@@ -392,16 +429,6 @@ namespace Choreography.Transport.SimpleX
                 {
                     tcs.TrySetResult(response);
                     return;
-                }
-            }
-
-            // MSG with no pending corrId → subscription delivery
-            if (response is SmpMsg msg && response.QueueId != null)
-            {
-                string queueKey = SmpCrypto.ToBase64Url(response.QueueId);
-                if (_queueSubscriptions.TryGetValue(queueKey, out var channel))
-                {
-                    await channel.Writer.WriteAsync(msg, ct);
                 }
             }
         }
