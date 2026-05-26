@@ -30,6 +30,11 @@ namespace Choreography.Transport.SimpleX
         // Server DH public key (from IDS response)
         public byte[] ServerDhPublicKey { get; set; }
 
+        // DH pub del peer remoto en su rol de Sender sobre esta queue. Se usa
+        // del lado Recipient para decryptar SENDs entrantes (shared = ECDH(my recDhSec, peer senderDhPub)).
+        // Se aprende del envelope de handshake (ReverseQueueEnvelope/ForwardKeyEnvelope).
+        public byte[] PeerSenderDhPublicKey { get; set; }
+
         public SmpQueueState State { get; set; }
         public SmpQueueRole Role { get; set; }
 
