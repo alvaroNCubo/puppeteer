@@ -1,6 +1,6 @@
 # Choreography — desarrollo en Windows
 
-Esta guía cubre cómo iterar sobre el módulo `Choreography` (especialmente el transport SimpleX) desde una máquina Windows. **Windows no es target de producción** — KoraApp corre en Android/iOS — pero es el entorno donde el dev itera.
+Esta guía cubre cómo iterar sobre el módulo `Choreography` (especialmente el transport SimpleX) desde una máquina Windows. **Windows no es target de producción** — the host Performance corre en Android/iOS — pero es el entorno donde el dev itera.
 
 ## TL;DR
 
@@ -37,7 +37,7 @@ Run on Android emulator or Linux for the real path.
 
 **Cuándo usar**: tests unit, lógica de StageManager, replication entre dos `Stage` en el mismo proceso.
 
-**Limitación**: el `InMemoryTransport._registry` es `static` per-process. Dos KoraApp distintos en la misma máquina Windows **no se ven**. Es deliberado — para cross-process necesitás SimpleX real.
+**Limitación**: el `InMemoryTransport._registry` es `static` per-process. Dos the host Performance distintos en la misma máquina Windows **no se ven**. Es deliberado — para cross-process necesitás SimpleX real.
 
 ### 2.2 SMP server local en Docker (recomendado para iterar el wire format)
 
@@ -76,7 +76,7 @@ $env:LOCAL_SMP_KEYHASH = "TJOK_7zBu8X8235-lfXXMBwqMtNVrG8EzUaWTPNuUSI="
 ```powershell
 dotnet workload install android maui
 emulator -avd Pixel_7_API_34
-dotnet build -t:Run -f net9.0-android src/KoraApp.csproj
+dotnet build -t:Run -f net9.0-android src/the host Performance.csproj
 ```
 
 Adapter de TLS (`TlsAdapterStream`) y crypto (BouncyCastle.Cryptography) son **managed puros** — el mismo código corre sin cambios en Android.
@@ -138,7 +138,7 @@ Smoke tests cubren:
 | `LocalSmp_Sub_Returns_Ok` | SUB (recipient subscribe) |
 | `LocalSmp_Ack_FakeMsgId_ReturnsErrOrOk` | ACK wire format |
 | `LocalSmp_Sub_Send_Receive_E2E` | Concurrent read+write — single actor self-loop |
-| `LocalSmp_TwoKoras_E2E_MessageDelivered` | Multi-actor — dos clients en mismo proceso |
+| `LocalSmp_TwoStages_E2E_MessageDelivered` | Multi-actor — dos clients en mismo proceso |
 
 ## 4. Troubleshooting
 
@@ -194,7 +194,7 @@ Server cerró el TLS — keyHash incorrecto o wire format incorrecto. Revisá:
 
 - **Envelope flow real en `SimplexTransport`** (`SecureQueueAsync` cableo bi-direccional). Hoy el overload sin `senderSignPubKey` lanza `NotImplementedException`. Ver TODO en `SimplexTransport.cs`.
 - **Decoder de `ServerDhPublicKey` ASN.1 DER → raw 32B** para usar en crypto_box (server lo envía DER en IDS).
-- **Double Ratchet** opcional (forward secrecy entre Koras). Diferido como decisión arquitectónica.
+- **Double Ratchet** opcional (forward secrecy entre Stages). Diferido como decisión arquitectónica.
 - **Encoder share-link HTTPS** opcional (hoy sólo decoder). Si Choreography quiere emitir invitations interop con SimpleX Chat oficial.
 
 ## 7. Referencias

@@ -4,14 +4,14 @@ using System.Security.Cryptography;
 namespace Choreography.Usher
 {
     // Par de claves Ed25519 (32 bytes public, 32 bytes private). El StagePublicKey va
-    // dentro de UsherJoinRequest. El StagePrivateKey nunca sale del dispositivo Kora.
+    // dentro de UsherJoinRequest. El StagePrivateKey nunca sale del dispositivo Stage.
     //
     // Decision D7: el JoinRequest se firma con StagePrivateKey para tener no-repudio
     // auditable. La firma vive sobre la concatenacion (nonce || pubkey || ts).
     //
     // Decision D5: StageId = SHA-256(StagePublicKey)[..16] (PerformerId 16 bytes).
     // El derivation es publico y deterministico, asi el Usher puede recomputar el
-    // StageId desde el pubkey recibido sin pedirlo al Kora.
+    // StageId desde el pubkey recibido sin pedirlo al Stage.
     //
     // Scaffold: la generacion real con Ed25519 va detras de IStageKeyGenerator para
     // que el test E2E pueda inyectar pares deterministicos. El handoff doc explica

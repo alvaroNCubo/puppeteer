@@ -110,7 +110,7 @@ loop.
   channel (filesystem).
 - **Operator approval** of each handshake is auto-approving
   (`AutoApprovingApprovalQueue` in `PuppeteerCli/Mocks/`). Production
-  Rubicon would present a UI; Phase 2's claim is about topology, not
+  ContactSecret would present a UI; Phase 2's claim is about topology, not
   the human-in-the-loop.
 - The **2×2 matrix** of regimes (inline / parametric × in-process /
   cross-container) is closed for the in-process row by F1. Phase 2 closes

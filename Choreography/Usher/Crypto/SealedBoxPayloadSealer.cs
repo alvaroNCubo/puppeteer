@@ -13,7 +13,7 @@ namespace Choreography.Usher.Crypto
     //
     // A sealed box is anonymous public-key encryption: the sender does not need
     // an identity, only the recipient's public key. The Usher uses it to seal
-    // the JournalSecret to the new Kora's StagePublicKey in UsherJoinResponse.
+    // the JournalSecret to the new Stage's StagePublicKey in UsherJoinResponse.
     // Only the holder of the corresponding StagePrivateKey can open the box.
     //
     // The Stage keys are Ed25519 (signature). For encryption we convert them

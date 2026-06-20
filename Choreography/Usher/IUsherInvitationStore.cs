@@ -6,7 +6,7 @@ using Choreography.Transport;
 namespace Choreography.Usher
 {
     // Persistencia de las invitaciones emitidas por el Usher. Tiene que sobrevivir
-    // restart de Rubicon: una invitacion emitida hace 10 minutos debe seguir siendo
+    // restart de ContactSecret: una invitacion emitida hace 10 minutos debe seguir siendo
     // valida si el operador reinicio mientras tanto, hasta que llegue su TTL.
     //
     // El handoff real puede persistir en sqlite/file/etc. Para el test scaffold

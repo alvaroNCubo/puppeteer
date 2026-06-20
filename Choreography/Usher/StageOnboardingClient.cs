@@ -6,7 +6,7 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Cliente que corre del lado de la app Kora ANTES de instanciar el Stage. La
+    // Cliente que corre del lado de la app Stage ANTES de instanciar el Stage. La
     // razon: el AssignedStageId viene determinado por el handshake con el Usher
     // (deriva de la pubkey local pero solo se hace efectivo cuando el Usher lo
     // commitea en el journal). El Stage se construye despues con esa identidad ya
@@ -22,7 +22,7 @@ namespace Choreography.Usher
     // Paper 7 Phase 2: promoted internal→public alongside IStageTransport and
     // Usher. The per-Docker host calls JoinNetworkViaUsherAsync to syndicate
     // before constructing its Stage; lives outside Choreography.dll.
-    public static class KoraOnboardingClient
+    public static class StageOnboardingClient
     {
         public static async Task<OnboardedIdentity> JoinNetworkViaUsherAsync(
             ConnectionInvitation usherInvitation,

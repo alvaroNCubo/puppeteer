@@ -3,9 +3,9 @@ using Choreography.StageManager;
 
 namespace Choreography.Usher
 {
-    // Record que el Usher inyecta al journal cuando un nuevo Kora pasa la aprobacion.
+    // Record que el Usher inyecta al journal cuando un nuevo Stage pasa la aprobacion.
     // Es la fuente de verdad de membresia: los peers existentes lo replican y a partir
-    // de el saben que existe un Kora nuevo con esta pubkey, y emiten sus invitaciones
+    // de el saben que existe un Stage nuevo con esta pubkey, y emiten sus invitaciones
     // de peer-to-peer hacia el (Fase 6).
     //
     // IMPORTANTE (D5): el StagePublicKey va dentro porque los peers lo necesitan para

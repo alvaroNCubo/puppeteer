@@ -26,7 +26,7 @@ namespace Choreography.StageManager
         protected DatabaseType dbType;
         private string storageConnectionString;
 
-        // Coordination bus: all Koras talk to all Koras (lightweight, membership/election)
+        // Coordination bus: all Stages talk to all Stages (lightweight, membership/election)
         private readonly ConcurrentDictionary<PerformerId, IStageChannel> coordinationPeers = new();
 
         // Data star: Director↔Cast links (heavy, replication/commands)
@@ -293,7 +293,7 @@ namespace Choreography.StageManager
         }
 
         // =====================================================================
-        //  COORDINATION BUS: all Koras ↔ all Koras (lightweight)
+        //  COORDINATION BUS: all Stages ↔ all Stages (lightweight)
         //  Messages: DirectorAnnounce, MemberLeave, MemberJoin, Heartbeat, Casting
         // =====================================================================
 
@@ -317,7 +317,7 @@ namespace Choreography.StageManager
                 // documentada — con WaitForDirectorAsync en ConnectToDirector el
                 // race del consumer ya esta cerrado por contrato del API, no por
                 // timing. Eliminar el delay tambien acelera el join del Cast en
-                // ~50ms en el caso KoraApp (Director ya activo cuando aparece Cast).
+                // ~50ms en el caso the host Performance (Director ya activo cuando aparece Cast).
                 _ = Task.Run(async () =>
                 {
                     try { await channel.SendAsync(new DirectorAnnounce(Id, Id)); }
@@ -360,7 +360,7 @@ namespace Choreography.StageManager
             // Con commandChannel: el caller declarara `cast.PerformCmd(...)` despues,
             // que entra a EnsureCanWrite y exige directorId.HasValue. Esperar al
             // DirectorAnnounce del bus de Coordination cierra el race documentado en
-            // PromoteToDirector (linea ~430) y workaround-eado en KoraApp con
+            // PromoteToDirector (linea ~430) y workaround-eado en the host Performance con
             // Task.Delay(5s). Pre-requisito: JoinCoordination debe haber sido
             // invocado antes — sin coordination membership, este await bloquea hasta
             // que el CT cancele (politica del caller).

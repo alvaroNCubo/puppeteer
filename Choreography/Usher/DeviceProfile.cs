@@ -2,8 +2,8 @@ using System;
 
 namespace Choreography.Usher
 {
-    // Identificacion humana del dispositivo Kora que esta pidiendo entrar a la red.
-    // Lo ve el operador en Rubicon para decidir si aprueba o no. No es parte de la
+    // Identificacion humana del dispositivo Stage que esta pidiendo entrar a la red.
+    // Lo ve el operador en ContactSecret para decidir si aprueba o no. No es parte de la
     // identidad criptografica (esa la lleva StagePublicKey), solo informacion UX
     // para el approval manual (D4).
     public sealed class DeviceProfile

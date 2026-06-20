@@ -3,7 +3,7 @@ using System.Threading.Tasks;
 
 namespace Choreography.Usher
 {
-    // Decision D2: Rubicon NO es peer del RSM, es membership authority. Este es el
+    // Decision D2: ContactSecret NO es peer del RSM, es membership authority. Este es el
     // canal privilegiado por el que el Usher inyecta MembershipRecord al journal
     // replicado.
     //

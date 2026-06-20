@@ -90,7 +90,7 @@ namespace Choreography.Transport.SimpleX
                         // Antes del fix este path aplicaba la Layer 2 directamente al
                         // EncryptedBody sin haber strippeado el wrap C2S del server, lo que
                         // disparaba Poly1305 tag mismatch en el primer (y todos los demas)
-                        // mensaje post-handshake (caso reportado en 2-Kora demos).
+                        // mensaje post-handshake (caso reportado en 2-Stage demos).
                         byte[] msgBody = SimplexTransport.DecryptServerEnvelope(smpMsg, _inboundQueue);
 
                         if (msgBody.Length <= SmpCrypto.NonceSize) continue;

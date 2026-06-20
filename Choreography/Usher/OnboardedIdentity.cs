@@ -4,11 +4,11 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Lo que el KoraOnboardingClient produce tras un handshake exitoso. La app Kora
+    // Lo que el StageOnboardingClient produce tras un handshake exitoso. La app Stage
     // toma estos campos para:
     //   1. Construir el Stage con AssignedStageId
     //   2. Configurar el storage con JournalSecret como clave de encripcion (HKDF
-    //      contra rubicon.enc en la implementacion real)
+    //      contra contact.enc en la implementacion real)
     //   3. Configurar el transporte con TrustedSmpServers como anclas TOFU
     //   4. Arrancar el catch-up desde JournalEpochAtJoin
     //   5. Conservar StageKeyPair en secure storage (Keychain/Keystore) para firmar

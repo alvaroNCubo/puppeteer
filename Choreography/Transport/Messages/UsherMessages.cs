@@ -4,7 +4,7 @@ using Choreography.StageManager;
 
 namespace Choreography.Transport
 {
-    // UsherForward (50): Kora -> Usher. Self-introduction del nuevo Kora despues de
+    // UsherForward (50): Stage -> Usher. Self-introduction del nuevo Stage despues de
     // aceptar la invitacion del QR. Lleva la pubkey con la que el Usher sella el
     // JournalSecret, y la firma del request (D7) para auditoria de no-repudio.
     public sealed class UsherJoinRequest : StageMessage
@@ -84,12 +84,12 @@ namespace Choreography.Transport
         }
     }
 
-    // UsherResponse (51): Usher -> Kora. Payload de sindicalizacion tras aprobacion del
+    // UsherResponse (51): Usher -> Stage. Payload de sindicalizacion tras aprobacion del
     // operador y commit del MembershipRecord al journal. NO incluye PeerDirectory (D1):
-    // los peers existentes aprenden del nuevo Kora replicando el journal y publican sus
+    // los peers existentes aprenden del nuevo Stage replicando el journal y publican sus
     // propias invitaciones via PeerInvitationRecord (Fase 6, no implementada en este
     // scaffold). NO incluye DataStar todavia: la election de Director y el catch-up
-    // arrancan despues, una vez que el Kora tiene su identidad e infraestructura.
+    // arrancan despues, una vez que el Stage tiene su identidad e infraestructura.
     public sealed class UsherJoinResponse : StageMessage
     {
         public override StageMessageType MessageType => StageMessageType.UsherResponse;

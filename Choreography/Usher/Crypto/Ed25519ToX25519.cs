@@ -11,7 +11,7 @@ namespace Choreography.Usher.Crypto
     // identity key serve as both a signature key (Edwards curve, Ed25519Signer)
     // and an encryption key (Montgomery curve, X25519). The Usher publishes the
     // Ed25519 public key on the wire; both the sender (Usher) and the receiver
-    // (Kora) derive the X25519 form locally before they perform sealed-box
+    // (Stage) derive the X25519 form locally before they perform sealed-box
     // encryption.
     //
     // Algorithm references:

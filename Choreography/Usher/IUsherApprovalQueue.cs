@@ -4,7 +4,7 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Cola que muestra los JoinRequest pendientes en la UI de Rubicon y devuelve la
+    // Cola que muestra los JoinRequest pendientes en la UI de ContactSecret y devuelve la
     // decision del operador (D4: approval manual siempre en v1). El handoff real es
     // una cola persistida + UI web + signalR/websocket para que el operador vea los
     // requests entrar; aqui solo nos importa el contrato.

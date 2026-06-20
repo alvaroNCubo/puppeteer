@@ -7,33 +7,33 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // El Usher es la pieza de Rubicon que sindicaliza Koras nuevos a la red. NO es
+    // El Usher es la pieza de ContactSecret que sindicaliza Stages nuevos a la red. NO es
     // peer de consenso (D2): no participa en quorum, solo gatekeepea entry y appendea
     // MembershipRecord al journal via IJournalWriter.
     //
     // Lifecycle por onboarding:
     //   1. IssueInvitationAsync -> emite ConnectionInvitation y la persiste como
     //      PendingInvitation con un nonce y TTL. El caller renderiza la invitacion
-    //      como QR (D3: 1 QR = 1 Kora, fresh queue cada vez).
+    //      como QR (D3: 1 QR = 1 Stage, fresh queue cada vez).
     //   2. RunOnboardingLoopAsync -> escucha conexiones entrantes en cada PendingInvitation
-    //      vigente. Cuando un Kora se conecta, recibe UsherJoinRequest, pide aprobacion
+    //      vigente. Cuando un Stage se conecta, recibe UsherJoinRequest, pide aprobacion
     //      (D4 manual), commitea MembershipRecord, sella el journal secret a la pubkey
     //      recibida, manda UsherJoinResponse, cierra el canal y descarta la pubkey
     //      in-memory.
     //
     // Invariantes de seguridad:
     //   - Nonce del QR debe matchear con el PendingInvitation correspondiente. Sin
-    //     match, se rechaza el request (sin filtrar a Kora si fue por nonce-invalido o
+    //     match, se rechaza el request (sin filtrar a Stage si fue por nonce-invalido o
     //     invitacion-expirada — solo "rejected").
     //   - Firma del JoinRequest (D7) debe verificar contra la pubkey enviada. Si no
     //     verifica, rechazo.
     //   - StageId del MembershipRecord = StageIdDerivation.FromPublicKey(pubkey). El
-    //     Usher recomputa, no confia en el Kora para asignarse Id.
+    //     Usher recomputa, no confia en el Stage para asignarse Id.
     //   - Tras escribir el MembershipRecord, el Usher NO conserva el pubkey en memoria
     //     (D5). El pubkey vive en el journal; el estado del Usher solo lleva el
     //     StageId (hash) en logs/auditoria si quisiera.
     // Paper 7 Phase 2: promoted internal→public alongside IStageTransport and
-    // KoraOnboardingClient (option (a) of the original scaffold note). The CLI
+    // StageOnboardingClient (option (a) of the original scaffold note). The CLI
     // that emits invitations and the per-Docker host that joins via Usher live
     // outside Choreography.dll; both consume this class through its public API.
     public sealed class Usher : IAsyncDisposable
@@ -163,7 +163,7 @@ namespace Choreography.Usher
                     return;
                 }
 
-                // F4: aprobacion humana en Rubicon.
+                // F4: aprobacion humana en ContactSecret.
                 UsherApprovalDecision decision = await approvalQueue.RequestApprovalAsync(request, pending, ct);
                 if (!decision.IsApproved)
                 {
@@ -195,12 +195,12 @@ namespace Choreography.Usher
                 // Marcar Consumed ANTES del SendAsync. Razones:
                 //
                 // (a) Punto de no retorno: el MembershipRecord ya fue commit-eado
-                //     al journal en AppendMembershipAsync. La identidad del Kora
+                //     al journal en AppendMembershipAsync. La identidad del Stage
                 //     existe en el cluster — la marca local de "invitation
-                //     consumed" es bookkeeping del Usher, no afecta al Kora.
+                //     consumed" es bookkeeping del Usher, no afecta al Stage.
                 //
                 // (b) Evita el race observable por el caller: si el Usher hace
-                //     SendAsync primero, el Kora recibe F5 OK y JoinNetworkViaUsherAsync
+                //     SendAsync primero, el Stage recibe F5 OK y JoinNetworkViaUsherAsync
                 //     retorna. Si el caller del lado Usher consulta el store
                 //     (test, panel de operador, audit log) antes de que termine
                 //     MarkConsumedAsync, ve la invitacion como Pending — fue lo
@@ -209,7 +209,7 @@ namespace Choreography.Usher
                 //     invitacion ya esta Consumed; no hay ventana.
                 //
                 // (c) Trade-off: si MarkConsumedAsync falla aqui (ej. DB caida),
-                //     el F5 nunca se envia; el Kora hace timeout y reintenta con
+                //     el F5 nunca se envia; el Stage hace timeout y reintenta con
                 //     otra invitacion. Es el mismo failure-mode que el orden
                 //     anterior cuando SendAsync fallaba — la invitacion quedaba
                 //     en estado intermedio. La nueva variante hace el race del

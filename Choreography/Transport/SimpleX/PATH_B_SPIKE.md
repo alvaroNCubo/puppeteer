@@ -26,7 +26,7 @@ Esto **agrega una fase devops** al plan que no estaba prevista (producir y mante
 | ¿Cómo se construye la lib? | GHC cross-compile a Android via Nix flake + cabal. El cliente Android tiene `apps/multiplatform/common/src/commonMain/cpp/android/CMakeLists.txt` que **espera** las `.so` prebuilt en `libs/${ANDROID_ABI}/libsimplex.so` y `libsupport.so`. No las compila — espera que ya existan. | [flake.nix](https://github.com/simplex-chat/simplex-chat/blob/stable/flake.nix), [cabal.project](https://github.com/simplex-chat/simplex-chat/blob/stable/cabal.project) |
 | ¿Hay guidance oficial para el build? | **No.** Issue [#734](https://github.com/simplex-chat/simplex-chat/issues/734) lo pidió, fue cerrado sin link a docs. Hay scripts de comunidad (`neurocyte/ghc-android`) y referencias en el flake.nix pero no documentación step-by-step para integradores. | Issue 734 |
 | ¿Modelo de DB de la lib? | La lib mantiene SQLite propia (`chat_migrate_init` recibe el path). No investigado si es expuesta o caja negra. **Riesgo**: Choreography tiene su propio journal y replication; coordinar con la SQLite de SimpleX puede requerir adaptaciones. | API inferida |
-| ¿Tamaño binario Android? | No confirmado empíricamente. La APK `simplex-aarch64.apk` pesa ~30-50MB total; estimo `libsimplex.so` solo en ese rango (Haskell runtime + GMP + el core). **Esto sí es relevante para KoraApp** porque infla mucho el tamaño del APK. | Inferido |
+| ¿Tamaño binario Android? | No confirmado empíricamente. La APK `simplex-aarch64.apk` pesa ~30-50MB total; estimo `libsimplex.so` solo en ese rango (Haskell runtime + GMP + el core). **Esto sí es relevante para the host Performance** porque infla mucho el tamaño del APK. | Inferido |
 | ¿Wrappers en otros lenguajes que sirvan de referencia? | Existen los bindings oficiales Kotlin (`platform/Core.kt` con FFI a `libapp`) y Swift (no investigado). No encontré bindings públicos en Rust, Python, Go, ni C#. | [apps/multiplatform](https://github.com/simplex-chat/simplex-chat/tree/master/apps/multiplatform) |
 | ¿Limitaciones conocidas? | Issue #734: build complicado, no documentado. flake.nix referencia `simplex-chat/android-support` separado. Issue #5863 (no fetched) puede tener más contexto. | — |
 
@@ -69,14 +69,14 @@ Mi sugerencia honesta: **arrancar con B.2 (extraer de APK) como prueba de concep
 2. **`hs_init` setup correcto**: el Haskell runtime requiere init exacto antes de llamadas; si la APK lo hace en `Application.onCreate()` con flags específicas, hay que replicar eso desde MAUI. Investigar `Core.kt` antes de tirar P/Invoke.
 3. **DB de la lib vs journal de Choreography**: dos sistemas de persistencia conviven. Hay que decidir si Choreography invoca la lib via `chat_migrate_init(path)` con path propio per-Stage, y trata la SQLite como caja negra.
 4. **iOS XCFramework**: requiere build de Apple Silicon + simulator combinado. No investigado en este spike.
-5. **Tamaño APK**: si `libsimplex.so` agrega ~20MB por ABI, KoraApp puede explotar el límite del Play Store o requerir App Bundle splits. Verificar antes de comprometer.
+5. **Tamaño APK**: si `libsimplex.so` agrega ~20MB por ABI, the host Performance puede explotar el límite del Play Store o requerir App Bundle splits. Verificar antes de comprometer.
 
 ---
 
 ## Alternativas si todo lo anterior es deal-breaker
 
 - **Opción C (nativo C# en .NET)**: vuelve a estar sobre la mesa como camino más controlable. ~800-1500 LOC pero sin devops Haskell, sin acoplamiento a builds externos. El costo de mantenimiento es proporcional al ritmo de cambio de la spec SMP, que históricamente es lento.
-- **Opción D (backend proxy)**: KoraApp mobile habla con backend Linux que sí puede correr `simplex-chat` CLI o cargar `libsimplex.so` (Linux x64 prebuild existe en flake.nix). Rompe P2P pero sortea todo el problema mobile.
+- **Opción D (backend proxy)**: the host Performance mobile habla con backend Linux que sí puede correr `simplex-chat` CLI o cargar `libsimplex.so` (Linux x64 prebuild existe en flake.nix). Rompe P2P pero sortea todo el problema mobile.
 
 ---
 
@@ -96,4 +96,4 @@ Decidir entre:
 
 1. **Seguir con B y aceptar la fase 1.5 (producir binarios propios).** Yo recomiendo arrancar con B.2 (extraer APK) para validar rápido y migrar a B.1 si funciona.
 2. **Volver a Opción C** (implementación nativa C#) ahora que el costo real de B está claro y es comparable.
-3. **Combinar B + D**: KoraApp mobile usa stub de transport en dev, y un backend Linux con `simplex-chat` CLI hace el real bridging hasta que B madure. Permite probar la lógica de Choreography sin bloquear en la fase 1.5.
+3. **Combinar B + D**: the host Performance mobile usa stub de transport en dev, y un backend Linux con `simplex-chat` CLI hace el real bridging hasta que B madure. Permite probar la lógica de Choreography sin bloquear en la fase 1.5.

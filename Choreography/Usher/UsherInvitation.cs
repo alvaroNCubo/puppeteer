@@ -3,8 +3,8 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Lo que Rubicon recibe de Usher.IssueInvitationAsync. Lleva el ConnectionInvitation
-    // del transporte (Address es lo que va dentro del QR) mas el nonce que Kora debe
+    // Lo que ContactSecret recibe de Usher.IssueInvitationAsync. Lleva el ConnectionInvitation
+    // del transporte (Address es lo que va dentro del QR) mas el nonce que Stage debe
     // echar de vuelta en su JoinRequest para que el Usher pueda correlacionar.
     //
     // El nonce viaja embebido en el QR (a traves del campo "data" del simplex

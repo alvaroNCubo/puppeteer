@@ -6,7 +6,7 @@ namespace Choreography.Usher
 {
     // Decision D5: StageId determinista derivado del StagePublicKey.
     // - Self-certifying: el Usher recompoone el mismo Id desde el pubkey recibido sin
-    //   tener que pedirle al Kora "como te llamas"; cualquier peer que despues vea el
+    //   tener que pedirle al Stage "como te llamas"; cualquier peer que despues vea el
     //   pubkey en el journal puede verificar que el Id corresponde.
     // - Permite que el Usher escriba el MembershipRecord con el StageId y descarte el
     //   pubkey en memoria (el pubkey vive en el journal, no en el estado del Usher).

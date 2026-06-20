@@ -6,8 +6,8 @@ namespace Choreography.StageManager
 {
     internal static class StageEncryption
     {
-        private const string RubiconFileName = "rubicon.enc";
-        private const int RubiconContactSize = 32;
+        private const string ContactSecretFileName = "contact.enc";
+        private const int ContactSecretSize = 32;
         private const int NonceSize = 12;  // AES-GCM nonce
         private const int TagSize = 16;    // AES-GCM tag
         private const int KeySize = 32;    // AES-256
@@ -19,67 +19,67 @@ namespace Choreography.StageManager
             if (string.IsNullOrWhiteSpace(password))
                 throw new ArgumentNullException(nameof(password));
 
-            byte[] rubiconContact = LoadRubiconContact(stageStateDirectory, password);
+            byte[] contactSecret = LoadContactSecret(stageStateDirectory, password);
 
             return HKDF.DeriveKey(
                 HashAlgorithmName.SHA256,
-                ikm: rubiconContact,
+                ikm: contactSecret,
                 outputLength: KeySize,
                 salt: Array.Empty<byte>(),
                 info: System.Text.Encoding.UTF8.GetBytes("stage-journal"));
         }
 
-        public static void InitializeRubicon(string stageStateDirectory, string password)
+        public static void InitializeContactSecret(string stageStateDirectory, string password)
         {
             if (string.IsNullOrWhiteSpace(stageStateDirectory))
                 throw new ArgumentNullException(nameof(stageStateDirectory));
             if (string.IsNullOrWhiteSpace(password))
                 throw new ArgumentNullException(nameof(password));
 
-            string filePath = Path.Combine(stageStateDirectory, RubiconFileName);
+            string filePath = Path.Combine(stageStateDirectory, ContactSecretFileName);
             if (File.Exists(filePath))
-                throw new InvalidOperationException("Rubicon contact already initialized");
+                throw new InvalidOperationException("ContactSecret already initialized");
 
-            byte[] rubiconContact = RandomNumberGenerator.GetBytes(RubiconContactSize);
-            SaveRubiconContact(stageStateDirectory, password, rubiconContact);
+            byte[] contactSecret = RandomNumberGenerator.GetBytes(ContactSecretSize);
+            SaveContactSecret(stageStateDirectory, password, contactSecret);
         }
 
-        public static void UpdateRubiconContact(string stageStateDirectory, string password, byte[] newRubiconContact)
+        public static void UpdateContactSecret(string stageStateDirectory, string password, byte[] newContactSecret)
         {
             if (string.IsNullOrWhiteSpace(stageStateDirectory))
                 throw new ArgumentNullException(nameof(stageStateDirectory));
             if (string.IsNullOrWhiteSpace(password))
                 throw new ArgumentNullException(nameof(password));
-            if (newRubiconContact == null) throw new ArgumentNullException(nameof(newRubiconContact));
+            if (newContactSecret == null) throw new ArgumentNullException(nameof(newContactSecret));
 
-            SaveRubiconContact(stageStateDirectory, password, newRubiconContact);
+            SaveContactSecret(stageStateDirectory, password, newContactSecret);
         }
 
-        public static bool RubiconExists(string stageStateDirectory)
+        public static bool ContactSecretExists(string stageStateDirectory)
         {
             if (string.IsNullOrWhiteSpace(stageStateDirectory)) return false;
-            return File.Exists(Path.Combine(stageStateDirectory, RubiconFileName));
+            return File.Exists(Path.Combine(stageStateDirectory, ContactSecretFileName));
         }
 
         // --- Private ---
 
-        private static byte[] LoadRubiconContact(string stageStateDirectory, string password)
+        private static byte[] LoadContactSecret(string stageStateDirectory, string password)
         {
-            string filePath = Path.Combine(stageStateDirectory, RubiconFileName);
+            string filePath = Path.Combine(stageStateDirectory, ContactSecretFileName);
             if (!File.Exists(filePath))
                 throw new InvalidOperationException(
-                    "Rubicon contact not initialized. Call InitializeRubicon first.");
+                    "ContactSecret not initialized. Call InitializeContactSecret first.");
 
             byte[] encrypted = File.ReadAllBytes(filePath);
             return DecryptWithPassword(encrypted, password);
         }
 
-        private static void SaveRubiconContact(string stageStateDirectory, string password, byte[] rubiconContact)
+        private static void SaveContactSecret(string stageStateDirectory, string password, byte[] contactSecret)
         {
             Directory.CreateDirectory(stageStateDirectory);
-            string filePath = Path.Combine(stageStateDirectory, RubiconFileName);
+            string filePath = Path.Combine(stageStateDirectory, ContactSecretFileName);
 
-            byte[] encrypted = EncryptWithPassword(rubiconContact, password);
+            byte[] encrypted = EncryptWithPassword(contactSecret, password);
             File.WriteAllBytes(filePath, encrypted);
         }
 

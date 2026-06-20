@@ -6,9 +6,9 @@ namespace Choreography.Usher
     // no necesita identidad, solo la pubkey del receptor. El receptor desencripta con
     // su privkey.
     //
-    // Lo usa el Usher para sellar el JournalSecret a la StagePublicKey del nuevo Kora
+    // Lo usa el Usher para sellar el JournalSecret a la StagePublicKey del nuevo Stage
     // dentro de UsherJoinResponse. Solo el dueno de la StagePrivateKey puede abrirlo,
-    // y eso es exactamente el Kora que pidio la sindicalizacion.
+    // y eso es exactamente el Stage que pidio la sindicalizacion.
     //
     // Scaffold: la implementacion real usa X25519 + ChaCha20-Poly1305 (BouncyCastle).
     // El test E2E inyecta un sealer pass-through que registra (payload, recipientPubKey)

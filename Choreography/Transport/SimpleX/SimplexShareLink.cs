@@ -21,7 +21,7 @@ namespace Choreography.Transport.SimpleX
     //   data = client data opcional (text)
     //
     // Choreography no usa e2e ni v; este decoder extrae solo smp queues. El Ushier
-    // emitir share-links si quiere interop con SimpleX Chat oficial; los Kora consumen
+    // emitir share-links si quiere interop con SimpleX Chat oficial; los Stage consumen
     // queues directamente.
     internal static class SimplexShareLink
     {

@@ -7,7 +7,7 @@ using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Envelope flow bidireccional para 2-Kora E2E con KEY simetrico.
+    // Envelope flow bidireccional para 2-Stage E2E con KEY simetrico.
     //
     // El modelo SMP v6 requiere que cada queue se "secure" con KEY antes de aceptar SEND
     // firmados. Como hay DOS queues por par (forward del creator, reverse del joiner),
@@ -100,7 +100,7 @@ namespace Choreography.Transport.SimpleX
             }
         }
 
-        // Kora1 creates a queue on the SMP server and returns the invitation.
+        // Stage1 creates a queue on the SMP server and returns the invitation.
         // Requiere que el config del Stage haya provisto serverFingerprint (rol del Ushier).
         public async Task<ConnectionInvitation> CreateInvitationAsync(ChannelPurpose purpose)
         {
@@ -125,7 +125,7 @@ namespace Choreography.Transport.SimpleX
             return new ConnectionInvitation(_localId, purpose, uri);
         }
 
-        // Kora2 (joiner): parsea la invitation URI, genera sus claves de Sender sobre la
+        // Stage2 (joiner): parsea la invitation URI, genera sus claves de Sender sobre la
         // forward queue, crea la reverse queue, envia ReverseQueueEnvelope unsigned plaintext,
         // y espera el ForwardKeyEnvelope del creator. Devuelve channel bidireccional.
         public async Task<IStageChannel> AcceptInvitationAsync(ConnectionInvitation invitation)
@@ -196,7 +196,7 @@ namespace Choreography.Transport.SimpleX
             return channel;
         }
 
-        // Kora1 (creator): espera el ReverseQueueEnvelope en la forward queue, hace KEY de
+        // Stage1 (creator): espera el ReverseQueueEnvelope en la forward queue, hace KEY de
         // esa queue con las pubkeys del joiner, genera sus claves para la reverse queue, y
         // envia ForwardKeyEnvelope unsigned. Devuelve channel bidireccional.
         public async Task<IStageChannel> WaitForConnectionAsync(ConnectionInvitation invitation, CancellationToken ct)
