@@ -310,16 +310,9 @@ namespace Choreography.StageManager
 
             if (IsDirector)
             {
-                // Fire-and-forget: el announce sale ya. El canal de Coordination
-                // es buffered (unbounded), asi que aun si el listener del Cast no
-                // arranco todavia el mensaje queda en queue y se procesa cuando
-                // arranca. Quitamos el Task.Delay(50) que era defensivo sin razon
-                // documentada — con WaitForDirectorAsync en ConnectToDirector el
-                // race del consumer ya esta cerrado por contrato del API, no por
-                // timing. Eliminar el delay tambien acelera el join del Cast en
-                // ~50ms en el caso KoraApp (Director ya activo cuando aparece Cast).
                 _ = Task.Run(async () =>
                 {
+                    await Task.Delay(50);
                     try { await channel.SendAsync(new DirectorAnnounce(Id, Id)); }
                     catch { }
                 });
@@ -333,8 +326,7 @@ namespace Choreography.StageManager
         // =====================================================================
 
         public async Task ConnectToDirector(PerformerId directorId,
-            IStageChannel replicationChannel, IStageChannel commandChannel = null,
-            CancellationToken ct = default)
+            IStageChannel replicationChannel, IStageChannel commandChannel = null)
         {
             if (replicationChannel == null) throw new ArgumentNullException(nameof(replicationChannel));
 
@@ -349,50 +341,6 @@ namespace Choreography.StageManager
             _ = Task.Run(async () => await ListenReplication(directorId, replicationChannel, cts.Token), cts.Token);
             if (commandChannel != null)
                 _ = Task.Run(async () => await ListenCommand(directorId, commandChannel, cts.Token), cts.Token);
-
-            // Cierra el race con EnsureCanWrite SOLO si el Cast tiene canal de
-            // comandos (intencion de forward de PerformCmd al Director). Sin
-            // commandChannel el Cast es replication-only — no escribe, no necesita
-            // directorId asignado, y forzar la espera bloquearia los setups que
-            // no usan el bus de Coordination (ej. HttpsTransportTests usa el data
-            // star directo sin coordination membership).
-            //
-            // Con commandChannel: el caller declarara `cast.PerformCmd(...)` despues,
-            // que entra a EnsureCanWrite y exige directorId.HasValue. Esperar al
-            // DirectorAnnounce del bus de Coordination cierra el race documentado en
-            // PromoteToDirector (linea ~430) y workaround-eado en KoraApp con
-            // Task.Delay(5s). Pre-requisito: JoinCoordination debe haber sido
-            // invocado antes — sin coordination membership, este await bloquea hasta
-            // que el CT cancele (politica del caller).
-            if (commandChannel != null)
-                await WaitForDirectorAsync(ct);
-        }
-
-        // Espera bloqueante hasta que el state machine local registra un Director
-        // activo (this.directorId tiene valor). El registro ocurre cuando:
-        //   - llega un DirectorAnnounce via el bus de Coordination (Cast), o
-        //   - este Stage se promueve a si mismo (PromoteToDirector).
-        //
-        // Suscribe al evento OnDirectorChanged ANTES del segundo chequeo de
-        // directorId para evitar lost-wakeup: si el announce llega entre la
-        // suscripcion y el chequeo, el TaskCompletionSource captura la transicion;
-        // si llego antes de la suscripcion, el chequeo post-subscribe lo detecta.
-        public async Task WaitForDirectorAsync(CancellationToken ct = default)
-        {
-            if (directorId.HasValue) return;
-
-            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            Action<PerformerId> handler = _ => tcs.TrySetResult();
-            OnDirectorChanged += handler;
-            try
-            {
-                if (directorId.HasValue) return;
-                await tcs.Task.WaitAsync(ct);
-            }
-            finally
-            {
-                OnDirectorChanged -= handler;
-            }
         }
 
         public async Task AcceptCastConnection(PerformerId castId,

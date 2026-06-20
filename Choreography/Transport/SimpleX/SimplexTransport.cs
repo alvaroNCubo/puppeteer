@@ -3,48 +3,48 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using Choreography.StageManager;
-using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Envelope flow bidireccional para 2-Kora E2E con KEY simetrico.
+    // FASE 7 PENDIENTE — envelope flow para 2-Kora E2E con KEY bidireccional.
     //
-    // El modelo SMP v6 requiere que cada queue se "secure" con KEY antes de aceptar SEND
-    // firmados. Como hay DOS queues por par (forward del creator, reverse del joiner),
-    // ambos lados necesitan el senderSignPubKey + senderDhPubKey del otro out-of-band.
+    // El modelo SMP v6 requiere que cada queue se "secure" con KEY antes de aceptar
+    // SEND firmados. Como hay DOS queues por par (forward del creator, reverse del
+    // joiner), ambos lados necesitan el senderSignPubKey del otro out-of-band.
     //
-    // Secuencia:
+    // Flow correcto (no implementado aun en este transport):
     //
-    //   1. Creator: NEW(forwardQueue) -> IDS. (CreateInvitationAsync)
+    //   1. Creator: NEW(forwardQueue) -> IDS. SUB(forwardQueue).
+    //      Genera invitation URI con sndId+rcpDhPub.
     //
-    //   2. Joiner (AcceptInvitationAsync):
-    //      - Parse invitation URI -> forwardQueue (rol Sender).
-    //      - Genera (senderSign + senderDh) propias para la forward queue.
-    //      - NEW(reverseQueue) -> joiner es Recipient.
-    //      - SUB(reverseQueue).
-    //      - SEND_unsigned_plaintext(forwardQueue, ReverseQueueEnvelope) con reverseUri +
-    //        joiner.senderSignPub_F + joiner.senderDhPub_F.
-    //      - Espera ForwardKeyEnvelope en reverseQueue (plaintext).
+    //   2. Joiner: parse invitation URI. Genera senderSign/Dh keys propias.
+    //      NEW(reverseQueue) -> IDS propio. SUB(reverseQueue).
+    //      SEND inicial (anonimo, queue unsecured) al forwardQueue con envelope:
+    //        - reverseQueue invitation URI (joiner como recipient)
+    //        - joiner.senderSignPub_F (sign key del joiner para forwardQueue)
+    //
+    //   3. Creator: pump entrega MSG con envelope. Procesa:
+    //      - Aprende reverseQueue invitation -> queue.SenderId del reverse.
+    //      - SecureQueueAsync(forwardQueue, joiner.senderSignPub_F) [KEY].
+    //      - Genera senderSign/Dh keys propias para reverseQueue.
+    //      - SEND inicial (anonimo, reverseQueue unsecured) con envelope inverso:
+    //        - creator.senderSignPub_R (sign key del creator para reverseQueue)
+    //
+    //   4. Joiner: pump entrega MSG con envelope inverso.
     //      - SecureQueueAsync(reverseQueue, creator.senderSignPub_R) [KEY].
-    //      - reverseQueue.PeerSenderDhPublicKey = creator.senderDhPub_R.
-    //      - Devuelve channel (outbound=forward, inbound=reverse).
     //
-    //   3. Creator (WaitForConnectionAsync):
-    //      - SUB(forwardQueue). Espera MSG con ReverseQueueEnvelope (plaintext).
-    //      - SecureQueueAsync(forwardQueue, envelope.SenderSignPub_F) [KEY].
-    //      - forwardQueue.PeerSenderDhPublicKey = envelope.SenderDhPub_F.
-    //      - Parse reverseQueue desde reverseUri (rol Sender).
-    //      - Genera (senderSign + senderDh) propias para reverseQueue.
-    //      - SEND_unsigned_plaintext(reverseQueue, ForwardKeyEnvelope).
-    //      - Devuelve channel (outbound=reverse, inbound=forward).
+    //   5. Ambas queues quedan secured. Cualquier SEND posterior va firmado.
     //
-    //   4. Ambas queues quedan secured. SENDs posteriores van firmados con crypto_box y
-    //      se decryptan con el PeerSenderDhPublicKey registrado en cada inbound queue.
+    // Hoy SimplexTransport.AcceptInvitationAsync y WaitForConnectionAsync llaman a
+    // _client.SecureQueueAsync(queue) sin senderSignPubKey explicito. Esa overload
+    // ahora lanza NotImplementedException con guidance hacia el overload de 5 args.
+    // El cableo del envelope flow (extraer senderSignPubKey de ReverseQueueEnvelope,
+    // bootstrap inicial unsigned, etc.) queda como Fase 7 follow-up.
     //
-    // Por que los envelopes van plaintext: el chicken-and-egg de crypto_box hace imposible
-    // cifrar el primer mensaje (necesitarias la pubkey que precisamente vas a transportar).
-    // Los envelopes solo contienen pubkeys publicas + queue URIs publicas, asi que un
-    // observador pasivo no aprende secretos. Post-handshake, todos los SENDs usan crypto_box.
+    // Test single-actor (LocalSmp_Sub_Send_Receive_E2E) y multi-actor manual
+    // (LocalSmp_TwoKoras_E2E_MessageDelivered) cubren el camino real con KEY pasado
+    // explicitamente, validando que el wire format funciona; falta solo el wiring
+    // declarativo arriba para que SimplexTransport haga este flow automatico.
     internal sealed class SimplexTransport : IStageTransport
     {
         private readonly PerformerId _localId;
@@ -125,14 +125,13 @@ namespace Choreography.Transport.SimpleX
             return new ConnectionInvitation(_localId, purpose, uri);
         }
 
-        // Kora2 (joiner): parsea la invitation URI, genera sus claves de Sender sobre la
-        // forward queue, crea la reverse queue, envia ReverseQueueEnvelope unsigned plaintext,
-        // y espera el ForwardKeyEnvelope del creator. Devuelve channel bidireccional.
+        // Kora2 reads the invitation (QR), secures the forward queue, creates a reverse queue,
+        // sends ReverseQueueEnvelope to Kora1, returns bidirectional channel
         public async Task<IStageChannel> AcceptInvitationAsync(ConnectionInvitation invitation)
         {
             if (invitation == null) throw new ArgumentNullException(nameof(invitation));
 
-            // 1. Parse invitation URI (incluye serverFingerprint TOFU).
+            // Parse the forward queue from invitation URI (incluye serverFingerprint TOFU).
             var forwardQueue = SmpQueue.FromInvitationUri(invitation.Address);
             byte[] keyHash = forwardQueue.ServerFingerprint
                 ?? _configuredFingerprint
@@ -142,53 +141,32 @@ namespace Choreography.Transport.SimpleX
 
             await EnsureConnectedAsync(keyHash, CancellationToken.None);
 
-            // 2. Generar par senderSign + senderDh ephemeral para la forward queue
-            //    (joiner es Sender ahi).
-            var (senderSignPub_F, senderSignSec_F) = SmpCrypto.GenerateSigningKeyPair();
-            var (senderDhPub_F, senderDhSec_F) = SmpCrypto.GenerateDhKeyPair();
-            forwardQueue.SenderSignPublicKey = senderSignPub_F;
-            forwardQueue.SenderSignSecretKey = senderSignSec_F;
-            forwardQueue.SenderDhPublicKey = senderDhPub_F;
-            forwardQueue.SenderDhSecretKey = senderDhSec_F;
+            // Secure the forward queue (we become the sender)
+            await _client.SecureQueueAsync(forwardQueue);
 
-            // 3. Crear reverse queue (joiner es Recipient ahi).
-            var reverseQueue = new SmpQueue(_smpServer, _smpPort) { ServerFingerprint = keyHash };
+            // Create reverse queue (we are the recipient of return messages)
+            var reverseQueue = new SmpQueue(_smpServer, _smpPort);
             await _client.CreateQueueAsync(reverseQueue);
 
-            // 4. SUB a la reverse queue (necesitamos recibir el ForwardKeyEnvelope).
-            await _client.SubscribeAsync(reverseQueue, CancellationToken.None);
-            var reverseReader = _client.GetSubscription(reverseQueue.RecipientId);
-
-            // 5. Construir y enviar ReverseQueueEnvelope (unsigned plaintext: la forward
-            //    queue aun no esta secured con KEY y el chicken-and-egg de crypto_box
-            //    impide cifrar el primer mensaje).
+            // Send ReverseQueueEnvelope via the forward queue so Kora1 learns our reverse queue
             var envelope = new ReverseQueueEnvelope
             {
                 ReverseQueueUri = reverseQueue.ToInvitationUri(),
-                PerformerId = _localId,
-                SenderSignPubKey = senderSignPub_F,
-                SenderDhPubKey = senderDhPub_F
+                PerformerId = _localId
             };
+
             byte[] envelopeBytes = envelope.Serialize();
-            await _client.SendMessageUnsignedAsync(forwardQueue, envelopeBytes, CancellationToken.None);
+            byte[] nonce = SmpCrypto.GenerateNonce();
+            byte[] encrypted = SmpCrypto.Encrypt(envelopeBytes, nonce,
+                forwardQueue.SenderDhSecretKey, forwardQueue.RecipientDhPublicKey);
 
-            // 6. Esperar ForwardKeyEnvelope del creator en la reverse queue.
-            //    Mismo unwrap server-encryption + paddedString.
-            ForwardKeyEnvelope forwardKey;
-            using (var awaitCts = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
-            {
-                SmpMsg msg = await reverseReader.ReadAsync(awaitCts.Token);
-                byte[] fkBytes = DecryptServerEnvelope(msg, reverseQueue);
-                forwardKey = ForwardKeyEnvelope.Deserialize(fkBytes);
-                await _client.AcknowledgeAsync(reverseQueue, msg.MsgId, CancellationToken.None);
-            }
+            byte[] message = new byte[SmpCrypto.NonceSize + encrypted.Length];
+            Buffer.BlockCopy(nonce, 0, message, 0, SmpCrypto.NonceSize);
+            Buffer.BlockCopy(encrypted, 0, message, SmpCrypto.NonceSize, encrypted.Length);
 
-            // 7. KEY sobre la reverse queue: registrar creator.senderSignPub_R.
-            await _client.SecureQueueAsync(reverseQueue, forwardKey.SenderSignPubKey, CancellationToken.None);
-            reverseQueue.PeerSenderDhPublicKey = forwardKey.SenderDhPubKey;
+            await _client.SendMessageAsync(forwardQueue, envelopeBytes, CancellationToken.None);
 
-            // 8. Channel bidireccional: outbound=forward (joiner envia ahi), inbound=reverse
-            //    (joiner recibe ahi).
+            // Build bidirectional channel: we send on forward, receive on reverse
             var channel = new SimplexChannel(_client, forwardQueue, reverseQueue,
                 invitation.InviterId, invitation.Purpose);
             await channel.StartAsync(CancellationToken.None);
@@ -196,9 +174,7 @@ namespace Choreography.Transport.SimpleX
             return channel;
         }
 
-        // Kora1 (creator): espera el ReverseQueueEnvelope en la forward queue, hace KEY de
-        // esa queue con las pubkeys del joiner, genera sus claves para la reverse queue, y
-        // envia ForwardKeyEnvelope unsigned. Devuelve channel bidireccional.
+        // Kora1 waits for Kora2 to connect, receives ReverseQueueEnvelope, secures reverse queue
         public async Task<IStageChannel> WaitForConnectionAsync(ConnectionInvitation invitation, CancellationToken ct)
         {
             if (invitation == null) throw new ArgumentNullException(nameof(invitation));
@@ -212,96 +188,52 @@ namespace Choreography.Transport.SimpleX
 
             var forwardQueue = pending.Queue;
 
-            // 1. SUB la forward queue para recibir el ReverseQueueEnvelope.
+            // Subscribe and wait for the first message (ReverseQueueEnvelope)
             await _client.SubscribeAsync(forwardQueue, ct);
+
             var reader = _client.GetSubscription(forwardQueue.RecipientId);
 
             SmpMsg firstMsg;
-            using (var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+            firstMsg = await reader.ReadAsync(timeoutCts.Token);
+
+            // Decrypt and parse envelope
+            byte[] nonce = new byte[SmpCrypto.NonceSize];
+            Buffer.BlockCopy(firstMsg.EncryptedBody, 0, nonce, 0, SmpCrypto.NonceSize);
+            byte[] ciphertext = new byte[firstMsg.EncryptedBody.Length - SmpCrypto.NonceSize];
+            Buffer.BlockCopy(firstMsg.EncryptedBody, SmpCrypto.NonceSize, ciphertext, 0, ciphertext.Length);
+
+            byte[] envelopeBytes;
+            try
             {
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
-                firstMsg = await reader.ReadAsync(timeoutCts.Token);
+                envelopeBytes = SmpCrypto.Decrypt(ciphertext, nonce,
+                    forwardQueue.RecipientDhSecretKey, forwardQueue.ServerDhPublicKey);
+            }
+            catch
+            {
+                // If decryption fails, the raw body might be the envelope (e.g., in test mode)
+                envelopeBytes = firstMsg.EncryptedBody;
             }
 
-            // 2. C2S decryption + paddedString unwrap. El SMP server encripta MSG bodies en
-            //    delivery con NaCl crypto_box (X25519(srvDhSec,rcvDhPub) + HSalsa20-zero-nonce)
-            //    y msgId padded-a-24 como nonce. El recipient decripta con la misma derivacion
-            //    sobre su rcvDhSec + serverDhPub, luego unpad del paddedString y skip del meta
-            //    block (SystemTime + MsgFlags + ' ') para recuperar el msgBody original.
-            byte[] envelopeBytes = DecryptServerEnvelope(firstMsg, forwardQueue);
             var envelope = ReverseQueueEnvelope.Deserialize(envelopeBytes);
 
-            if (envelope.SenderSignPubKey == null || envelope.SenderDhPubKey == null)
-                throw new InvalidOperationException(
-                    "ReverseQueueEnvelope no incluye SenderSignPubKey/SenderDhPubKey; " +
-                    "version pre-Fase 7 del joiner detectada. Upgrade necesario.");
-
+            // ACK the envelope message
             await _client.AcknowledgeAsync(forwardQueue, firstMsg.MsgId, ct);
 
-            // 3. KEY sobre forward queue con la senderSignPubKey del joiner.
-            await _client.SecureQueueAsync(forwardQueue, envelope.SenderSignPubKey, ct);
-            forwardQueue.PeerSenderDhPublicKey = envelope.SenderDhPubKey;
-
-            // 4. Parse reverse queue (creator se vuelve Sender ahi).
+            // Parse and secure the reverse queue
             var reverseQueue = SmpQueue.FromInvitationUri(envelope.ReverseQueueUri);
-
-            // 5. Generar par senderSign + senderDh ephemeral para la reverse queue.
-            var (senderSignPub_R, senderSignSec_R) = SmpCrypto.GenerateSigningKeyPair();
-            var (senderDhPub_R, senderDhSec_R) = SmpCrypto.GenerateDhKeyPair();
-            reverseQueue.SenderSignPublicKey = senderSignPub_R;
-            reverseQueue.SenderSignSecretKey = senderSignSec_R;
-            reverseQueue.SenderDhPublicKey = senderDhPub_R;
-            reverseQueue.SenderDhSecretKey = senderDhSec_R;
-
-            // 6. ForwardKeyEnvelope sobre la reverse queue (unsigned plaintext).
-            var fkEnvelope = new ForwardKeyEnvelope
-            {
-                SenderSignPubKey = senderSignPub_R,
-                SenderDhPubKey = senderDhPub_R
-            };
-            await _client.SendMessageUnsignedAsync(reverseQueue, fkEnvelope.Serialize(), ct);
+            await _client.SecureQueueAsync(reverseQueue);
 
             _pending.TryRemove(invitation.Address, out _);
 
-            // 7. Channel bidireccional: outbound=reverse (creator envia ahi), inbound=forward
-            //    (creator recibe ahi).
+            // Build bidirectional channel: we send on reverse, receive on forward
             var channel = new SimplexChannel(_client, reverseQueue, forwardQueue,
                 envelope.PerformerId, pending.Purpose);
             await channel.StartAsync(ct);
 
             return channel;
-        }
-
-        // Decrypt + unwrap MSG body (C2S server-to-recipient layer).
-        //
-        // simplexmq Server.hs:2030-2036 — encryptMsg = cbEncryptMaxLenBS rcvDhSecret (cbNonce msgId).
-        // El server toma RcvMsgBody { msgTs, msgFlags, msgBody }, lo encodea como paddedString
-        // de tamano fijo y lo encripta con NaCl crypto_box. La key del shared es el X25519 entre
-        // serverDhSec_per_queue y recipientDhPub_per_queue (con el HSalsa20-zero-nonce wrap de
-        // NaCl crypto_box_beforenm; ver SmpCrypto.DecryptC2SEnvelope). El nonce es el msgId
-        // padeado a 24 bytes con ceros a la derecha. Wire layout:
-        //
-        //   EncryptedBody = [16-byte Poly1305 tag][16106-byte ciphertext]   (16122B total)
-        //   plaintext     = [Word16 BE bodyLen][rcvMsgBody bytes]['#' padding to 16106]
-        //   rcvMsgBody    = [SystemTime 8B][MsgFlags 1B + extras][' '][... msgBody ...]
-        //
-        // Devuelve el msgBody (lo que el sender envio originalmente al SMP server).
-        internal static byte[] DecryptServerEnvelope(SmpMsg msg, SmpQueue receivingQueue)
-        {
-            if (msg == null) throw new ArgumentNullException(nameof(msg));
-            if (msg.EncryptedBody == null) throw new ArgumentNullException(nameof(msg) + ".EncryptedBody");
-            if (msg.MsgId == null) throw new ArgumentNullException(nameof(msg) + ".MsgId");
-            if (receivingQueue == null) throw new ArgumentNullException(nameof(receivingQueue));
-            if (receivingQueue.RecipientDhSecretKey == null)
-                throw new InvalidOperationException("Queue has no RecipientDhSecretKey");
-            if (receivingQueue.ServerDhPublicKey == null)
-                throw new InvalidOperationException("Queue has no ServerDhPublicKey (set during NEW)");
-
-            byte[] rcvMsgBody = SmpCrypto.DecryptC2SEnvelope(
-                msg.EncryptedBody, msg.MsgId,
-                receivingQueue.RecipientDhSecretKey,
-                receivingQueue.ServerDhPublicKey);
-            return SmpCrypto.ExtractMsgBodyFromRcvMsgBody(rcvMsgBody);
         }
 
         private sealed class PendingInvitation

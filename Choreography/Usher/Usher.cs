@@ -192,32 +192,9 @@ namespace Choreography.Usher
                     trustedSmpServers: fingerprints,
                     journalEpochAtJoin: epoch);
 
-                // Marcar Consumed ANTES del SendAsync. Razones:
-                //
-                // (a) Punto de no retorno: el MembershipRecord ya fue commit-eado
-                //     al journal en AppendMembershipAsync. La identidad del Kora
-                //     existe en el cluster — la marca local de "invitation
-                //     consumed" es bookkeeping del Usher, no afecta al Kora.
-                //
-                // (b) Evita el race observable por el caller: si el Usher hace
-                //     SendAsync primero, el Kora recibe F5 OK y JoinNetworkViaUsherAsync
-                //     retorna. Si el caller del lado Usher consulta el store
-                //     (test, panel de operador, audit log) antes de que termine
-                //     MarkConsumedAsync, ve la invitacion como Pending — fue lo
-                //     que rompio UsherOnboardingTests.EndToEnd_RealCryptoOverRealTls_RoundsTripIdentity
-                //     en CI (VM lento). Con este orden, cuando F5 sale al wire la
-                //     invitacion ya esta Consumed; no hay ventana.
-                //
-                // (c) Trade-off: si MarkConsumedAsync falla aqui (ej. DB caida),
-                //     el F5 nunca se envia; el Kora hace timeout y reintenta con
-                //     otra invitacion. Es el mismo failure-mode que el orden
-                //     anterior cuando SendAsync fallaba — la invitacion quedaba
-                //     en estado intermedio. La nueva variante hace el race del
-                //     test desaparecer sin empeorar el contrato de delivery.
+                await channel.SendAsync(response, ct);
                 pending.MarkConsumed();
                 await invitationStore.MarkConsumedAsync(pending.Nonce, ct);
-
-                await channel.SendAsync(response, ct);
 
                 // D5: descartar el pubkey del scope local. La variable local sale del
                 // scope al retornar; no la persistimos en ningun campo del Usher.
