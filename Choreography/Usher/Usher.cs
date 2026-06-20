@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Choreography.StageManager;
 using Choreography.Transport;
+using Puppeteer;
 
 namespace Choreography.Usher
 {
@@ -48,10 +49,13 @@ namespace Choreography.Usher
         private readonly Func<ServerFingerprintWire[]> trustedSmpServersProvider;
         private readonly PerformerId localId;
         private readonly TimeSpan defaultTtl;
+        private readonly IPuppeteerLogger logger;
 
         private readonly List<CancellationTokenSource> backgroundTasks = new();
         private readonly object backgroundTasksLock = new object();
 
+        // Overload viejo (sin logger): callers existentes (Paper7 CLI) lo siguen
+        // usando. Delega al overload nuevo con un ConsoleLogger default.
         public Usher(
             PerformerId localId,
             IStageTransport transport,
@@ -63,6 +67,24 @@ namespace Choreography.Usher
             Func<byte[]> journalSecretProvider,
             Func<ServerFingerprintWire[]> trustedSmpServersProvider,
             TimeSpan defaultTtl)
+            : this(localId, transport, invitationStore, approvalQueue, journalWriter,
+                   payloadSealer, signatureVerifier, journalSecretProvider,
+                   trustedSmpServersProvider, defaultTtl, new Puppeteer.EventSourcing.ConsoleLogger())
+        {
+        }
+
+        public Usher(
+            PerformerId localId,
+            IStageTransport transport,
+            IUsherInvitationStore invitationStore,
+            IUsherApprovalQueue approvalQueue,
+            IJournalWriter journalWriter,
+            IPayloadSealer payloadSealer,
+            IStageSignatureVerifier signatureVerifier,
+            Func<byte[]> journalSecretProvider,
+            Func<ServerFingerprintWire[]> trustedSmpServersProvider,
+            TimeSpan defaultTtl,
+            IPuppeteerLogger logger)
         {
             if (transport == null) throw new ArgumentNullException(nameof(transport));
             if (invitationStore == null) throw new ArgumentNullException(nameof(invitationStore));
@@ -73,6 +95,7 @@ namespace Choreography.Usher
             if (journalSecretProvider == null) throw new ArgumentNullException(nameof(journalSecretProvider));
             if (trustedSmpServersProvider == null) throw new ArgumentNullException(nameof(trustedSmpServersProvider));
             if (defaultTtl <= TimeSpan.Zero) throw new ArgumentException("DefaultTtl must be positive", nameof(defaultTtl));
+            if (logger == null) throw new ArgumentNullException(nameof(logger));
 
             this.localId = localId;
             this.transport = transport;
@@ -84,6 +107,7 @@ namespace Choreography.Usher
             this.journalSecretProvider = journalSecretProvider;
             this.trustedSmpServersProvider = trustedSmpServersProvider;
             this.defaultTtl = defaultTtl;
+            this.logger = logger;
         }
 
         // F1: emite invitacion fresca. Cada llamada crea un nonce y una queue dedicada
@@ -129,7 +153,7 @@ namespace Choreography.Usher
                 catch (OperationCanceledException) { /* expired with no joiner */ }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[Usher] Onboarding listener failed for nonce {pending.Nonce}: {ex.Message}");
+                    logger.Error($"[Usher] Onboarding listener failed for nonce {pending.Nonce}", ex);
                 }
             }, cts.Token);
         }

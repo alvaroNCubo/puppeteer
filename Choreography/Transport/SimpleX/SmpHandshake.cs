@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Puppeteer;
 
 namespace Choreography.Transport.SimpleX
 {
@@ -32,18 +33,19 @@ namespace Choreography.Transport.SimpleX
             public byte[] SessionId { get; init; }
         }
 
-        public static async Task<HandshakeResult> PerformAsync(Stream tlsStream, byte[] keyHash, CancellationToken ct)
+        public static async Task<HandshakeResult> PerformAsync(Stream tlsStream, byte[] keyHash, IPuppeteerLogger logger, CancellationToken ct)
         {
             if (tlsStream == null) throw new ArgumentNullException(nameof(tlsStream));
             if (keyHash == null || keyHash.Length != 32)
                 throw new ArgumentException("keyHash must be 32 bytes (SHA-256 of CA cert DER)");
+            if (logger == null) throw new ArgumentNullException(nameof(logger));
 
             byte[] serverHello = await SmpBlock.ReadBlockAsync(tlsStream, ct);
             ParseServerHello(serverHello, out int serverMinVersion, out int serverMaxVersion, out byte[] sessionId);
 
-            Console.WriteLine($"[SmpHandshake] serverHello payload {serverHello.Length}B, " +
-                              $"v[{serverMinVersion}-{serverMaxVersion}], sessId.Len={sessionId.Length}, " +
-                              $"first 40B: {BitConverter.ToString(serverHello, 0, Math.Min(40, serverHello.Length))}");
+            logger.Debug($"[SmpHandshake] serverHello payload {serverHello.Length}B, " +
+                         $"v[{serverMinVersion}-{serverMaxVersion}], sessId.Len={sessionId.Length}, " +
+                         $"first 40B: {BitConverter.ToString(serverHello, 0, Math.Min(40, serverHello.Length))}");
 
             int negotiated = Math.Min(MaxVersion, serverMaxVersion);
             int requiredMin = Math.Max(MinVersion, serverMinVersion);
@@ -52,11 +54,11 @@ namespace Choreography.Transport.SimpleX
                     $"SMP version mismatch: server [{serverMinVersion}-{serverMaxVersion}], client [{MinVersion}-{MaxVersion}]");
 
             byte[] clientHello = BuildClientHello(negotiated, keyHash);
-            Console.WriteLine($"[SmpHandshake] clientHello {clientHello.Length}B, negotiated v={negotiated}, " +
-                              $"keyHash[0..8]={BitConverter.ToString(keyHash, 0, 8)}, " +
-                              $"full: {BitConverter.ToString(clientHello)}");
+            logger.Debug($"[SmpHandshake] clientHello {clientHello.Length}B, negotiated v={negotiated}, " +
+                         $"keyHash[0..8]={BitConverter.ToString(keyHash, 0, 8)}, " +
+                         $"full: {BitConverter.ToString(clientHello)}");
             await SmpBlock.WriteBlockAsync(tlsStream, clientHello, ct);
-            Console.WriteLine($"[SmpHandshake] clientHello sent ok, returning HandshakeResult");
+            logger.Debug($"[SmpHandshake] clientHello sent ok, returning HandshakeResult");
 
             return new HandshakeResult { NegotiatedVersion = negotiated, SessionId = sessionId };
         }

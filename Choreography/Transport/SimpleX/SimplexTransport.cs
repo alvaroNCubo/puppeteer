@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using Choreography.StageManager;
+using Puppeteer;
 using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
@@ -54,16 +55,21 @@ namespace Choreography.Transport.SimpleX
         // Para creator (Stage que crea invitaciones via Ushier) viene del config.
         // Para joiner-only (solo acepta invitaciones), puede ser null y se extrae del URI.
         private readonly byte[] _configuredFingerprint;
+        private readonly IPuppeteerLogger _logger;
         private SmpClient _client;
         private readonly ConcurrentDictionary<string, PendingInvitation> _pending = new();
         private readonly SemaphoreSlim _connectLock = new(1, 1);
 
-        public SimplexTransport(PerformerId localId, string smpServerUrl, byte[] serverFingerprint = null)
+        internal IPuppeteerLogger Logger => _logger;
+
+        public SimplexTransport(PerformerId localId, string smpServerUrl, byte[] serverFingerprint = null,
+            IPuppeteerLogger logger = null)
         {
             if (string.IsNullOrWhiteSpace(smpServerUrl)) throw new ArgumentNullException(nameof(smpServerUrl));
             _localId = localId;
             ParseServerUrl(smpServerUrl, out _smpServer, out _smpPort);
             _configuredFingerprint = serverFingerprint;
+            _logger = logger ?? new ConsoleLogger();
         }
 
         private static void ParseServerUrl(string url, out string host, out int port)
@@ -91,7 +97,7 @@ namespace Choreography.Transport.SimpleX
 
                 if (_client != null) await _client.DisposeAsync();
 
-                _client = new SmpClient(_smpServer, _smpPort, keyHash);
+                _client = new SmpClient(_smpServer, _smpPort, keyHash, _logger);
                 await _client.ConnectAsync(ct);
             }
             finally
@@ -190,7 +196,7 @@ namespace Choreography.Transport.SimpleX
             // 8. Channel bidireccional: outbound=forward (joiner envia ahi), inbound=reverse
             //    (joiner recibe ahi).
             var channel = new SimplexChannel(_client, forwardQueue, reverseQueue,
-                invitation.InviterId, invitation.Purpose);
+                invitation.InviterId, invitation.Purpose, _logger);
             await channel.StartAsync(CancellationToken.None);
 
             return channel;
@@ -266,7 +272,7 @@ namespace Choreography.Transport.SimpleX
             // 7. Channel bidireccional: outbound=reverse (creator envia ahi), inbound=forward
             //    (creator recibe ahi).
             var channel = new SimplexChannel(_client, reverseQueue, forwardQueue,
-                envelope.PerformerId, pending.Purpose);
+                envelope.PerformerId, pending.Purpose, _logger);
             await channel.StartAsync(ct);
 
             return channel;

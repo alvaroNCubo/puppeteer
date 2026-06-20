@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Choreography.StageManager;
+using Puppeteer;
 
 namespace Choreography.Transport.SimpleX
 {
@@ -13,6 +14,7 @@ namespace Choreography.Transport.SimpleX
         private readonly SmpClient _client;
         private readonly SmpQueue _outboundQueue; // we SEND here
         private readonly SmpQueue _inboundQueue;  // we RECEIVE here
+        private readonly IPuppeteerLogger _logger;
         private readonly Channel<StageMessage> _receiveBuffer = Channel.CreateUnbounded<StageMessage>();
         private bool _connected = true;
         private Task _receivePumpTask;
@@ -24,25 +26,35 @@ namespace Choreography.Transport.SimpleX
         public event Action<IStageChannel> OnDisconnected;
 
         internal SimplexChannel(SmpClient client, SmpQueue outboundQueue, SmpQueue inboundQueue,
-            PerformerId remotePerformerId, ChannelPurpose purpose)
+            PerformerId remotePerformerId, ChannelPurpose purpose, IPuppeteerLogger logger)
         {
             if (client == null) throw new ArgumentNullException(nameof(client));
             if (outboundQueue == null) throw new ArgumentNullException(nameof(outboundQueue));
             if (inboundQueue == null) throw new ArgumentNullException(nameof(inboundQueue));
+            if (logger == null) throw new ArgumentNullException(nameof(logger));
 
             _client = client;
             _outboundQueue = outboundQueue;
             _inboundQueue = inboundQueue;
+            _logger = logger;
             RemotePerformerId = remotePerformerId;
             Purpose = purpose;
         }
 
         internal async Task StartAsync(CancellationToken ct)
         {
-            // Subscribe to inbound queue to receive messages
+            // Subscribe to inbound queue to receive messages. El `ct` acota el connect
+            // (SUB es parte del handshake), pero NO debe gobernar la vida del pump.
             await _client.SubscribeAsync(_inboundQueue, ct);
 
-            _pumpCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            // El ReceivePump vive mientras viva el CANAL, no mientras viva el connect/handshake.
+            // Antes el CTS se linkeaba al `ct` del connect (CreateLinkedTokenSource(ct)). Cuando
+            // el caller acota el handshake con un CancelAfter (p.ej. the host Performance envuelve
+            // JoinPeerNetworkAsync en un timeout) y ese token se cancela DESPUES de un handshake
+            // exitoso, el pump moria y el canal se caia: los 3 canales (Coordination/Replication/
+            // Command) -> perdida de heartbeats -> BecomeDirector -> split-brain. El CTS propio se
+            // cancela unicamente en Dispose/disconnect, desacoplando el pump del timeout del handshake.
+            _pumpCts = new CancellationTokenSource();
             _receivePumpTask = Task.Run(() => ReceivePumpAsync(_pumpCts.Token));
         }
 
@@ -126,14 +138,14 @@ namespace Choreography.Transport.SimpleX
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[SimplexChannel:{Purpose}] Error processing message: {ex.Message}");
+                        _logger.Error($"[SimplexChannel:{Purpose}] Error processing message", ex);
                     }
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimplexChannel:{Purpose}] ReceivePump error: {ex.Message}");
+                _logger.Error($"[SimplexChannel:{Purpose}] ReceivePump error", ex);
             }
             finally
             {

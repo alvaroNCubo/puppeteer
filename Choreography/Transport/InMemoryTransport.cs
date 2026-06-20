@@ -6,18 +6,22 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Choreography.StageManager;
+using Puppeteer;
+using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport
 {
     internal sealed class InMemoryTransport : IStageTransport
     {
         private readonly PerformerId _localId;
+        private readonly IPuppeteerLogger _logger;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<IStageChannel>> _pendingInvitations = new();
         private static readonly ConcurrentDictionary<string, InMemoryTransport> _registry = new();
 
-        public InMemoryTransport(PerformerId localId)
+        public InMemoryTransport(PerformerId localId, IPuppeteerLogger logger = null)
         {
             _localId = localId;
+            _logger = logger ?? new ConsoleLogger();
             _registry[localId.ToString()] = this;
         }
 

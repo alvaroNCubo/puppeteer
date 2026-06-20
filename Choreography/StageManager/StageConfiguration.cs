@@ -6,6 +6,9 @@ namespace Choreography.StageManager
     {
         public string StageStateDirectory { get; set; }
 
+        // Las tres siguientes pertenecen al Casting election protocol scaffold —
+        // no consumidas hoy. Ver Choreography/Transport/Messages/CastingMessages.cs
+        // (comentario top-of-file) para el estado del protocolo y la etapa 2.
         public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
         public TimeSpan DirectorTimeout { get; set; } = TimeSpan.FromSeconds(15);
         public TimeSpan CastingElectionTimeout { get; set; } = TimeSpan.FromSeconds(5);

@@ -37,7 +37,18 @@ namespace Choreography.Transport
         // other journal entry).
 
         UsherForward = 50,
-        UsherResponse = 51
+        UsherResponse = 51,
+
+        // Fase 5 — Playbill cross-pod replication. Paralelo a CueEvent pero
+        // sobre el PlaybillStore del actor en lugar del journal.
+        PlaybillSchemaCue = 60,
+        PlaybillCue = 61,
+
+        // Bug 18 — Failover replication gap. Re-handshake in-band de los data
+        // channels sobre el bus de Coordination tras una rotacion de roles.
+        // Ver Choreography/Transport/Messages/RehandshakeMessages.cs.
+        RehandshakeRequest = 70,
+        RehandshakeProposal = 71
     }
 
     public abstract class StageMessage
@@ -139,6 +150,10 @@ namespace Choreography.Transport
                 StageMessageType.MemberLeave => new MemberLeave(senderId, timestamp),
                 StageMessageType.UsherForward => new UsherJoinRequest(senderId, timestamp),
                 StageMessageType.UsherResponse => new UsherJoinResponse(senderId, timestamp),
+                StageMessageType.PlaybillSchemaCue => new PlaybillSchemaCue(senderId, timestamp),
+                StageMessageType.PlaybillCue => new PlaybillCue(senderId, timestamp),
+                StageMessageType.RehandshakeRequest => new RehandshakeRequest(senderId, timestamp),
+                StageMessageType.RehandshakeProposal => new RehandshakeProposal(senderId, timestamp),
                 _ => throw new InvalidOperationException($"Unknown message type: {type}")
             };
         }

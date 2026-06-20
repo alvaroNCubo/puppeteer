@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tls;
 using Org.BouncyCastle.Tls.Crypto.Impl.BC;
+using Puppeteer;
 using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
@@ -18,6 +19,7 @@ namespace Choreography.Transport.SimpleX
         private readonly string _host;
         private readonly int _port;
         private readonly byte[] _knownKeyHash;
+        private readonly IPuppeteerLogger _logger;
         private TcpClient _tcp;
         private TlsAdapterStream _tlsAdapter;
         private Stream _tlsStream;
@@ -28,16 +30,18 @@ namespace Choreography.Transport.SimpleX
         private CancellationTokenSource _pumpCts;
         private int _negotiatedVersion;
         private byte[] _sessionId;
+        private readonly bool _offline;
 
         public bool IsConnected { get; private set; }
         public event Action OnDisconnected;
+        internal IPuppeteerLogger Logger => _logger;
 
         // knownKeyHash es el SHA-256 del idCert del server (TOFU). Lo conoce el cliente
         // a-priori: para el creator viene del config del Stage; para el joiner viene
         // del invitation URI smp://HASH@host:port/... extraido por SmpQueue.FromInvitationUri.
         // El protocolo SMP cierra la conexion si el cliente no lo envia o no matchea
         // el del server.
-        public SmpClient(string host, int port, byte[] knownKeyHash)
+        public SmpClient(string host, int port, byte[] knownKeyHash, IPuppeteerLogger logger = null)
         {
             if (string.IsNullOrWhiteSpace(host)) throw new ArgumentNullException(nameof(host));
             if (knownKeyHash == null || knownKeyHash.Length != 32)
@@ -45,6 +49,22 @@ namespace Choreography.Transport.SimpleX
             _host = host;
             _port = port;
             _knownKeyHash = knownKeyHash;
+            _logger = logger ?? new ConsoleLogger();
+        }
+
+        // Test-only: cliente "offline" (sin TCP/TLS) que reporta IsConnected=true y resuelve
+        // SubscribeAsync sin tocar la red. Permite ejercitar el lifecycle del ReceivePump del
+        // SimplexChannel (regresion 21) de forma deterministica y en Windows, sin un SMP server.
+        internal SmpClient(IPuppeteerLogger logger, bool offlineForTesting)
+        {
+            if (!offlineForTesting)
+                throw new ArgumentException("Use the (host, port, keyHash) constructor for real connections", nameof(offlineForTesting));
+            _host = "offline";
+            _port = 0;
+            _knownKeyHash = new byte[32];
+            _logger = logger ?? new ConsoleLogger();
+            _offline = true;
+            IsConnected = true;
         }
 
         public async Task ConnectAsync(CancellationToken ct = default)
@@ -59,14 +79,14 @@ namespace Choreography.Transport.SimpleX
             //
             // Cipher: TLS 1.3 + CHACHA20-POLY1305 + ALPN smp/1 (igual que antes).
             var crypto = new BcTlsCrypto(new SecureRandom());
-            var client = new SmpTlsClient(crypto);
+            var client = new SmpTlsClient(crypto, _logger);
             _tlsAdapter = new TlsAdapterStream(_tcp.GetStream());
             await _tlsAdapter.PerformHandshakeAsync(client, ct);
             _tlsStream = _tlsAdapter;
 
             // El keyHash se conoce a-priori (TOFU); el server lo verifica contra su
             // propio idCert. Si no matchea, server cierra la conexion ~400ms despues.
-            var handshake = await SmpHandshake.PerformAsync(_tlsStream, _knownKeyHash, ct);
+            var handshake = await SmpHandshake.PerformAsync(_tlsStream, _knownKeyHash, _logger, ct);
             _negotiatedVersion = handshake.NegotiatedVersion;
             _sessionId = handshake.SessionId;
 
@@ -82,8 +102,10 @@ namespace Choreography.Transport.SimpleX
         // que se valida en SmpHandshake. Aqui simplemente trust-all en TLS.
         private sealed class SmpTlsClient : DefaultTlsClient, ISmpTlsClient
         {
-            public SmpTlsClient(BcTlsCrypto crypto) : base(crypto)
+            private readonly IPuppeteerLogger _logger;
+            public SmpTlsClient(BcTlsCrypto crypto, IPuppeteerLogger logger) : base(crypto)
             {
+                _logger = logger;
             }
 
             public bool HandshakeComplete { get; private set; }
@@ -119,7 +141,7 @@ namespace Choreography.Transport.SimpleX
             public override void NotifyAlertReceived(short alertLevel, short alertDescription)
             {
                 base.NotifyAlertReceived(alertLevel, alertDescription);
-                Console.WriteLine($"[SmpTls] AlertReceived: level={alertLevel} ({AlertLevel.GetText(alertLevel)}), description={alertDescription} ({AlertDescription.GetText(alertDescription)})");
+                _logger.Debug($"[SmpTls] AlertReceived: level={alertLevel} ({AlertLevel.GetText(alertLevel)}), description={alertDescription} ({AlertDescription.GetText(alertDescription)})");
             }
         }
 
@@ -216,6 +238,8 @@ namespace Choreography.Transport.SimpleX
             string queueKey = SmpCrypto.ToBase64Url(queue.RecipientId);
             _queueSubscriptions.GetOrAdd(queueKey, _ => Channel.CreateUnbounded<SmpMsg>());
 
+            if (_offline) return; // test-only: subscription registrada, sin SUB de red
+
             byte[] corrId = SmpCrypto.RandomBytes(SmpCommandBuilder.CorrIdSize);
             byte[] payload = SmpCommandBuilder.BuildSub(_sessionId, corrId, queue.RecipientId,
                 queue.RecipientSignSecretKey);
@@ -310,6 +334,16 @@ namespace Choreography.Transport.SimpleX
             throw new InvalidOperationException($"No subscription for queue {key}");
         }
 
+        // Test-only: completa la subscription como lo haria un disconnect real del transport.
+        // Usado por la regresion 21 para probar que el ReceivePump sigue REALMENTE leyendo la
+        // subscription tras cancelar el token del connect (sale limpio al completarla).
+        internal void CompleteSubscriptionForTesting(byte[] recipientId)
+        {
+            string key = SmpCrypto.ToBase64Url(recipientId);
+            if (_queueSubscriptions.TryGetValue(key, out var channel))
+                channel.Writer.TryComplete();
+        }
+
         // --- Internal ---
 
         private async Task<SmpResponse> SendAndWaitAsync(byte[] corrId, byte[] payload, CancellationToken ct)
@@ -377,7 +411,7 @@ namespace Choreography.Transport.SimpleX
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SmpClient] ReceivePump error: {ex.Message}");
+                _logger.Error("[SmpClient] ReceivePump error", ex);
                 HandleDisconnect();
             }
         }

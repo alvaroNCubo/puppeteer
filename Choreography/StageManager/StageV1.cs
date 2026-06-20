@@ -28,6 +28,13 @@ namespace Choreography.StageManager
                 : ActorFactory.Create<ActorV1>(actorName);
         }
 
+        // Shadow del Logger base para preservar StageV1 en la cadena fluent.
+        public new StageV1 Logger(IPuppeteerLogger logger)
+        {
+            base.Logger(logger);
+            return this;
+        }
+
         public async Task<string> PerformCmd(string script, CancellationToken ct = default)
         {
             EnsureCanWrite();
@@ -47,10 +54,8 @@ namespace Choreography.StageManager
 
         public string PerformQry(string script)
         {
+            // Fase 4.5 refactor Playbill: ip/user dejaron de inyectarse como parametros del script.
             var p = new Parameters();
-            p.SystemParameter<IpAddress>("Ip", IpAddress.DEFAULT);
-            p.SystemParameter<UserInLog>("User", UserInLog.ANONYMOUS);
-            p.SystemParameter<DateTime>("Now", DateTime.Now);
             return hook.PerformQry(script, p);
         }
     }

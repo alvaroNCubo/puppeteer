@@ -6,6 +6,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Choreography.StageManager;
+using Puppeteer;
+using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.Https
 {
@@ -35,10 +37,13 @@ namespace Choreography.Transport.Https
         private readonly string advertiseUrl;
         private readonly HttpsTransportListener listener;
         private readonly X509Certificate2 serverCert;
+        private readonly IPuppeteerLogger logger;
         private readonly ConcurrentDictionary<string, string> peerFingerprintsByListenUrl = new(
             StringComparer.OrdinalIgnoreCase);
         private readonly System.Threading.SemaphoreSlim startupLock = new(1, 1);
         private bool started;
+
+        internal IPuppeteerLogger Logger => logger;
 
         // listenUrl = the URL Kestrel binds to (e.g. https://0.0.0.0:5443 inside
         //             a Docker container).
@@ -49,13 +54,14 @@ namespace Choreography.Transport.Https
         // If advertiseUrl is null, listenUrl is used for both — the common
         // case for tests where everything runs on loopback.
         public HttpsTransport(PerformerId localId, string listenUrl,
-            X509Certificate2 serverCert, string advertiseUrl = null)
+            X509Certificate2 serverCert, string advertiseUrl = null, IPuppeteerLogger logger = null)
         {
             this.localId = localId;
             this.listenUrl = listenUrl ?? throw new ArgumentNullException(nameof(listenUrl));
             this.serverCert = serverCert ?? throw new ArgumentNullException(nameof(serverCert));
             this.advertiseUrl = string.IsNullOrWhiteSpace(advertiseUrl) ? listenUrl : advertiseUrl;
             this.listener = new HttpsTransportListener(listenUrl, serverCert);
+            this.logger = logger ?? new ConsoleLogger();
         }
 
         // SHA-256 fingerprint (lowercase hex) of the local server certificate.

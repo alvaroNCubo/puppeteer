@@ -13,9 +13,11 @@ namespace Choreography.Theater
     public abstract class Performance : IDisposable
     {
         protected StageHook hook;
-        private DatabaseType dbType;
-        private string connectionString;
-        private bool storageConfigured;
+        // Storage config — protected so subclasses (PerformanceV2) can construct
+        // their own auxiliary stores (e.g. Playbill) using the same connection.
+        protected DatabaseType dbType;
+        protected string connectionString;
+        protected bool storageConfigured;
         private bool started;
         private bool isFollower;
         private bool handoverComplete;
@@ -97,6 +99,19 @@ namespace Choreography.Theater
             storageConfigured = true;
         }
 
+        // Logger seam (fluent, aplica a V1 y V2): el sink es per-actor. Esta
+        // fachada propaga la impl inyectada por el host (Serilog, Microsoft.Extensions
+        // .Logging, NLog, etc.) al Actor que vive bajo este Performance. Sin
+        // inyeccion, Puppeteer usa un ConsoleLogger default (Error -> stderr,
+        // Debug -> stdout). V1/V2 hacen `new` shadow para preservar el tipo concreto
+        // en la cadena.
+        public Performance Logger(IPuppeteerLogger logger)
+        {
+            if (logger == null) throw new ArgumentNullException(nameof(logger));
+            ActorInstance.UseLogger(logger);
+            return this;
+        }
+
         public void Start(bool asFollower = false)
         {
             if (!storageConfigured)
@@ -108,14 +123,19 @@ namespace Choreography.Theater
             this.isFollower = asFollower;
             started = true;
 
-            // Modo follower: suprime el journaling de los Tell terminators
-            // que disparen las Cued Reactions del actor. Solo el primary
-            // tiene autoridad de escribir al journal canonico compartido.
-            // Etapa 1: Tell terminator se vuelve no-op silencioso en el
-            // follower (no journaling, no envelope dispatch). Etapa 2
-            // pendiente: refactor de TellStatement para extraer envelope
-            // construction y permitir dispatch-without-journaling.
+            // Modo follower: suprime el JOURNALING de los Tell terminators que
+            // disparen las Cued Reactions del actor (invariante 1-escritor: solo
+            // el primary escribe al journal canonico compartido). Etapa 2
+            // implementada: el follower SI ejecuta el tell y SI despacha el
+            // envelope via Transport; solo se omite la escritura al journal.
             hook.SuppressReactionJournaling = asFollower;
+
+            // Gate de ReactionActivation: la Performance Theater actua como
+            // director/primary cuando NO es follower. El provider es vivo: lee
+            // isFollower en cada Reaction.Execute, asi tras el handover
+            // (UnlockAndRunAlive pone isFollower=false) las DirectorOnly empiezan
+            // a correr y las CastOnly dejan de hacerlo.
+            hook.SetActingAsDirectorProvider(() => !isFollower);
 
             if (!asFollower && hook.IsNew)
             {
@@ -193,6 +213,23 @@ namespace Choreography.Theater
         {
             PerformanceTracer.Instance.RaiseCatchUp(Name, targetEntryId);
             hook.CatchUpFromJournal(targetEntryId);
+        }
+
+        // Shadow Replay — S1 (handoff_shadow_S1_implementation.md / design §3.0).
+        // Fachada de Performance: produce un ShadowPerformance que HOSPEDA (por
+        // composicion, NO herencia) un shadow del actor de esta Performance. El
+        // shadow lee el journal real (replay) pero escribe en su propio storage y
+        // produce cero efecto externo. ShadowPerformance es un tipo DISTINTO de
+        // Performance — el compilador impide que un shadow sustituya silenciosamente
+        // a un Performance real.
+        public ShadowPerformance Shadow(Puppeteer.ShadowConfig cfg)
+        {
+            if (cfg == null) throw new ArgumentNullException(nameof(cfg));
+            if (!storageConfigured)
+                throw new InvalidOperationException("Storage not configured. Call ConfigureStorage before Shadow.");
+
+            Puppeteer.Shadow shadow = ActorInstance.Shadow(cfg);
+            return new ShadowPerformance(shadow);
         }
 
         // Distill: materializa fisicamente las elisiones acumuladas en el journal del

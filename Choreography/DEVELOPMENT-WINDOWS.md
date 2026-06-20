@@ -192,7 +192,7 @@ Server cerró el TLS — keyHash incorrecto o wire format incorrecto. Revisá:
 
 ## 6. Roadmap restante (post-Fase 7)
 
-- **Envelope flow real en `SimplexTransport`** (`SecureQueueAsync` cableo bi-direccional). Hoy el overload sin `senderSignPubKey` lanza `NotImplementedException`. Ver TODO en `SimplexTransport.cs`.
+- ~~**Envelope flow real en `SimplexTransport`**~~ — completado. `AcceptInvitationAsync` y `WaitForConnectionAsync` ahora cablean ReverseQueueEnvelope + ForwardKeyEnvelope con pubkeys cruzadas (senderSign + senderDh). KEY simétrico aplicado en ambas queues. La overload `SecureQueueAsync(queue)` fail-fast fue removida.
 - **Decoder de `ServerDhPublicKey` ASN.1 DER → raw 32B** para usar en crypto_box (server lo envía DER en IDS).
 - **Double Ratchet** opcional (forward secrecy entre Stages). Diferido como decisión arquitectónica.
 - **Encoder share-link HTTPS** opcional (hoy sólo decoder). Si Choreography quiere emitir invitations interop con SimpleX Chat oficial.
