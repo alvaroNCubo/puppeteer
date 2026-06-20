@@ -29,8 +29,6 @@ namespace Puppeteer.EventSourcing.DB
 		public long EntryId { get; }
 		public MaterializationRecordKind Kind { get; }
 		public DateTime OccurredAt { get; }
-		public string Ip { get; }
-		public string User { get; }
 		public string Script { get; }
 		public int ActionId { get; }
 		public string Arguments { get; }
@@ -41,8 +39,6 @@ namespace Puppeteer.EventSourcing.DB
 			long entryId,
 			MaterializationRecordKind kind,
 			DateTime occurredAt,
-			string ip,
-			string user,
 			string script,
 			int actionId,
 			string arguments,
@@ -53,8 +49,6 @@ namespace Puppeteer.EventSourcing.DB
 			this.EntryId = entryId;
 			this.Kind = kind;
 			this.OccurredAt = occurredAt;
-			this.Ip = ip;
-			this.User = user;
 			this.Script = script;
 			this.ActionId = actionId;
 			this.Arguments = arguments;

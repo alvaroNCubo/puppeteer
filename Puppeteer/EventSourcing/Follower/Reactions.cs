@@ -60,17 +60,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			foreach (var reaction in reactions)
 			{
-				if (reaction.Direction == RehydrateDirection.Forward &&
-					(reactionNames.Length == 0 || Array.Exists(reactionNames, name => string.Equals(name, reaction.Name, StringComparison.OrdinalIgnoreCase))))
-				{
-					reaction.Execute(executionMode, cancellationToken);
-				}
-			}
-
-			foreach (var reaction in reactions)
-			{
-				if (reaction.Direction == RehydrateDirection.Backward &&
-					(reactionNames.Length == 0 || Array.Exists(reactionNames, name => string.Equals(name, reaction.Name, StringComparison.OrdinalIgnoreCase))))
+				if (reactionNames.Length == 0 || Array.Exists(reactionNames, name => string.Equals(name, reaction.Name, StringComparison.OrdinalIgnoreCase)))
 				{
 					reaction.Execute(executionMode, cancellationToken);
 				}

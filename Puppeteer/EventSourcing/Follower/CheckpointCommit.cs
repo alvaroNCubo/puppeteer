@@ -29,7 +29,7 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException("checkpointVector cannot be empty. At least one checkpoint level must be specified.");
 
 			ValidateNoDuplicateEventIds(eventIds);
-			// Para RepeatSeek, puede haber mas eventIds que checkpoint levels
+			// Para Many, puede haber mas eventIds que checkpoint levels
 			// Solo validar que todos los checkpoint levels estan presentes
 			ValidateCheckpointLevelsPresent(checkpointVector);
 
@@ -61,7 +61,7 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException("Match chain is empty. Cannot create CheckpointCommit from empty chain.");
 
 			// Construir checkpoint vector: un nivel por cada nodo en la str (no por cada evento)
-			// Para RepeatSeek, puede haber mas eventIds que niveles
+			// Para Many, puede haber mas eventIds que niveles
 			List<long> checkpointLevelIds = new List<long>();
 			CollectCheckpointLevelIds(leafNode, checkpointLevelIds);
 
@@ -85,10 +85,28 @@ namespace Puppeteer.EventSourcing.Follower
 			if (node == null) return;
 			CollectCheckpointLevelIds(node.Parent, levelIds);
 
-			// Para RepeatSeek, usar el ultimo ID acumulado como checkpoint del nivel
+			// Para Many, usar el ultimo ID acumulado como checkpoint del nivel
 			if (node.AccumulatedEventIds != null && node.AccumulatedEventIds.Count > 0)
 			{
 				levelIds.Add(node.AccumulatedEventIds[node.AccumulatedEventIds.Count - 1]);
+			}
+			else if (node.Engine != null && node.Engine.IsExact)
+			{
+				// K.2: Exact con zero accumulated — el checkpoint del nivel es el
+				// parent anchor (no hay match propio para indexar). Defensivo: si
+				// no hay parent, fallback a EntryId que sera 0 para eager-creation.
+				if (node.Parent != null && node.Parent.AccumulatedEventIds != null && node.Parent.AccumulatedEventIds.Count > 0)
+				{
+					levelIds.Add(node.Parent.AccumulatedEventIds[node.Parent.AccumulatedEventIds.Count - 1]);
+				}
+				else if (node.Parent != null)
+				{
+					levelIds.Add(node.Parent.EntryId);
+				}
+				else
+				{
+					levelIds.Add(node.EntryId);
+				}
 			}
 			else
 			{
@@ -102,7 +120,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			CollectEventIdsFromChain(node.Parent, eventIds);
 
-			// Si el nodo es de un RepeatSeek con IDs acumulados, incluir todos
+			// Si el nodo es de un Many con IDs acumulados, incluir todos
 			if (node.AccumulatedEventIds != null && node.AccumulatedEventIds.Count > 0)
 			{
 				foreach (var accumulatedId in node.AccumulatedEventIds)
@@ -112,6 +130,11 @@ namespace Puppeteer.EventSourcing.Follower
 						eventIds.Add(accumulatedId);
 					}
 				}
+			}
+			else if (node.Engine != null && node.Engine.IsExact)
+			{
+				// K.2: Exact con zero accumulated (e.g. None que cerro vacuamente)
+				// no contribuye ningun EntryId al chain.
 			}
 			else
 			{

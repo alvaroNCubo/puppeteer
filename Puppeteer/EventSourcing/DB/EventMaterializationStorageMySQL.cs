@@ -1,6 +1,7 @@
 using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -145,7 +146,7 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@ReactionId", reactionId);
 							command.Parameters.AddWithValue("@Destination", destination);
-							command.Parameters.AddWithValue("@Timestamp", timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+							command.Parameters.AddWithValue("@Timestamp", timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 
 							for (int i = 0; i < batchCount; i++)
 							{
@@ -217,7 +218,7 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@ReactionId", reactionId);
 							command.Parameters.AddWithValue("@Destination", destination);
-							command.Parameters.AddWithValue("@Timestamp", timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+							command.Parameters.AddWithValue("@Timestamp", timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 
 							for (int i = 0; i < batchCount; i++)
 							{

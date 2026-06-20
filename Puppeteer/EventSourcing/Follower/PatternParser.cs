@@ -668,6 +668,16 @@ namespace Puppeteer.EventSourcing.Follower
 		// <typed-parameter> ::= <identifier> ':' <type-name> | <literal> ':' <type-name>
 		private ParameterNode ParseParameter()
 		{
+			// Argumento que es una llamada-con-receiver anidada: foo([_:Clase2].goo($x)).
+			// Reusa ParsePatternElement para la forma con corchetes ([instance:Type].m(...)
+			// o [Type].m(...)) y la envuelve. El receiver lleva su tipo, que es lo que el
+			// matcher necesita para resolver el metodo interno.
+			if (lexer.CurrentToken.Type == TokenType.lBracket)
+			{
+				ExpressionNode nestedCall = ParsePatternElement();
+				return new NestedCallParameterNode(nestedCall);
+			}
+
 			if (lexer.CurrentToken.Type == TokenType.wildcard)
 			{
 				lexer.Accept(TokenType.wildcard);

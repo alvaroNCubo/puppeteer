@@ -12,12 +12,6 @@ using System.Text;
 namespace Puppeteer
 {
 
-	internal enum ParameterKind
-	{
-		User,
-		System
-	}
-
 	public sealed class Parameter
 	{
 		private readonly VariableSymbol instance = null;
@@ -27,7 +21,6 @@ namespace Puppeteer
 		private readonly bool isNullableParameter;
 		private readonly int parameterModifier = 0;
 		private string evalScript;
-		private readonly ParameterKind kind;
 		private /*readonly*/ Program program;
 
 		public static int In = 1;
@@ -35,7 +28,7 @@ namespace Puppeteer
 		public static int InOut = 3;
 		public static int Eval = 4;
 
-		internal Parameter(string name, Type type) : this(In, name, type, ParameterKind.User)
+		internal Parameter(string name, Type type) : this(In, name, type)
 		{
 
 		}
@@ -43,25 +36,35 @@ namespace Puppeteer
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif
-		internal Parameter(int parameterModifier, string name, Type type, ParameterKind kind)
+		internal Parameter(int parameterModifier, string name, Type type)
 		{
 			ArgumentNullException.ThrowIfNull(name);
 			if (!IsValidParameterName(name)) throw new LanguageException($"Parameter name '{name}' is not valid");
 			if (parameterModifier < 1) throw new LanguageException($"Modify '{parameterModifier}' is not valid");
 
 			this.name = name;
+			// El tipo declarado se normaliza ANTES de almacenarse: array -> IEnumerable<elem>
+			// y Nullable<T> -> T. NormalizeParameterType es la unica fuente de esta regla; el
+			// guard de re-set de Parameters.SetParameter usa el mismo helper para que ambos
+			// caminos no puedan divergir (un slot creado desde DateTime[] queda como
+			// IEnumerable<DateTime>, y un re-set con DateTime[] debe normalizar igual antes de
+			// comparar el tipo).
+			this.isNullableParameter = !type.IsValueType || Nullable.GetUnderlyingType(type) != null;
+			this.parameterType = NormalizeParameterType(type);
+			this.parameterModifier = parameterModifier;
+			this.instance = SymbolTable.IsolatedStorage(name, null, this.parameterType);
+		}
+
+		internal static Type NormalizeParameterType(Type type)
+		{
+			ArgumentNullException.ThrowIfNull(type);
 			if (type.IsArray)
 			{
 				var elementType = type.GetElementType();
-				var CastArregloType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
-				type = CastArregloType;
+				type = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
 			}
 			var underlyingType = Nullable.GetUnderlyingType(type);
-			this.isNullableParameter = underlyingType != null || !type.IsValueType;
-			this.parameterType = underlyingType ?? type;
-			this.parameterModifier = parameterModifier;
-			this.kind = kind;
-			this.instance = SymbolTable.IsolatedStorage(name, null, this.parameterType);
+			return underlyingType ?? type;
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -85,8 +88,6 @@ namespace Puppeteer
 		}
 
 		internal string Name => this.name;
-
-		internal ParameterKind Kind => this.kind;
 
 		internal int ParameterModifier => this.parameterModifier;
 
@@ -334,6 +335,30 @@ namespace Puppeteer
 			if (parameterModifier == Parameter.In)
 			{
 				instance.value = instanceViejo;
+			}
+		}
+
+		// Mejora B de perf: fast path para LoadArguments. El valor ya viene boxeado
+		// EXACTAMENTE con ParameterType (el parser del journal produce el tipo exacto:
+		// int.Parse->int, etc.), por lo que ImplicitCast (un value.GetType() + cadena de
+		// comparaciones) y la deteccion de array del setter In son overhead puro en la
+		// ruta de replay mas caliente. Solo aplica a escalares In/InOut; Eval/Out caen al
+		// setter normal para preservar su validacion. Las colecciones NO usan este camino:
+		// el setter In tiene logica de conversion array<->IEnumerable que se conserva.
+		internal void SetParsedScalar(object value)
+		{
+			if (parameterModifier == In)
+			{
+				instance.value = value;
+				instanceViejo = value;
+			}
+			else if (parameterModifier == InOut)
+			{
+				instance.value = value;
+			}
+			else
+			{
+				Value = value;
 			}
 		}
 	}

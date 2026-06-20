@@ -1,6 +1,7 @@
 using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 
 namespace Puppeteer.EventSourcing.DB
@@ -65,8 +66,8 @@ namespace Puppeteer.EventSourcing.DB
 						command.Parameters.AddWithValue("@Destination", destination);
 						command.Parameters.AddWithValue("@RegisteredAtEntryId", registeredAtEntryId);
 						command.Parameters.AddWithValue("@LastConfirmedEntryId", registeredAtEntryId);
-						command.Parameters.AddWithValue("@RegisteredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
-						command.Parameters.AddWithValue("@ConfirmedAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@RegisteredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
+						command.Parameters.AddWithValue("@ConfirmedAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						int affected = command.ExecuteNonQuery();
 						return affected > 0;
 					}
@@ -99,8 +100,8 @@ namespace Puppeteer.EventSourcing.DB
 						command.Parameters.AddWithValue("@Destination", destination);
 						command.Parameters.AddWithValue("@RegisteredAtEntryId", registeredAtEntryId);
 						command.Parameters.AddWithValue("@LastConfirmedEntryId", registeredAtEntryId);
-						command.Parameters.AddWithValue("@RegisteredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
-						command.Parameters.AddWithValue("@ConfirmedAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@RegisteredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
+						command.Parameters.AddWithValue("@ConfirmedAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						int affected = await command.ExecuteNonQueryAsync();
 						return affected > 0;
 					}
@@ -243,7 +244,7 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@Destination", destination);
 						command.Parameters.AddWithValue("@EntryId", entryId);
-						command.Parameters.AddWithValue("@Now", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@Now", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						int affected = command.ExecuteNonQuery();
 
 						if (affected > 0) return true;
@@ -289,7 +290,7 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@Destination", destination);
 						command.Parameters.AddWithValue("@EntryId", entryId);
-						command.Parameters.AddWithValue("@Now", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+						command.Parameters.AddWithValue("@Now", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						int affected = await command.ExecuteNonQueryAsync();
 
 						if (affected > 0) return true;

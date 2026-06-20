@@ -10,9 +10,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal string Name { get; }
 		internal Type ParameterType { get; }
 		internal int ParameterModifier { get; }
-		internal ParameterKind Kind { get; }
 
-		internal ParameterDescriptor(int parameterModifier, string name, Type parameterType, ParameterKind kind)
+		internal ParameterDescriptor(int parameterModifier, string name, Type parameterType)
 		{
 			ArgumentNullException.ThrowIfNull(name);
 			if (!Parameter.IsValidParameterName(name)) throw new LanguageException($"Parameter name '{name}' is not valid");
@@ -21,7 +20,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Name = name;
 			ParameterType = parameterType;
 			ParameterModifier = parameterModifier;
-			Kind = kind;
 		}
 	}
 
@@ -34,7 +32,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			ArgumentNullException.ThrowIfNull(referencedParameters);
 
 			var descriptors = referencedParameters
-				.Select(p => new ParameterDescriptor(p.ParameterModifier, p.Name, p.ParameterType, p.Kind))
+				.Select(p => new ParameterDescriptor(p.ParameterModifier, p.Name, p.ParameterType))
 				.ToArray();
 
 			_parameterDescriptors = descriptors;

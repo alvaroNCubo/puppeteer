@@ -78,6 +78,19 @@ namespace Puppeteer.EventSourcing.Follower
 			ArgumentException.ThrowIfNullOrWhiteSpace(script);
 			reaction.SetCausationAction(script);
 		}
+
+		// Variante con check: el tell del script entrega al RECEPTOR un
+		// CheckThenCommand — el check (predicado DSL) se evalua contra el estado
+		// del receptor, no aqui (el origen siempre cumpliria). Asi un fan-out
+		// replicado es idempotente: el nodo que ya creo el efecto absorbe el
+		// echo. El check viaja en TellEnvelope.Check. Firma pensada para
+		// `Continue(check: "...", "tell ...")`.
+		public void Continue(string check, string script)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(check);
+			ArgumentException.ThrowIfNullOrWhiteSpace(script);
+			reaction.SetCausationAction(script, check);
+		}
 	}
 
 	public sealed class MetadataPlane
@@ -97,6 +110,23 @@ namespace Puppeteer.EventSourcing.Follower
 		public void Elide()
 		{
 			reaction.SetMetadataAction(MetadataKind.Elide, destination: null);
+		}
+
+		// F4: elisión selectiva. Elide(seek: "X") elide solo los entryIds del Seek "X"
+		// del match (p.ej. la compra ancla, sin sus confirms). Elide(seeks: "A","B")
+		// elide varios. Sin argumentos, Elide() elide la cadena completa del match.
+		public void Elide(string seek)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(seek);
+			reaction.SetMetadataAction(MetadataKind.Elide, destination: null, elideSeeks: new[] { seek });
+		}
+
+		public void Elide(params string[] seeks)
+		{
+			ArgumentNullException.ThrowIfNull(seeks);
+			if (seeks.Length == 0) throw new LanguageException("Elide(seeks:) requiere al menos un Seek; usa Elide() para la cadena completa.");
+			foreach (string s in seeks) ArgumentException.ThrowIfNullOrWhiteSpace(s);
+			reaction.SetMetadataAction(MetadataKind.Elide, destination: null, elideSeeks: seeks);
 		}
 
 		// Declare that the entries completing this Reaction's pattern

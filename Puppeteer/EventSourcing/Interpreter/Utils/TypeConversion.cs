@@ -56,13 +56,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 			{
 				List<double> valorConTipo = value as List<double>;
 
-				if (target == typeof(double))
+				if (target.GetElementType() == typeof(double))
 				{
 					double[] res = new double[valorConTipo.Count];
 					for (int i = 0; i < valorConTipo.Count; i++) res[i] = valorConTipo[i];
 					return res;
 				}
-				else if (target == typeof(Decimal))
+				else if (target.GetElementType() == typeof(Decimal))
 				{
 					Decimal[] res = new Decimal[valorConTipo.Count];
 					for (int i = 0; i < valorConTipo.Count; i++) res[i] = (Decimal)valorConTipo[i];
@@ -88,13 +88,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 			{
 				List<Decimal> valorConTipo = value as List<Decimal>;
 
-				if (target == typeof(double))
+				if (target.GetElementType() == typeof(double))
 				{
 					double[] res = new double[valorConTipo.Count];
 					for (int i = 0; i < valorConTipo.Count; i++) res[i] = (double)valorConTipo[i];
 					return res;
 				}
-				else if (target == typeof(Decimal))
+				else if (target.GetElementType() == typeof(Decimal))
 				{
 					Decimal[] res = new Decimal[valorConTipo.Count];
 					for (int i = 0; i < valorConTipo.Count; i++) res[i] = valorConTipo[i];
@@ -193,6 +193,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 						foreach (var elementos in (List<double>)value) res.Add((Decimal)elementos);
 						return res;
 					}
+					else if (target.GetGenericArguments().Length == 1 && actual.GetGenericArguments().Length == 1 && value is IEnumerable)
+					{
+						Type targetElem = target.GetGenericArguments()[0];
+						Type actualElem = actual.GetGenericArguments()[0];
+						if (targetElem != actualElem && IsNumeric(targetElem) && IsNumeric(actualElem))
+						{
+							Type listType = typeof(List<>).MakeGenericType(targetElem);
+							IList res = (IList)Activator.CreateInstance(listType);
+							foreach (var elemento in (IEnumerable)value) res.Add(Convert.ChangeType(elemento, targetElem));
+							return res;
+						}
+					}
 				}
 				else if (target.IsArray && actual.IsArray && actual != target)
 				{
@@ -214,6 +226,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 				resultado = value;
 			}
 			return resultado;
+		}
+
+		private static bool IsNumeric(Type t)
+		{
+			return t == typeof(int) || t == typeof(long) || t == typeof(short) || t == typeof(byte)
+				|| t == typeof(sbyte) || t == typeof(uint) || t == typeof(ulong) || t == typeof(ushort)
+				|| t == typeof(float) || t == typeof(double) || t == typeof(decimal);
 		}
 
 	}

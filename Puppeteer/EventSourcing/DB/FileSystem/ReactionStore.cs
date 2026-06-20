@@ -9,12 +9,16 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 	{
 		private static readonly byte[] MAGIC_REACTIONS = new byte[] { (byte)'P', (byte)'P', (byte)'R', (byte)'X' };
 		private static readonly byte[] MAGIC_CHECKPOINTS = new byte[] { (byte)'P', (byte)'P', (byte)'C', (byte)'P' };
+		private static readonly byte[] MAGIC_FRONTIERS = new byte[] { (byte)'P', (byte)'P', (byte)'F', (byte)'R' };
 		private const ushort FORMAT_VERSION = 1;
 		private const int HEADER_SIZE = 10;
 		private const int CHECKPOINT_RECORD_SIZE = 28;
+		// Resume optimization: frontier record = reactionId(8) + highWater(8) + closedFrontier(8).
+		private const int FRONTIER_RECORD_SIZE = 24;
 
 		private readonly string reactionsPath;
 		private readonly string checkpointsPath;
+		private readonly string frontiersPath;
 		private readonly IAtomicFileOperation atomicOp;
 		private readonly object storeLock = new();
 
@@ -25,6 +29,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		// Checkpoints: (reactionId, seekLevel) -> (detected, confirmed)
 		private readonly Dictionary<(long, int), (long detected, long confirmed)> checkpoints = new();
 
+		// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction
+		// para cobertura. reactionId -> (highWater, closedFrontier). Persiste en un archivo propio
+		// (derivado de checkpointsPath) para no tocar el formato del checkpoint per-seek.
+		private readonly Dictionary<long, (long highWater, long closedFrontier)> frontiers = new();
+
 		internal ReactionStore(string reactionsPath, string checkpointsPath, IAtomicFileOperation atomicOp)
 		{
 			if (reactionsPath == null) throw new ArgumentNullException(nameof(reactionsPath));
@@ -33,10 +42,12 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 			this.reactionsPath = reactionsPath;
 			this.checkpointsPath = checkpointsPath;
+			this.frontiersPath = checkpointsPath + ".frontiers";
 			this.atomicOp = atomicOp;
 
 			LoadReactions();
 			LoadCheckpoints();
+			LoadFrontiers();
 		}
 
 		private void LoadReactions()
@@ -135,6 +146,74 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			string tempPath = checkpointsPath + ".tmp";
 			File.WriteAllBytes(tempPath, data);
 			atomicOp.AtomicReplace(tempPath, checkpointsPath);
+		}
+
+		private void LoadFrontiers()
+		{
+			atomicOp.RecoverFromIncompleteOperation(frontiersPath);
+			if (!File.Exists(frontiersPath)) return;
+
+			byte[] data = File.ReadAllBytes(frontiersPath);
+			if (data.Length < HEADER_SIZE) return;
+			if (data[0] != MAGIC_FRONTIERS[0] || data[1] != MAGIC_FRONTIERS[1] ||
+				data[2] != MAGIC_FRONTIERS[2] || data[3] != MAGIC_FRONTIERS[3]) return;
+
+			int count = BitConverter.ToInt32(data, 6);
+			int offset = HEADER_SIZE;
+
+			for (int i = 0; i < count && offset + FRONTIER_RECORD_SIZE <= data.Length; i++)
+			{
+				long reactionId = BitConverter.ToInt64(data, offset); offset += 8;
+				long highWater = BitConverter.ToInt64(data, offset); offset += 8;
+				long closedFrontier = BitConverter.ToInt64(data, offset); offset += 8;
+
+				frontiers[reactionId] = (highWater, closedFrontier);
+			}
+		}
+
+		private void SaveFrontiers()
+		{
+			int size = HEADER_SIZE + frontiers.Count * FRONTIER_RECORD_SIZE;
+			byte[] data = new byte[size];
+			int offset = 0;
+
+			Buffer.BlockCopy(MAGIC_FRONTIERS, 0, data, offset, 4); offset += 4;
+			BitConverter.TryWriteBytes(data.AsSpan(offset, 2), FORMAT_VERSION); offset += 2;
+			BitConverter.TryWriteBytes(data.AsSpan(offset, 4), frontiers.Count); offset += 4;
+
+			foreach (var kvp in frontiers)
+			{
+				BitConverter.TryWriteBytes(data.AsSpan(offset, 8), kvp.Key); offset += 8;
+				BitConverter.TryWriteBytes(data.AsSpan(offset, 8), kvp.Value.highWater); offset += 8;
+				BitConverter.TryWriteBytes(data.AsSpan(offset, 8), kvp.Value.closedFrontier); offset += 8;
+			}
+
+			string tempPath = frontiersPath + ".tmp";
+			File.WriteAllBytes(tempPath, data);
+			atomicOp.AtomicReplace(tempPath, frontiersPath);
+		}
+
+		internal (long highWater, long closedFrontier) GetFrontier(long reactionId)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+
+			lock (storeLock)
+			{
+				return frontiers.TryGetValue(reactionId, out var f) ? f : (0L, 0L);
+			}
+		}
+
+		internal void SaveFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+			if (highWater < 0) throw new LanguageException("highWater must be zero or greater.");
+			if (closedFrontier < 0) throw new LanguageException("closedFrontier must be zero or greater.");
+
+			lock (storeLock)
+			{
+				frontiers[reactionId] = (highWater, closedFrontier);
+				SaveFrontiers();
+			}
 		}
 
 		internal long GetOrCreate(string formattedReaction)

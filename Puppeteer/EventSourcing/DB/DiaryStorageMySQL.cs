@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -28,15 +29,15 @@ namespace Puppeteer.EventSourcing.DB
 		// Requiere AllowMultipleStatements = true en la connection string de MySQL: "Server=...;Database=...;AllowMultipleStatements=true;..."
 		internal DiaryStorageMySQL(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
 		{
-			mySqlWriteScriptCommand = $"insert into `{Name}` (id, OccurredAt, Ip, User, Script) values (@id, @OccurredAt, @Ip, @User, @Script)";
+			mySqlWriteScriptCommand = $"insert into `{Name}` (id, OccurredAt, Script) values (@id, @OccurredAt, @Script)";
 
 			// Define rows: script = canonical sentence, action = actionId,
 			// arguments = NULL. The first invocation lives in a separate
 			// Invocation row.
-			mySqlWriteDefineCommand = $"INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL)";
+			mySqlWriteDefineCommand = $"INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@EntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL)";
 
 			// Invocation rows: script = NULL, action = actionId, arguments = args.
-			mySqlWriteInvocationCommand = $"INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments)";
+			mySqlWriteInvocationCommand = $"INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@EntryId, @OccurredAt, NULL, @ActionID, @Arguments)";
 
 			mySqlWriteScriptCommandWithExposeData = $@"
 				BEGIN;
@@ -76,8 +77,6 @@ namespace Puppeteer.EventSourcing.DB
 				.Append('(')
 				.Append("	id BIGINT NOT NULL,")
 				.Append("	OccurredAt DATETIME(3) NOT NULL,")
-				.Append("	Ip VARCHAR(39) NULL,")
-				.Append("	User VARCHAR(45) NULL,")
 				.Append("	Script TEXT NULL,")
 				.Append("	Action INT NULL,")
 				.Append("	Arguments TEXT NULL,")
@@ -115,6 +114,30 @@ namespace Puppeteer.EventSourcing.DB
 					PRIMARY KEY (ReactionId, Pattern)
 				) ENGINE=InnoDB CHARSET=utf8;");
 
+			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por
+			// reaction (frente-leido + frontera-cerrada) para resume de cobertura.
+			statement
+				.Append(@"CREATE TABLE IF NOT EXISTS ReactionFrontier (
+					ReactionId INT NOT NULL,
+					HighWater BIGINT NOT NULL DEFAULT 0,
+					ClosedFrontier BIGINT NOT NULL DEFAULT 0,
+					PRIMARY KEY (ReactionId)
+				) ENGINE=InnoDB CHARSET=utf8;");
+
+			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
+			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
+			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// Follower/Reaction/ReactionCheckpoint/ReactionFrontier. Reported by a follower deployment
+			// 2.0.1-beta.9817 (follower sobre DB MySQL nueva donde el script manual nunca
+			// corrio). La columna es DiaryId (no DairyId): es la que el motor lee en el JOIN
+			// y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			statement
+				.Append(@"CREATE TABLE IF NOT EXISTS ExposeData (
+					DiaryId BIGINT NOT NULL,
+					ExposeJson TEXT NOT NULL,
+					PRIMARY KEY (DiaryId)
+				) ENGINE=InnoDB CHARSET=utf8;");
+
 			string sql = statement.ToString();
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -148,14 +171,22 @@ namespace Puppeteer.EventSourcing.DB
 				.Append('(')
 				.Append("	id BIGINT NOT NULL,")
 				.Append("	OccurredAt DATETIME(3) NOT NULL,")
-				.Append("	Ip VARCHAR(39) NULL,")
-				.Append("	User VARCHAR(45) NULL,")
 				.Append("	Script TEXT NULL,")
 				.Append("	Action INT NULL,")
 				.Append("	Arguments TEXT NULL,")
 				.Append("	Skip TINYINT(1) NOT NULL DEFAULT 0,")
 				.Append("	PRIMARY KEY (id)")
 				.Append(")	ENGINE=InnoDB CHARSET=utf8;");
+
+			// Schema validation: si la tabla del actor ya existia con un schema
+			// viejo (Exchange Engine pre-rename), CREATE TABLE IF NOT EXISTS es
+			// no-op y la siguiente SELECT con d.OccurredAt / d.Action /
+			// d.Arguments lanza MySqlException 'Unknown column ...' que el
+			// catch de RehydrateFromEvent silenciaba con Console.WriteLine,
+			// dejando al actor con CurrentEntryId=0 y journal aparentemente
+			// vacio. Reportado por LiquidityAPI 2.0.1-beta.9553. Aqui
+			// inspeccionamos las columnas reales y throw inmediato con el
+			// ALTER TABLE accionable.
 
 			// Phase 6 of the Action refactor: dropped CREATE TABLE _ACTION.
 			// Action definitions live in the journal as Define records.
@@ -188,6 +219,31 @@ namespace Puppeteer.EventSourcing.DB
 				) ENGINE=InnoDB CHARSET=utf8;"
 			);
 
+			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			statement.Append(@"
+				CREATE TABLE IF NOT EXISTS ReactionFrontier (
+					ReactionId INT NOT NULL,
+					HighWater BIGINT NOT NULL DEFAULT 0,
+					ClosedFrontier BIGINT NOT NULL DEFAULT 0,
+					PRIMARY KEY (ReactionId)
+				) ENGINE=InnoDB CHARSET=utf8;"
+			);
+
+			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
+			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
+			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// Follower/Reaction/ReactionCheckpoint/ReactionFrontier. Reported by a follower deployment
+			// 2.0.1-beta.9817 (follower sobre DB MySQL nueva donde el script manual nunca
+			// corrio). La columna es DiaryId (no DairyId): es la que el motor lee en el JOIN
+			// y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			statement.Append(@"
+				CREATE TABLE IF NOT EXISTS ExposeData (
+					DiaryId BIGINT NOT NULL,
+					ExposeJson TEXT NOT NULL,
+					PRIMARY KEY (DiaryId)
+				) ENGINE=InnoDB CHARSET=utf8;"
+			);
+
 			string sql = statement.ToString();
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -209,7 +265,75 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 
+			if (!created)
+			{
+				ValidateExistingSchemaOrThrow(nombreDelDiario);
+			}
+
 			return created;
+		}
+
+		// Inspecciona `information_schema.COLUMNS` para detectar tablas de actor
+		// pre-existentes con el schema viejo de Exchange Engine (FechaHora,
+		// NOT NULL Ip/User/Script, sin Action/Arguments). Si encuentra mismatch,
+		// throw LanguageException con el script ALTER TABLE listo para correr.
+		// Llamado solo cuando created==false (la tabla ya existia).
+		private void ValidateExistingSchemaOrThrow(string tableName)
+		{
+			var columns = new Dictionary<string, (string DataType, string IsNullable)>(StringComparer.OrdinalIgnoreCase);
+			string sql = $@"
+				SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+				FROM information_schema.COLUMNS
+				WHERE TABLE_NAME = '{tableName}'
+				  AND TABLE_SCHEMA = (SELECT DATABASE())";
+
+			using (var connection = new MySqlConnection(ConnectionString))
+			{
+				connection.Open();
+				using (var command = new MySqlCommand(sql, connection))
+				using (var reader = command.ExecuteReader())
+				{
+					while (reader.Read())
+					{
+						columns[reader.GetString(0)] = (reader.GetString(1), reader.GetString(2));
+					}
+				}
+			}
+
+			var issues = new List<string>();
+			var alters = new List<string>();
+
+			if (columns.ContainsKey("FechaHora") && !columns.ContainsKey("OccurredAt"))
+			{
+				issues.Add("column 'FechaHora' should be renamed to 'OccurredAt'");
+				alters.Add($"ALTER TABLE `{tableName}` CHANGE COLUMN `FechaHora` `OccurredAt` DATETIME(3) NOT NULL;");
+			}
+			if (!columns.ContainsKey("Action"))
+			{
+				issues.Add("column 'Action' is missing");
+				alters.Add($"ALTER TABLE `{tableName}` ADD COLUMN `Action` INT NULL AFTER `Script`;");
+			}
+			if (!columns.ContainsKey("Arguments"))
+			{
+				issues.Add("column 'Arguments' is missing");
+				alters.Add($"ALTER TABLE `{tableName}` ADD COLUMN `Arguments` TEXT NULL AFTER `Action`;");
+			}
+			if (columns.TryGetValue("Script", out var scriptCol) && scriptCol.IsNullable.Equals("NO", StringComparison.OrdinalIgnoreCase))
+			{
+				issues.Add("column 'Script' must allow NULL");
+				alters.Add($"ALTER TABLE `{tableName}` MODIFY COLUMN `Script` TEXT NULL;");
+			}
+
+			if (issues.Count == 0) return;
+
+			var msg = new StringBuilder();
+			msg.Append("MySQL table `").Append(tableName).Append("` has a schema from an older Puppeteer version and is not compatible with the current package. ");
+			msg.Append("Detected issues: ").AppendJoin("; ", issues).Append(". ");
+			msg.Append("Run the following migration on the actor's database before starting:\n");
+			foreach (var alter in alters) msg.Append("  ").Append(alter).Append('\n');
+			msg.Append("After running these statements (and the equivalent rename `DairyId`→`EntryId` on the `Follower` table if present), restart the consumer.");
+
+			throw new LanguageException(msg.ToString());
 		}
 
 		// Phase 6 of the Action refactor: dropped LoadSingleAction +
@@ -220,11 +344,6 @@ namespace Puppeteer.EventSourcing.DB
 
 		protected internal override long RehydrateFromEvent(long afterEntryId = 0, bool includeExposeData = false)
 		{
-			return RehydrateFromEvent(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
-		protected internal override long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
-		{
 			EventJournalClient.IsNew = CreateDiary(this.Name);
 
 			bool canContinueReplay = false;
@@ -233,8 +352,8 @@ namespace Puppeteer.EventSourcing.DB
 			bool salir = false;
 			int cantidadDeLeaderInitialization = 0;
 
-			// Pick the ORDER BY direction.
-			string orderByClause = direction == RehydrateDirection.Forward ? "ORDER BY d.id ASC" : "ORDER BY d.id DESC";
+			// Forward replay: events in ascending id order.
+			string orderByClause = "ORDER BY d.id ASC";
 
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -278,12 +397,12 @@ namespace Puppeteer.EventSourcing.DB
 					// construction (atomic write + monotonic ordering).
 
 					string sql = includeExposeData
-						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.User, d.Action, d.Arguments, ed.ExposeJson
+						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 							FROM `{base.Name}` d
 							LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
 							WHERE d.Skip = 0 AND d.id > {ultimoId}
 							{orderByClause}"
-						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.User, d.Action, d.Arguments
+						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments
 							FROM `{base.Name}` d
 							WHERE d.Skip = 0 AND d.id > {ultimoId}
 							{orderByClause}";
@@ -314,17 +433,13 @@ namespace Puppeteer.EventSourcing.DB
 
 												DateTime occurredAt = reader.GetDateTime(1);
 
-												string ip = reader.IsDBNull(3) ? IpAddress.DEFAULT.Ip : reader.GetString(3);
-
-												string user = reader.IsDBNull(4) ? UserInLog.ANONYMOUS.Id : reader.GetString(4);
-
 												bool scriptIsNull = reader.IsDBNull(2);
-												bool actionIsNull = reader.IsDBNull(5);
+												bool actionIsNull = reader.IsDBNull(3);
 
 												// Phase 4 of the Action refactor: process Define rows.
 												if (!scriptIsNull && !actionIsNull)
 												{
-													int defineActionId = reader.GetInt32(5);
+													int defineActionId = reader.GetInt32(3);
 													string defineStatementText = reader.GetString(2);
 													EventJournalClient.AddKnownActionFromDefine(defineActionId, defineStatementText);
 													continue;
@@ -332,20 +447,18 @@ namespace Puppeteer.EventSourcing.DB
 
 												if (scriptIsNull)
 												{
-													int actionId = reader.GetInt32(5);
+													int actionId = reader.GetInt32(3);
 
 													// Phase 5: legacy LoadSingleAction recovery lookup
 													// dropped — Define entries in the journal populate
 													// the cache by construction.
 
-													string arguments = reader.GetString(6);
+													string arguments = reader.GetString(4);
 
-													string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+													string exposeJson = includeExposeData && !reader.IsDBNull(5) ? reader.GetString(5) : null;
 
 												var actionData = base.EventDataPool.RentAction();
 													actionData.EntryId = entryId;
-													actionData.Ip = ip;
-													actionData.User = user;
 													actionData.OccurredAt = occurredAt;
 													actionData.ActionId = actionId;
 													actionData.Arguments = arguments;
@@ -356,12 +469,10 @@ namespace Puppeteer.EventSourcing.DB
 												else
 												{
 													string script = reader.GetString(2);
-													string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+													string exposeJson = includeExposeData && !reader.IsDBNull(5) ? reader.GetString(5) : null;
 
 													var scriptData = base.EventDataPool.RentScript();
 													scriptData.EntryId = entryId;
-													scriptData.Ip = ip;
-													scriptData.User = user;
 													scriptData.OccurredAt = occurredAt;
 													scriptData.Script = script;
 													scriptData.ExposeData = exposeJson;
@@ -375,16 +486,18 @@ namespace Puppeteer.EventSourcing.DB
 										{
 											intentos--;
 											fails++;
-											Console.WriteLine($"Current fails : {fails} Error in : {base.Name}.");
-											Console.WriteLine(mysqlException);
-											Console.WriteLine();
+											// Pasa por IPuppeteerLogger.Error en vez de Console.WriteLine: con
+											// el ConsoleLogger default va a stderr (Console.Error) con prefijo
+											// [Puppeteer ERROR], y los hosts que inyectaron Serilog/MEL/NLog
+											// via Performance.Logger(...) lo capturan tambien. Antes del refactor
+											// de log4net->IPuppeteerLogger esto era invisible en stderr.
+											Logger.Error($"RehydrateFromEvent retry {fails} on actor '{base.Name}'. type:{mysqlException.GetType()} error:{mysqlException.Message}", mysqlException);
 										}
 									}
 								}
 								catch (Exception e)
 								{
-									Console.WriteLine($"Error in : {base.Name}.");
-									Console.WriteLine(e);
+									Logger.Error($"RehydrateFromEvent inner block failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 								}
 								finally
 								{
@@ -423,16 +536,22 @@ namespace Puppeteer.EventSourcing.DB
 			}
 			catch (Exception e)
 			{
-				Console.WriteLine($"Error in : {base.Name}.");
-				Console.WriteLine(e);
+				// Pasa por IPuppeteerLogger.Error: con el ConsoleLogger default va a
+				// Console.Error (stderr) con prefijo [Puppeteer ERROR]. Si el host
+				// inyecto un logger (Serilog/MEL/NLog) via Performance.Logger(...),
+				// tambien lo recibe ahi. El swallow-and-continue se mantiene para
+				// permitir que fallas transitorias no aborten el actor — el caller
+				// (EventSourcingStorage) ve ultimoId = afterEntryId y continua con
+				// estado parcial; el log es la unica evidencia de la falla.
+				Logger.Error($"RehydrateFromEvent outer block failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
 			return ultimoId;
 		}
 
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
 		{
-			return Task.FromResult(RehydrateFromEvent(afterEntryId, direction));
+			return Task.FromResult(RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
 		protected internal override long GetLastProcessedEntryId(int followerId)
@@ -495,7 +614,7 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		protected internal override async Task WriteScriptEntryAsync(long entryId, string script, string ip, string user, DateTime now, string exposeData)
+		protected internal override async Task WriteScriptEntryAsync(long entryId, string script, DateTime now, string exposeData)
 		{
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -518,9 +637,7 @@ namespace Puppeteer.EventSourcing.DB
 					using (MySqlCommand command = new MySqlCommand(sql, connection))
 					{
 						command.Parameters.AddWithValue("@id", entryId);
-						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						command.Parameters.AddWithValue("@Script", script);
 
 						if (hasExposeData)
@@ -534,12 +651,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -547,13 +664,19 @@ namespace Puppeteer.EventSourcing.DB
 					await connection.CloseAsync();
 				}
 			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeScriptRecord(entryId, script, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
 		// Phase 6 of the Action refactor: dropped WriteActionEntryAsync +
 		// WriteNewActionEntryAsync overrides. Use WriteInvocationEntryAsync /
 		// WriteDefineEntryAsync / WriteDefineWithFirstInvocationAsync.
 
-		protected internal override void WriteScriptEntry(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteScriptEntry(long entryId, string script, DateTime now, string exposeData = null)
 		{
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -576,9 +699,7 @@ namespace Puppeteer.EventSourcing.DB
 					using (MySqlCommand command = new MySqlCommand(sql, connection))
 					{
 						command.Parameters.AddWithValue("@id", entryId);
-						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
+						command.Parameters.AddWithValue("@OccurredAt", now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
 						command.Parameters.AddWithValue("@Script", script);
 
 						if (hasExposeData)
@@ -592,18 +713,24 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
 				{
 					connection.Close();
 				}
+			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeScriptRecord(entryId, script, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
 			}
 		}
 
@@ -620,7 +747,7 @@ namespace Puppeteer.EventSourcing.DB
 		// _ACTION table — that is the legacy WriteNewActionEntry's job, and
 		// Phase 6 drops the table entirely. Replay silently skips Define rows in
 		// Phase 3 (see the discriminator update in RehydrateFromEvent).
-		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 
@@ -637,8 +764,6 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@EntryId", entryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 
@@ -653,12 +778,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir Define entry en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -666,9 +791,15 @@ namespace Puppeteer.EventSourcing.DB
 					connection.Close();
 				}
 			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeDefineRecord(actionId, defineStatementText, entryId, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 
@@ -685,8 +816,6 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@EntryId", entryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 
@@ -701,18 +830,24 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir Define entry async en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
 				{
 					await connection.CloseAsync();
 				}
+			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeDefineRecord(actionId, defineStatementText, entryId, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
 			}
 		}
 
@@ -720,8 +855,10 @@ namespace Puppeteer.EventSourcing.DB
 		// script = NULL, action = actionId, arguments = args. Phase 6 of the
 		// Action refactor dropped the legacy WriteActionEntry — this is the
 		// only path for invocations post-cutover.
-		protected internal override void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
+			ArgumentNullException.ThrowIfNull(arguments);
+
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
 				try
@@ -735,8 +872,6 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@EntryId", entryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 						command.Parameters.AddWithValue("@Arguments", arguments);
 
@@ -751,12 +886,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir Invocation entry en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -764,10 +899,18 @@ namespace Puppeteer.EventSourcing.DB
 					connection.Close();
 				}
 			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeInvocationRecord(actionId, entryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
+			ArgumentNullException.ThrowIfNull(arguments);
+
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
 				try
@@ -781,8 +924,6 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						command.Parameters.AddWithValue("@EntryId", entryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 						command.Parameters.AddWithValue("@Arguments", arguments);
 
@@ -797,25 +938,31 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception("Error al escribir Invocation entry async en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
 				{
 					await connection.CloseAsync();
 				}
+			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeInvocationRecord(actionId, entryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
 			}
 		}
 
 		// Phase 4 atomic write — see DiaryStorage.cs for the contract. Wraps the
 		// two INSERTs in an explicit BEGIN/COMMIT pair so the pair is transactional
 		// — either both rows land in the journal or neither does.
-		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 			ArgumentNullException.ThrowIfNull(arguments);
@@ -824,14 +971,14 @@ namespace Puppeteer.EventSourcing.DB
 			string sql = hasExposeData
 				? $@"
 					BEGIN;
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);
 					COMMIT;"
 				: $@"
 					BEGIN;
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					COMMIT;";
 
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
@@ -844,8 +991,6 @@ namespace Puppeteer.EventSourcing.DB
 						command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
 						command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 						command.Parameters.AddWithValue("@Arguments", arguments);
@@ -860,12 +1005,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception($"Error al escribir Define+Invocation atomic en MySQL (actionId={actionId}). {e.Message}");
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -873,9 +1018,17 @@ namespace Puppeteer.EventSourcing.DB
 					connection.Close();
 				}
 			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] defineRecord = EncodeDefineRecord(actionId, defineStatementText, defineEntryId, now, null);
+				byte[] invocationRecord = EncodeInvocationRecord(actionId, invocationEntryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(defineEntryId, defineRecord);
+				OnRecordWritten.Invoke(invocationEntryId, invocationRecord);
+			}
 		}
 
-		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 			ArgumentNullException.ThrowIfNull(arguments);
@@ -884,14 +1037,14 @@ namespace Puppeteer.EventSourcing.DB
 			string sql = hasExposeData
 				? $@"
 					BEGIN;
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);
 					COMMIT;"
 				: $@"
 					BEGIN;
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO `{Name}` (id, occurredAt, ip, user, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO `{Name}` (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					COMMIT;";
 
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
@@ -904,8 +1057,6 @@ namespace Puppeteer.EventSourcing.DB
 						command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
 						command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
 						command.Parameters.AddWithValue("@OccurredAt", now);
-						command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-						command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 						command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 						command.Parameters.AddWithValue("@ActionID", actionId);
 						command.Parameters.AddWithValue("@Arguments", arguments);
@@ -920,12 +1071,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
 					throw new Exception($"Error al escribir Define+Invocation atomic async en MySQL (actionId={actionId}). {e.Message}");
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -933,16 +1084,19 @@ namespace Puppeteer.EventSourcing.DB
 					await connection.CloseAsync();
 				}
 			}
+
+			if (OnRecordWritten != null)
+			{
+				byte[] defineRecord = EncodeDefineRecord(actionId, defineStatementText, defineEntryId, now, null);
+				byte[] invocationRecord = EncodeInvocationRecord(actionId, invocationEntryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(defineEntryId, defineRecord);
+				OnRecordWritten.Invoke(invocationEntryId, invocationRecord);
+			}
 		}
 
 		internal override void ChangePrimaryKey()
 		{
 			Debug.WriteLine("Mysql tables doesn't need any change.");
-		}
-
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
-		{
-			return RehydrateFromEventAsync(afterEntryId, RehydrateDirection.Forward, includeExposeData);
 		}
 
 		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
@@ -971,8 +1125,8 @@ namespace Puppeteer.EventSourcing.DB
 						swDairyPeriodRangeToExport = new StreamWriter(msDairyPeriodRangeToExport, Encoding.UTF8);
 
 
-						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd") + "_bak.sql";
-						string sql = $"SELECT OccurredAt, Ip, User, Script, Skip, Id FROM `{aName}` WHERE OccurredAt >= '{fechaInicio.ToString("yyyy-MM-dd HH:mm:ss")}' AND OccurredAt < '{fechaFin.ToString("yyyy-MM-dd HH:mm:ss")}' AND Skip = 1 ORDER BY id";
+						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
+						string sql = $"SELECT OccurredAt, Script, Skip, Id FROM `{aName}` WHERE OccurredAt >= '{fechaInicio.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND OccurredAt < '{fechaFin.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND Skip = 1 ORDER BY id";
 						using (MySqlCommand command = new MySqlCommand(sql, connection))
 						using (MySqlDataReader reader = command.ExecuteReader())
 						{
@@ -982,25 +1136,18 @@ namespace Puppeteer.EventSourcing.DB
 							while (reader.Read())
 							{
 								DateTime occurredAt = reader.GetDateTime(0);
-								string script = reader.GetString(3);
+								string script = reader.GetString(1);
 
-								string ip = reader.GetString(1);
-
-								UserInLog user = UserInLog.GenerateUserBasedOn(reader.GetString(2));
-								byte skip = Convert.ToByte(reader.GetBoolean(4));
-								int id = reader.GetInt32(5);
+								byte skip = Convert.ToByte(reader.GetBoolean(2));
+								int id = reader.GetInt32(3);
 
 								insertString.Append("INSERT INTO ");
 								insertString.Append(aName);
-								insertString.Append("(id, OccurredAt, Ip1, Ip2, Ip3, Ip4, User, Script, Skip) ");
+								insertString.Append("(id, OccurredAt, Script, Skip) ");
 								insertString.Append("VALUES (");
 								insertString.Append(id);
 								insertString.Append(',');
 								insertString.Append("STR_TO_DATE('"); insertString.Append(occurredAt); insertString.Append("','%m/%d/%Y %h:%i:%s %p')");   //STR_TO_DATE('4/23/2019 9:37:16 AM','%m/%d/%Y %h:%i:%s %p')
-								insertString.Append(',');
-								insertString.Append(ip);
-								insertString.Append(',');
-								insertString.Append(user);
 								insertString.Append(',');
 								insertString.Append("'" + script.Replace("'", "\\\'").Replace("\"", "\\\"") + "'");
 								insertString.Append(',');
@@ -1139,17 +1286,17 @@ namespace Puppeteer.EventSourcing.DB
 							sql.Append('`');
 							sql.Append(aName);
 							sql.Append('`');
-							sql.Append("(id, OccurredAt, Ip, User, Script, Skip) ");
-							sql.Append(" SELECT id, OccurredAt, Ip, User, Script, Skip FROM ");
+							sql.Append("(id, OccurredAt, Script, Skip) ");
+							sql.Append(" SELECT id, OccurredAt, Script, Skip FROM ");
 							sql.Append('`');
 							sql.Append(aName);
 							sql.Append(POSTFIX);
 							sql.Append('`');
 							sql.Append(" WHERE (Skip = 0");
 							sql.Append(" AND OccurredAt < '");
-							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss"));
+							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
 							sql.Append("') OR OccurredAt >= '");
-							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss"));
+							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
 							sql.Append("' ORDER BY id;");
 
 							/*ARMA EL SCRIPT DE DROP TABLE*/
@@ -1170,7 +1317,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (MySqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
 
 					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + sql + "]. " + e.Message);
 				}
@@ -1186,7 +1333,7 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			bool needsTrim = false;
 
-			string sql = $"SELECT * FROM `{aName}` WHERE Skip = 1 AND OccurredAt > '{trimmedDown.ToString("yyyy-M-dd HH:mm:ss.fff")}' LIMIT 1;";
+			string sql = $"SELECT * FROM `{aName}` WHERE Skip = 1 AND OccurredAt > '{trimmedDown.ToString("yyyy-M-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}' LIMIT 1;";
 
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -1363,6 +1510,75 @@ namespace Puppeteer.EventSourcing.DB
 			}
 
 			return (detected, confirmed);
+		}
+
+		// Resume optimization (paso 2): dos cursores globales por reaction (frente-leido +
+		// frontera-cerrada). MySQL es backend "journal local" (fila Job/Cue de la matriz) ->
+		// resume re-leyendo [closed, high-water]; no usa snapshot.
+		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+
+			string sql = "SELECT IFNULL(HighWater, 0), IFNULL(ClosedFrontier, 0) FROM ReactionFrontier WHERE ReactionId = @ReactionId";
+			long highWater = 0;
+			long closedFrontier = 0;
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", reactionId);
+						using (MySqlDataReader reader = command.ExecuteReader())
+						{
+							if (reader.Read())
+							{
+								highWater = reader.GetInt64(0);
+								closedFrontier = reader.GetInt64(1);
+							}
+							reader.Close();
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return (highWater, closedFrontier);
+		}
+
+		protected internal override void SaveReactionFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+			if (highWater < 0) throw new LanguageException($"HighWater '{highWater}' must be zero or greater");
+			if (closedFrontier < 0) throw new LanguageException($"ClosedFrontier '{closedFrontier}' must be zero or greater");
+
+			string sql = @"INSERT INTO ReactionFrontier (ReactionId, HighWater, ClosedFrontier)
+				VALUES (@ReactionId, @HighWater, @ClosedFrontier)
+				ON DUPLICATE KEY UPDATE HighWater = @HighWater, ClosedFrontier = @ClosedFrontier";
+
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (MySqlCommand command = new MySqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", reactionId);
+						command.Parameters.AddWithValue("@HighWater", highWater);
+						command.Parameters.AddWithValue("@ClosedFrontier", closedFrontier);
+						command.ExecuteNonQuery();
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
 		}
 
 		// PHASE 5A: only save Confirmed after PerformCommand executes successfully.
@@ -1552,47 +1768,6 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		protected internal override long? NextNonElided(long entryId, RehydrateDirection direction)
-		{
-			if (entryId < 0) throw new LanguageException("entryId must be zero or greater.");
-
-			// Materialize v2 / Fase 0.5: Skip column autoritativa, sin LEFT JOIN.
-			string sql;
-			if (direction == RehydrateDirection.Forward)
-			{
-				sql = $@"SELECT MIN(j.id) FROM `{Name}` j
-					WHERE j.Skip = 0 AND j.id > @afterId";
-			}
-			else if (direction == RehydrateDirection.Backward)
-			{
-				sql = $@"SELECT MAX(j.id) FROM `{Name}` j
-					WHERE j.Skip = 0 AND j.id < @afterId";
-			}
-			else
-			{
-				throw new ArgumentException($"Unknown direction '{direction}'.", nameof(direction));
-			}
-
-			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
-			{
-				try
-				{
-					connection.Open();
-					using (MySqlCommand command = new MySqlCommand(sql, connection))
-					{
-						command.Parameters.AddWithValue("@afterId", entryId);
-						object result = command.ExecuteScalar();
-						if (result == null || result == DBNull.Value) return null;
-						return Convert.ToInt64(result);
-					}
-				}
-				finally
-				{
-					connection.Close();
-				}
-			}
-		}
-
 		// Etapa 5 del refactor Distill. Reemplaza el throw NotImplementedException
 		// heredado del base. Materializa fisicamente las elisiones acumuladas en
 		// EventElision: borra los rows de `{Name}` cuyos ids estan en EventElision
@@ -1687,7 +1862,7 @@ namespace Puppeteer.EventSourcing.DB
 			result.Clear();
 
 			string sql = $@"
-				SELECT d.id, d.OccurredAt, d.Ip, d.User, d.Script, d.Action, d.Arguments, ed.ExposeJson
+				SELECT d.id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 				FROM `{Name}` d
 				LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
 				WHERE d.id > @afterId
@@ -1725,7 +1900,7 @@ namespace Puppeteer.EventSourcing.DB
 			result.Clear();
 
 			string sql = $@"
-				SELECT d.id, d.OccurredAt, d.Ip, d.User, d.Script, d.Action, d.Arguments, ed.ExposeJson
+				SELECT d.id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 				FROM `{Name}` d
 				LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
 				WHERE d.id > @afterId
@@ -1825,12 +2000,10 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			long entryId = reader.GetInt64(0);
 			DateTime occurredAt = reader.GetDateTime(1);
-			string ip = reader.IsDBNull(2) ? null : reader.GetString(2);
-			string user = reader.IsDBNull(3) ? null : reader.GetString(3);
-			string script = reader.IsDBNull(4) ? null : reader.GetString(4);
-			int? actionId = reader.IsDBNull(5) ? null : reader.GetInt32(5);
-			string arguments = reader.IsDBNull(6) ? null : reader.GetString(6);
-			string exposeData = reader.IsDBNull(7) ? null : reader.GetString(7);
+			string script = reader.IsDBNull(2) ? null : reader.GetString(2);
+			int? actionId = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+			string arguments = reader.IsDBNull(4) ? null : reader.GetString(4);
+			string exposeData = reader.IsDBNull(5) ? null : reader.GetString(5);
 
 			// Discriminator per Phase 6 of the Action refactor:
 			//   script != NULL ∧ action IS NULL  → Script entry
@@ -1839,19 +2012,19 @@ namespace Puppeteer.EventSourcing.DB
 			if (script != null && actionId == null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Script, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Script, occurredAt,
 					script, 0, null, null, exposeData);
 			}
 			if (script != null && actionId != null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Define, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Define, occurredAt,
 					null, actionId.Value, null, script, exposeData);
 			}
 			if (script == null && actionId != null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Invocation, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Invocation, occurredAt,
 					null, actionId.Value, arguments, null, exposeData);
 			}
 

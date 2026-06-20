@@ -4,6 +4,7 @@ using Puppeteer.EventSourcing.Interpreter.Libraries;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -29,17 +30,17 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal DiaryStorageSQLServer(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
 		{
-			sqlServerWriteScriptCommand = "insert into " + Name + " (id, OccurredAt,Ip,[User],Script) values (@id, @OccurredAt,@ip,@userId,@script)";
+			sqlServerWriteScriptCommand = "insert into " + Name + " (id, OccurredAt,Script) values (@id, @OccurredAt,@script)";
 
 			// Define rows materialise the action's Statement directly inside the
 			// journal row (script = canonical sentence, action = actionId,
 			// arguments = NULL). The first invocation lives in a separate
 			// Invocation row, so MarkAsSkip on a first invocation cannot
 			// collaterally erase the Define.
-			sqlServerWriteDefineCommand = $"INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL)";
+			sqlServerWriteDefineCommand = $"INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@EntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL)";
 
 			// Invocation rows: script = NULL, action = actionId, arguments = args.
-			sqlServerWriteInvocationCommand = $"INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@EntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments)";
+			sqlServerWriteInvocationCommand = $"INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@EntryId, @OccurredAt, NULL, @ActionID, @Arguments)";
 
 			sqlServerWriteScriptCommandWithExposeData = $@"
 				{sqlServerWriteScriptCommand};
@@ -136,8 +137,6 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("  (")
 				.Append("  id BIGINT PRIMARY KEY,")
 				.Append("  OccurredAt DATETIME NOT NULL,")
-				.Append("  Ip VARCHAR(39) NULL,")
-				.Append("  [User] VARCHAR(45) NULL,")
 				.Append("  Script TEXT NULL,")
 				.Append("  Action INT NULL,")
 				.Append("  Arguments TEXT NULL,")
@@ -181,6 +180,19 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	);")
 				.Append(" END;\n");
 
+			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			statement
+				.Append("IF NOT EXISTS(")
+				.Append("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ReactionFrontier')")
+				.Append(" BEGIN")
+				.Append("	CREATE TABLE [dbo].[ReactionFrontier] (")
+				.Append("		[ReactionId] INT NOT NULL,")
+				.Append("		[HighWater] BIGINT NOT NULL DEFAULT 0,")
+				.Append("		[ClosedFrontier] BIGINT NOT NULL DEFAULT 0,")
+				.Append("		PRIMARY KEY CLUSTERED ([ReactionId] ASC)")
+				.Append("	);")
+				.Append(" END;\n");
+
 			statement.Append(@"
 				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Follower')
 				BEGIN
@@ -189,6 +201,22 @@ namespace Puppeteer.EventSourcing.DB
 						FollowerId INT NOT NULL PRIMARY KEY,
 						DiaryId BIGINT NOT NULL,
 						Description VARCHAR(45) NOT NULL
+					)
+				END;
+			");
+
+			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
+			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
+			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// Reaction/ReactionCheckpoint/ReactionFrontier/Follower. Reported by a follower deployment
+			// 2.0.1-beta.9817. La columna es DiaryId (no DairyId): es la que el motor lee en
+			// el JOIN y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			statement.Append(@"
+				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ExposeData')
+				BEGIN
+					CREATE TABLE [dbo].[ExposeData] (
+						[DiaryId] BIGINT NOT NULL PRIMARY KEY,
+						[ExposeJson] NVARCHAR(MAX) NOT NULL
 					)
 				END;
 			");
@@ -224,8 +252,6 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	(")
 				.Append("		id BIGINT PRIMARY KEY,")
 				.Append("		OccurredAt DATETIME NOT NULL,")
-				.Append("		Ip VARCHAR(39) NULL,")
-				.Append("		[User] VARCHAR(45) NULL,")
 				.Append("		Script TEXT NULL,")
 				.Append("		Action INT NULL,")
 				.Append("	    Arguments TEXT NULL,")
@@ -265,6 +291,19 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	);")
 				.Append(" END;\n");
 
+			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			statement
+				.Append("IF NOT EXISTS(")
+				.Append("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ReactionFrontier')")
+				.Append(" BEGIN")
+				.Append("	CREATE TABLE [dbo].[ReactionFrontier] (")
+				.Append("		[ReactionId] INT NOT NULL,")
+				.Append("		[HighWater] BIGINT NOT NULL DEFAULT 0,")
+				.Append("		[ClosedFrontier] BIGINT NOT NULL DEFAULT 0,")
+				.Append("		PRIMARY KEY CLUSTERED ([ReactionId] ASC)")
+				.Append("	);")
+				.Append(" END;\n");
+
 			statement.Append(@"
 				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Follower')
 				BEGIN
@@ -273,6 +312,22 @@ namespace Puppeteer.EventSourcing.DB
 						FollowerId INT NOT NULL PRIMARY KEY,
 						DiaryId BIGINT NOT NULL,
 						Description VARCHAR(45) NOT NULL
+					)
+				END;
+			");
+
+			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
+			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
+			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// Reaction/ReactionCheckpoint/ReactionFrontier/Follower. Reported by a follower deployment
+			// 2.0.1-beta.9817. La columna es DiaryId (no DairyId): es la que el motor lee en
+			// el JOIN y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			statement.Append(@"
+				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ExposeData')
+				BEGIN
+					CREATE TABLE [dbo].[ExposeData] (
+						[DiaryId] BIGINT NOT NULL PRIMARY KEY,
+						[ExposeJson] NVARCHAR(MAX) NOT NULL
 					)
 				END;
 			");
@@ -305,11 +360,6 @@ namespace Puppeteer.EventSourcing.DB
 
 		protected internal override long RehydrateFromEvent(long afterEntryId = 0, bool includeExposeData = false)
 		{
-			return RehydrateFromEvent(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
-		protected internal override long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
-		{
 			EventJournalClient.IsNew = CreateDiary(Name);
 
 			bool canContinueReplay = false;
@@ -318,8 +368,8 @@ namespace Puppeteer.EventSourcing.DB
 			bool salir = false;
 			int cantidadDeLeaderInitialization = 0;
 
-			// Pick the ORDER BY direction.
-			string orderByClause = direction == RehydrateDirection.Forward ? "ORDER BY d.id ASC" : "ORDER BY d.id DESC";
+			// Forward replay: events in ascending id order.
+			string orderByClause = "ORDER BY d.id ASC";
 
 			using (SqlConnection connection = new SqlConnection(ConnectionString))
 			{
@@ -370,12 +420,12 @@ namespace Puppeteer.EventSourcing.DB
 					// _ACTION table schema, and WriteNewActionEntry that populated it.)
 
 					string sql = includeExposeData
-						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.[User], d.Action, d.Arguments, ed.ExposeJson
+						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 							FROM {base.Name} d WITH (NOLOCK)
 							LEFT JOIN ExposeData ed WITH (NOLOCK) ON d.id = ed.DiaryId
 							WHERE d.[Skip] = 0 AND d.id > {ultimoId}
 							{orderByClause}"
-						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Ip, d.[User], d.Action, d.Arguments
+						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments
 							FROM {base.Name} d WITH (NOLOCK)
 							WHERE d.[Skip] = 0 AND d.id > {ultimoId}
 							{orderByClause}";
@@ -396,12 +446,8 @@ namespace Puppeteer.EventSourcing.DB
 
 									DateTime occurredAt = reader.GetDateTime(1);
 
-									string ip = reader.IsDBNull(3) ? IpAddress.DEFAULT.Ip : reader.GetString(3);
-
-									string user = reader.IsDBNull(4) ? UserInLog.ANONYMOUS.Id : reader.GetString(4);
-
 									bool scriptIsNull = reader.IsDBNull(2);
-									bool actionIsNull = reader.IsDBNull(5);
+									bool actionIsNull = reader.IsDBNull(3);
 
 									// Phase 4 of the Action refactor: process Define rows by
 									// parsing the canonical sentence and populating the
@@ -411,7 +457,7 @@ namespace Puppeteer.EventSourcing.DB
 									// Phase 4 keeps them cohabiting.)
 									if (!scriptIsNull && !actionIsNull)
 									{
-										int defineActionId = reader.GetInt32(5);
+										int defineActionId = reader.GetInt32(3);
 										string defineStatementText = reader.GetString(2);
 										EventJournalClient.AddKnownActionFromDefine(defineActionId, defineStatementText);
 										continue;
@@ -419,7 +465,7 @@ namespace Puppeteer.EventSourcing.DB
 
 									if (scriptIsNull)
 									{
-										int actionId = reader.GetInt32(5);
+										int actionId = reader.GetInt32(3);
 
 										// Phase 5 of the Action refactor: legacy
 										// LoadSingleAction (recovery lookup against the
@@ -430,14 +476,12 @@ namespace Puppeteer.EventSourcing.DB
 										// ordering), so the cache is always populated by the
 										// time we reach the Invocation row.
 
-										string arguments = reader.GetString(6);
-										string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+										string arguments = reader.GetString(4);
+										string exposeJson = includeExposeData && !reader.IsDBNull(5) ? reader.GetString(5) : null;
 
 										var actionData = EventDataPool.RentAction();
 										actionData.EntryId = entryId;
 										actionData.OccurredAt = occurredAt;
-										actionData.Ip = ip;
-										actionData.User = user;
 										actionData.ActionId = actionId;
 										actionData.Arguments = arguments;
 										actionData.ExposeData = exposeJson;
@@ -455,13 +499,11 @@ namespace Puppeteer.EventSourcing.DB
 									else
 									{
 										string script = reader.GetString(2);
-										string exposeJson = includeExposeData && !reader.IsDBNull(7) ? reader.GetString(7) : null;
+										string exposeJson = includeExposeData && !reader.IsDBNull(5) ? reader.GetString(5) : null;
 
 										var scriptData = EventDataPool.RentScript();
 										scriptData.EntryId = entryId;
 										scriptData.OccurredAt = occurredAt;
-										scriptData.Ip = ip;
-										scriptData.User = user;
 										scriptData.Script = script;
 										scriptData.ExposeData = exposeJson;
 
@@ -504,16 +546,19 @@ namespace Puppeteer.EventSourcing.DB
 			}
 			catch (Exception e) //As is inside a fire and forget, this is needed to see the error and execute the CompleteAdding unlocking the main process.
 			{
-				Console.WriteLine($"Error in : {base.Name}.");
-				Console.WriteLine(e);
+				// Pasa por IPuppeteerLogger.Error en vez de Console.WriteLine: con el
+				// ConsoleLogger default va a Console.Error (stderr) con prefijo
+				// [Puppeteer ERROR]. Si el host inyecto un logger (Serilog/MEL/NLog)
+				// via Performance.Logger(...), tambien lo recibe ahi.
+				Logger.Error($"RehydrateFromEvent failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
 			return ultimoId;
 		}
 
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
 		{
-			return Task.FromResult(RehydrateFromEvent(afterEntryId, direction));
+			return Task.FromResult(RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
 		protected internal override long GetLastProcessedEntryId(int followerId)
@@ -576,18 +621,14 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		private string SqlCommand(string script, string ip, string user, DateTime now)
+		private string SqlCommand(string script, DateTime now)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 			StringBuilder statement = new StringBuilder()
 				.Append("insert into ")
 				.Append(base.Name)
-				.Append("(OccurredAt,Ip,[User],Script) values (")
-					.Append('\'').Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff")).Append('\'')
-					.Append(',')
-					.Append('\'').Append(ip).Append('\'')
-					.Append(',')
-					.Append(user)
+				.Append("(OccurredAt,Script) values (")
+					.Append('\'').Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)).Append('\'')
 					.Append(',')
 					.Append('\'')
 					.Append(script)
@@ -596,20 +637,16 @@ namespace Puppeteer.EventSourcing.DB
 			string sql = statement.ToString();
 			return sql;
 		}
-		private string SqlCommand(long entryId, string script, string ip, string user, DateTime now)
+		private string SqlCommand(long entryId, string script, DateTime now)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 			StringBuilder statement = new StringBuilder()
 				.Append("insert into ")
 				.Append(base.Name)
-				.Append("(id, OccurredAt,Ip,[User],Script) values (")
+				.Append("(id, OccurredAt,Script) values (")
 					.Append(entryId)
 					.Append(',')
-					.Append('\'').Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff")).Append('\'')
-					.Append(',')
-					.Append('\'').Append(ip).Append('\'')
-					.Append(',')
-					.Append(user)
+					.Append('\'').Append(now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)).Append('\'')
 					.Append(',')
 					.Append('\'')
 					.Append(script)
@@ -645,12 +682,7 @@ namespace Puppeteer.EventSourcing.DB
 			return result.ToString();
 		}
 
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
-		{
-			return RehydrateFromEventAsync(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
-		protected internal override async Task WriteScriptEntryAsync(long entryId, string originalScript, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override async Task WriteScriptEntryAsync(long entryId, string originalScript, DateTime now, string exposeData = null)
 		{
 			string script = originalScript;
 			bool retry;
@@ -669,8 +701,6 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@id", entryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@userId", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@script", UnEscapeSQLServer(script));
 
 							if (hasExposeData)
@@ -684,8 +714,8 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						var sqlCommand = SqlCommand(entryId, script, ip, user, now);
-						Loggers.GetIntance().Db.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
+						var sqlCommand = SqlCommand(entryId, script, now);
+						Logger.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -704,8 +734,8 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (Exception e)
 					{
-						var sqlCommand = SqlCommand(entryId, script, ip, user, now);
-						Loggers.GetIntance().Db.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
+						var sqlCommand = SqlCommand(entryId, script, now);
+						Logger.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
 						throw;
 					}
 					finally
@@ -715,6 +745,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeScriptRecord(entryId, originalScript, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
 		// Phase 6 of the Action refactor: dropped WriteActionEntryAsync,
@@ -722,7 +758,7 @@ namespace Puppeteer.EventSourcing.DB
 		// post-refactor write API is WriteScriptEntry / WriteDefineEntry /
 		// WriteInvocationEntry / WriteDefineWithFirstInvocation.
 
-		protected internal override void WriteScriptEntry(long entryId, string originalScript, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteScriptEntry(long entryId, string originalScript, DateTime now, string exposeData = null)
 		{
 			string script = originalScript;
 			bool retry;
@@ -741,14 +777,10 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.Add("@id", SqlDbType.BigInt);
 							command.Parameters.Add("@OccurredAt", SqlDbType.DateTime);
-							command.Parameters.Add("@ip", SqlDbType.VarChar, 39);
-							command.Parameters.Add("@userId", SqlDbType.VarChar, 45);
 							command.Parameters.Add("@script", SqlDbType.Text);
 
 							command.Parameters["@id"].Value = entryId;
 							command.Parameters["@OccurredAt"].Value = now;
-							command.Parameters["@ip"].Value = ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip;
-							command.Parameters["@userId"].Value = user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user;
 							command.Parameters["@script"].Value = UnEscapeSQLServer(script);
 
 							if (hasExposeData)
@@ -762,8 +794,8 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						var sqlCommand = SqlCommand(entryId, script, ip, user, now);
-						Loggers.GetIntance().Db.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
+						var sqlCommand = SqlCommand(entryId, script, now);
+						Logger.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -782,8 +814,8 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (Exception e)
 					{
-						var sqlCommand = SqlCommand(entryId, script, ip, user, now);
-						Loggers.GetIntance().Db.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
+						var sqlCommand = SqlCommand(entryId, script, now);
+						Logger.Error($@"sql:{sqlCommand} type:{e.GetType()} error:{e.Message}", e);
 						throw;
 					}
 					finally
@@ -793,6 +825,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeScriptRecord(entryId, originalScript, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
 
@@ -806,7 +844,7 @@ namespace Puppeteer.EventSourcing.DB
 		// _ACTION table — that is the legacy WriteNewActionEntry's job, and Phase 6
 		// drops the table entirely. Replay silently skips Define rows in Phase 3
 		// (see the discriminator update at the top of RehydrateFromEvent).
-		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 
@@ -826,8 +864,6 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@EntryId", entryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 
@@ -842,7 +878,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteDefineEntry actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteDefineEntry actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -864,9 +900,15 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeDefineRecord(actionId, defineStatementText, entryId, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 
@@ -886,8 +928,6 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@EntryId", entryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 
@@ -902,7 +942,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteDefineEntryAsync actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteDefineEntryAsync actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -924,12 +964,18 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeDefineRecord(actionId, defineStatementText, entryId, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
 		// WriteInvocationEntry: script = NULL, action = actionId, arguments = args.
 		// Post-Phase-6 implementation (no longer delegates to the dropped
 		// WriteActionEntry).
-		protected internal override void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(arguments);
 
@@ -949,8 +995,6 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@EntryId", entryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 							command.Parameters.AddWithValue("@Arguments", arguments);
 
@@ -965,7 +1009,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteInvocationEntry actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteInvocationEntry actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -987,9 +1031,15 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeInvocationRecord(actionId, entryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(arguments);
 
@@ -1009,8 +1059,6 @@ namespace Puppeteer.EventSourcing.DB
 						{
 							command.Parameters.AddWithValue("@EntryId", entryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 							command.Parameters.AddWithValue("@Arguments", arguments);
 
@@ -1025,7 +1073,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteInvocationEntryAsync actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteInvocationEntryAsync actionId:{actionId} entryId:{entryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -1047,6 +1095,12 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeInvocationRecord(actionId, entryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
 		// Phase 4 atomic write — see DiaryStorage.cs for the contract. The two INSERTs
@@ -1054,7 +1108,7 @@ namespace Puppeteer.EventSourcing.DB
 		// command's statements as a transactional unit by default with implicit
 		// transaction semantics (auto-commit per command); the two INSERTs either
 		// both succeed or both fail.
-		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 			ArgumentNullException.ThrowIfNull(arguments);
@@ -1062,12 +1116,12 @@ namespace Puppeteer.EventSourcing.DB
 			bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
 			string sql = hasExposeData
 				? $@"
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);"
 				: $@"
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);";
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);";
 
 			bool retry;
 			do
@@ -1083,8 +1137,6 @@ namespace Puppeteer.EventSourcing.DB
 							command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
 							command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 							command.Parameters.AddWithValue("@Arguments", arguments);
@@ -1099,7 +1151,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -1121,9 +1173,17 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] defineRecord = EncodeDefineRecord(actionId, defineStatementText, defineEntryId, now, null);
+				byte[] invocationRecord = EncodeInvocationRecord(actionId, invocationEntryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(defineEntryId, defineRecord);
+				OnRecordWritten.Invoke(invocationEntryId, invocationRecord);
+			}
 		}
 
-		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 			ArgumentNullException.ThrowIfNull(arguments);
@@ -1131,12 +1191,12 @@ namespace Puppeteer.EventSourcing.DB
 			bool hasExposeData = !string.IsNullOrWhiteSpace(exposeData);
 			string sql = hasExposeData
 				? $@"
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);
 					INSERT INTO ExposeData (DiaryId, ExposeJson) VALUES (@InvocationEntryId, @ExposeJson);"
 				: $@"
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @Ip, @User, @DefineStatementText, @ActionID, NULL);
-					INSERT INTO {Name} (id, occurredAt, ip, [User], script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, @Ip, @User, NULL, @ActionID, @Arguments);";
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@DefineEntryId, @OccurredAt, @DefineStatementText, @ActionID, NULL);
+					INSERT INTO {Name} (id, occurredAt, script, action, arguments) VALUES (@InvocationEntryId, @OccurredAt, NULL, @ActionID, @Arguments);";
 
 			bool retry;
 			do
@@ -1152,8 +1212,6 @@ namespace Puppeteer.EventSourcing.DB
 							command.Parameters.AddWithValue("@DefineEntryId", defineEntryId);
 							command.Parameters.AddWithValue("@InvocationEntryId", invocationEntryId);
 							command.Parameters.AddWithValue("@OccurredAt", now);
-							command.Parameters.AddWithValue("@Ip", ip == IpAddress.DEFAULT.Ip ? (object)DBNull.Value : ip);
-							command.Parameters.AddWithValue("@User", user == UserInLog.ANONYMOUS.Id ? (object)DBNull.Value : user);
 							command.Parameters.AddWithValue("@DefineStatementText", defineStatementText);
 							command.Parameters.AddWithValue("@ActionID", actionId);
 							command.Parameters.AddWithValue("@Arguments", arguments);
@@ -1168,7 +1226,7 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					catch (SqlException e)
 					{
-						Loggers.GetIntance().Db.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
+						Logger.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
 
 						if (e.Message.Contains("A transport-level error has occurred when receiving results from the server."))
 						{
@@ -1190,6 +1248,14 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 			while (retry);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] defineRecord = EncodeDefineRecord(actionId, defineStatementText, defineEntryId, now, null);
+				byte[] invocationRecord = EncodeInvocationRecord(actionId, invocationEntryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(defineEntryId, defineRecord);
+				OnRecordWritten.Invoke(invocationEntryId, invocationRecord);
+			}
 		}
 
 		internal override void ChangePrimaryKey()
@@ -1201,8 +1267,6 @@ namespace Puppeteer.EventSourcing.DB
 							(
 								id INT PRIMARY KEY,
 								OccurredAt DATETIME NOT NULL,
-								Ip VARCHAR(39) NULL,
-								[User] VARCHAR(45) NULL,
 								Script TEXT NOT NULL,
 								[Skip] BIT NOT NULL DEFAULT 0
 							);
@@ -1226,7 +1290,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (Exception e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{stCommand} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{stCommand} type:{e.GetType()} error:{e.Message}", e);
 					throw;
 				}
 				finally
@@ -1262,8 +1326,8 @@ namespace Puppeteer.EventSourcing.DB
 						msDairyPeriodRangeToExport = new MemoryStream();
 						swDairyPeriodRangeToExport = new StreamWriter(msDairyPeriodRangeToExport, Encoding.UTF8);
 
-						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd") + "_bak.sql";
-						string sql = "SELECT OccurredAt, Ip1, Ip2, Ip3, Ip4, [User], Script, Skip, Id FROM " + aName + " WITH (nolock) WHERE OccurredAt >= '" + fechaInicio + "' AND OccurredAt < '" + fechaFin + "' AND Skip = 1 ORDER BY id";
+						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
+						string sql = "SELECT OccurredAt, Script, Skip, Id FROM " + aName + " WITH (nolock) WHERE OccurredAt >= '" + fechaInicio + "' AND OccurredAt < '" + fechaFin + "' AND Skip = 1 ORDER BY id";
 						using (SqlCommand command = new SqlCommand(sql, connection))
 						using (SqlDataReader reader = command.ExecuteReader())
 						{
@@ -1286,32 +1350,16 @@ namespace Puppeteer.EventSourcing.DB
 							while (reader.Read())
 							{
 								DateTime occurredAt = reader.GetDateTime(0);
-								string script = reader.GetString(6);
+								string script = reader.GetString(1);
 
-								byte ip1 = (byte)reader.GetByte(1);
-								byte ip2 = (byte)reader.GetByte(2);
-								byte ip3 = (byte)reader.GetByte(3);
-								byte ip4 = (byte)reader.GetByte(4);
-
-								UserInLog user = UserInLog.GenerateUserBasedOn(reader.GetString(5));
-								byte skip = Convert.ToByte(reader.GetBoolean(7));
-								int id = reader.GetInt32(8);
+								byte skip = Convert.ToByte(reader.GetBoolean(2));
+								int id = reader.GetInt32(3);
 
 								insertString.Append("INSERT [dbo].");
 								insertString.Append(aName);
-								insertString.Append(" ([OccurredAt], [Ip1], [Ip2], [Ip3], [Ip4], [User], [Script], [Skip], [id]) VALUES (CAST(N'");
+								insertString.Append(" ([OccurredAt], [Script], [Skip], [id]) VALUES (CAST(N'");
 								insertString.Append(occurredAt);
-								insertString.Append("' AS DateTime), ");
-								insertString.Append(ip1);
-								insertString.Append(", ");
-								insertString.Append(ip2);
-								insertString.Append(", ");
-								insertString.Append(ip3);
-								insertString.Append(", ");
-								insertString.Append(ip4);
-								insertString.Append(", N''");
-								insertString.Append(user);
-								insertString.Append("'', N'");
+								insertString.Append("' AS DateTime), N'");
 								insertString.Append(script.Replace("'", "''"));
 								insertString.Append("', ");
 								insertString.Append(skip);
@@ -1429,8 +1477,8 @@ namespace Puppeteer.EventSourcing.DB
 							/*ARMA EL SCRIPT DE CRATE TABLE, INDICES Y DATA*/
 							sql.Append("INSERT INTO ");
 							sql.Append(aName);
-							sql.Append("(id, OccurredAt, Ip1, Ip2, Ip3, Ip4, [User], Script, [Skip]) ");
-							sql.Append("SELECT id, OccurredAt, Ip1, Ip2, Ip3, Ip4, [User], Script, [Skip]");
+							sql.Append("(id, OccurredAt, Script, [Skip]) ");
+							sql.Append("SELECT id, OccurredAt, Script, [Skip]");
 							sql.Append(" FROM ");
 							sql.Append(aName);
 							sql.Append(POSTFIX);
@@ -1457,7 +1505,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch (SqlException e)
 				{
-					Loggers.GetIntance().Db.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
+					Logger.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
 
 					throw new Exception("Error al escribir en SQLServer el Script en el Diary: [" + sql + "]. " + e.Message);
 				}
@@ -1655,6 +1703,77 @@ namespace Puppeteer.EventSourcing.DB
 			return (detected, confirmed);
 		}
 
+		// Resume optimization (paso 2): dos cursores globales por reaction (frente-leido +
+		// frontera-cerrada). SQL Server es backend "journal local" (fila Job/Cue de la matriz)
+		// -> resume re-leyendo [closed, high-water]; no usa snapshot.
+		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+
+			string sql = "SELECT ISNULL(HighWater, 0), ISNULL(ClosedFrontier, 0) FROM ReactionFrontier WHERE ReactionId = @ReactionId";
+			long highWater = 0;
+			long closedFrontier = 0;
+
+			using (SqlConnection connection = new SqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (SqlCommand command = new SqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", reactionId);
+						using (SqlDataReader reader = command.ExecuteReader())
+						{
+							if (reader.Read())
+							{
+								highWater = reader.GetInt64(0);
+								closedFrontier = reader.GetInt64(1);
+							}
+							reader.Close();
+						}
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+
+			return (highWater, closedFrontier);
+		}
+
+		protected internal override void SaveReactionFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
+			if (highWater < 0) throw new LanguageException($"HighWater '{highWater}' must be zero or greater");
+			if (closedFrontier < 0) throw new LanguageException($"ClosedFrontier '{closedFrontier}' must be zero or greater");
+
+			string sql = @"
+				IF EXISTS (SELECT 1 FROM ReactionFrontier WHERE ReactionId = @ReactionId)
+					UPDATE ReactionFrontier SET HighWater = @HighWater, ClosedFrontier = @ClosedFrontier WHERE ReactionId = @ReactionId
+				ELSE
+					INSERT INTO ReactionFrontier (ReactionId, HighWater, ClosedFrontier) VALUES (@ReactionId, @HighWater, @ClosedFrontier)";
+
+			using (SqlConnection connection = new SqlConnection(ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+					using (SqlCommand command = new SqlCommand(sql, connection))
+					{
+						command.Parameters.AddWithValue("@ReactionId", reactionId);
+						command.Parameters.AddWithValue("@HighWater", highWater);
+						command.Parameters.AddWithValue("@ClosedFrontier", closedFrontier);
+						command.ExecuteNonQuery();
+					}
+				}
+				finally
+				{
+					connection.Close();
+				}
+			}
+		}
+
 		// PHASE 5A: only save Confirmed after PerformCommand executes successfully.
 		protected internal override void SaveReactionConfirmedCheckpoint(long reactionId, int seekLevel, long entryId)
 		{
@@ -1803,47 +1922,6 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		protected internal override long? NextNonElided(long entryId, RehydrateDirection direction)
-		{
-			if (entryId < 0) throw new LanguageException("entryId must be zero or greater.");
-
-			// Materialize v2 / Fase 0.5: Skip column autoritativa, sin LEFT JOIN.
-			string sql;
-			if (direction == RehydrateDirection.Forward)
-			{
-				sql = $@"SELECT MIN(j.id) FROM {Name} j WITH (NOLOCK)
-					WHERE j.[Skip] = 0 AND j.id > @afterId";
-			}
-			else if (direction == RehydrateDirection.Backward)
-			{
-				sql = $@"SELECT MAX(j.id) FROM {Name} j WITH (NOLOCK)
-					WHERE j.[Skip] = 0 AND j.id < @afterId";
-			}
-			else
-			{
-				throw new ArgumentException($"Unknown direction '{direction}'.", nameof(direction));
-			}
-
-			using (SqlConnection connection = new SqlConnection(ConnectionString))
-			{
-				try
-				{
-					connection.Open();
-					using (SqlCommand command = new SqlCommand(sql, connection))
-					{
-						command.Parameters.AddWithValue("@afterId", entryId);
-						object result = command.ExecuteScalar();
-						if (result == null || result == DBNull.Value) return null;
-						return Convert.ToInt64(result);
-					}
-				}
-				finally
-				{
-					connection.Close();
-				}
-			}
-		}
-
 		// Etapa 5 del refactor Distill. Mismo patron que DiaryStorageMySQL.Distill
 		// (ver doc alli) — single transaction, preserve MAX(id) (invariante "ultimo
 		// record"), borra `{Name}` rows e su correspondiente entrada en EventElision.
@@ -1925,7 +2003,7 @@ namespace Puppeteer.EventSourcing.DB
 			result.Clear();
 
 			string sql = $@"
-				SELECT d.id, d.OccurredAt, d.Ip, d.[User], d.Script, d.Action, d.Arguments, ed.ExposeJson
+				SELECT d.id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 				FROM {Name} d WITH (NOLOCK)
 				LEFT JOIN ExposeData ed WITH (NOLOCK) ON d.id = ed.DiaryId
 				WHERE d.id > @afterId
@@ -1963,7 +2041,7 @@ namespace Puppeteer.EventSourcing.DB
 			result.Clear();
 
 			string sql = $@"
-				SELECT d.id, d.OccurredAt, d.Ip, d.[User], d.Script, d.Action, d.Arguments, ed.ExposeJson
+				SELECT d.id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 				FROM {Name} d WITH (NOLOCK)
 				LEFT JOIN ExposeData ed WITH (NOLOCK) ON d.id = ed.DiaryId
 				WHERE d.id > @afterId
@@ -2058,29 +2136,27 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			long entryId = reader.GetInt64(0);
 			DateTime occurredAt = reader.GetDateTime(1);
-			string ip = reader.IsDBNull(2) ? null : reader.GetString(2);
-			string user = reader.IsDBNull(3) ? null : reader.GetString(3);
-			string script = reader.IsDBNull(4) ? null : reader.GetString(4);
-			int? actionId = reader.IsDBNull(5) ? null : reader.GetInt32(5);
-			string arguments = reader.IsDBNull(6) ? null : reader.GetString(6);
-			string exposeData = reader.IsDBNull(7) ? null : reader.GetString(7);
+			string script = reader.IsDBNull(2) ? null : reader.GetString(2);
+			int? actionId = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+			string arguments = reader.IsDBNull(4) ? null : reader.GetString(4);
+			string exposeData = reader.IsDBNull(5) ? null : reader.GetString(5);
 
 			if (script != null && actionId == null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Script, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Script, occurredAt,
 					script, 0, null, null, exposeData);
 			}
 			if (script != null && actionId != null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Define, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Define, occurredAt,
 					null, actionId.Value, null, script, exposeData);
 			}
 			if (script == null && actionId != null)
 			{
 				return new MaterializationRecord(
-					entryId, MaterializationRecordKind.Invocation, occurredAt, ip, user,
+					entryId, MaterializationRecordKind.Invocation, occurredAt,
 					null, actionId.Value, arguments, null, exposeData);
 			}
 

@@ -30,17 +30,25 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
+			// Mismo contrato que MetadataStore.Load: file-missing es valido (actor
+			// nuevo), pero file-present-pero-invalido es corrupcion y debe lanzar
+			// con un mensaje accionable. Silenciar lleva a NRE downstream cuando
+			// el caller asume "fresh actor" sobre journal files preexistentes.
 			if (!File.Exists(filePath))
 				return false;
 
 			byte[] data = File.ReadAllBytes(filePath);
 			if (data.Length < HEADER_SIZE)
-				return false;
+				throw new LanguageException($"Sparse index file '{filePath}' exists but is truncated ({data.Length} bytes, expected at least {HEADER_SIZE}). Back up the actor directory; restore from a snapshot if available, or delete '{filePath}' to force the index to be rebuilt from journal files at next start.");
 
 			if (data[0] != MAGIC[0] || data[1] != MAGIC[1] || data[2] != MAGIC[2] || data[3] != MAGIC[3])
-				return false;
+				throw new LanguageException($"Sparse index file '{filePath}' has an invalid magic header (expected 'PPIX'). The file is either corrupted or from an incompatible Puppeteer format. Back up the actor directory before any recovery attempt.");
 
-			int offset = 6;
+			int offset = 4;
+			ushort version = BitConverter.ToUInt16(data, offset); offset += 2;
+			if (version != FORMAT_VERSION)
+				throw new LanguageException($"Sparse index file '{filePath}' has format version {version}, but this Puppeteer expects version {FORMAT_VERSION}. There is no automatic migration path; back up the actor directory and contact maintainers for the upgrade procedure.");
+
 			int count = BitConverter.ToInt32(data, offset); offset += 4;
 
 			entries.Clear();

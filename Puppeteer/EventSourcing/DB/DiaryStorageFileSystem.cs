@@ -26,7 +26,10 @@ namespace Puppeteer.EventSourcing.DB
 		private readonly EventMaterializationStorageFileSystem materializationStorage;
 		private readonly object writeLock = new();
 
-		internal Action<long, byte[]> OnRecordWritten;
+		// OnRecordWritten is declared on DiaryStorage (abstract base) so all
+		// backends — FS / SQL / InMemory — inherit the same hook. FS produces
+		// these bytes for free as part of its write path; SQL / InMemory synthesize
+		// them via BinaryEventCodec only when there is a subscriber.
 		// Phase 5 of the Action refactor: dropped OnNewActionDefined. Replication
 		// of actions now flows through OnRecordWritten — Define entries are journal
 		// records and replicate as CueEvent.
@@ -140,17 +143,12 @@ namespace Puppeteer.EventSourcing.DB
 				atomicOp);
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
-		{
-			return RehydrateFromEvent(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
 		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
 		{
 			return Task.Run(() => RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
 		{
 			var skipSet = skipStore.Load();
 
@@ -160,8 +158,8 @@ namespace Puppeteer.EventSourcing.DB
 
 			// For a full forward rehydration (afterEntryId == 0), TotalNonSkippedCount in meta.bin
 			// is already verified/corrected in the constructor, so use it directly — no scan needed.
-			// For partial resume or backward direction, scan the relevant range.
-			long totalNonSkipped = (afterEntryId == 0 && direction == RehydrateDirection.Forward)
+			// For partial resume, scan the relevant range.
+			long totalNonSkipped = afterEntryId == 0
 				? metadata.TotalNonSkippedCount
 				: reader.CountNonSkippedEvents(afterEntryId);
 			EventJournalClient.BeginJournalReplay(totalNonSkipped);
@@ -176,16 +174,8 @@ namespace Puppeteer.EventSourcing.DB
 			long lastEntryId = afterEntryId;
 			if (EventJournalClient.CanContinueReplay(lastEntryId))
 			{
-				if (direction == RehydrateDirection.Backward)
-				{
-					lastEntryId = reader.ReadAllBackward(afterEntryId, EventDataPool, EventJournalClient,
-						() => EventJournalClient.CanContinueReplay(lastEntryId), includeExposeData);
-				}
-				else
-				{
-					lastEntryId = reader.ReadAll(afterEntryId, EventDataPool, EventJournalClient,
-						() => EventJournalClient.CanContinueReplay(lastEntryId), includeExposeData);
-				}
+				lastEntryId = reader.ReadAll(afterEntryId, EventDataPool, EventJournalClient,
+					() => EventJournalClient.CanContinueReplay(lastEntryId), includeExposeData);
 			}
 
 			EventJournalClient.EndJournalReplay(forcedToEnd: !EventJournalClient.CanContinueReplay(lastEntryId));
@@ -193,21 +183,14 @@ namespace Puppeteer.EventSourcing.DB
 			return lastEntryId;
 		}
 
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
-		{
-			return Task.Run(() => RehydrateFromEvent(afterEntryId, direction, includeExposeData));
-		}
-
-		protected internal override void WriteScriptEntry(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteScriptEntry(long entryId, string script, DateTime now, string exposeData = null)
 		{
 			if (script == null) throw new ArgumentNullException(nameof(script));
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 
 			byte[] record;
 			lock (writeLock)
 			{
-				record = BinaryEventCodec.EncodeScriptEvent(entryId, now, ip, user, script,
+				record = BinaryEventCodec.EncodeScriptEvent(entryId, now, script,
 					(PayloadCompression)metadata.CompressionFlag,
 					(EncryptionMode)metadata.EncryptionFlag,
 					exposeData: exposeData);
@@ -220,9 +203,9 @@ namespace Puppeteer.EventSourcing.DB
 			OnRecordWritten?.Invoke(entryId, record);
 		}
 
-		protected internal override async Task WriteScriptEntryAsync(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override async Task WriteScriptEntryAsync(long entryId, string script, DateTime now, string exposeData = null)
 		{
-			await Task.Run(() => WriteScriptEntry(entryId, script, ip, user, now, exposeData));
+			await Task.Run(() => WriteScriptEntry(entryId, script, now, exposeData));
 		}
 
 		// Phase 6 of the Action refactor: dropped WriteActionEntry +
@@ -263,16 +246,14 @@ namespace Puppeteer.EventSourcing.DB
 		// JournalReader skips Define records silently during replay (TryDecode returns
 		// false on Define, see BinaryEventCodec). Phase 5 turns the skip into a real
 		// dispatch once the cutover (Phase 4) flips the live caller.
-		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			if (defineStatementText == null) throw new ArgumentNullException(nameof(defineStatementText));
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 
 			byte[] record;
 			lock (writeLock)
 			{
-				record = FileSystem.BinaryEventCodec.EncodeDefineEvent(entryId, now, ip, user, actionId, defineStatementText,
+				record = FileSystem.BinaryEventCodec.EncodeDefineEvent(entryId, now, actionId, defineStatementText,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
 					exposeData: exposeData);
@@ -285,25 +266,23 @@ namespace Puppeteer.EventSourcing.DB
 			OnRecordWritten?.Invoke(entryId, record);
 		}
 
-		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
-			await Task.Run(() => WriteDefineEntry(actionId, defineStatementText, entryId, ip, user, now, exposeData));
+			await Task.Run(() => WriteDefineEntry(actionId, defineStatementText, entryId, now, exposeData));
 		}
 
-		protected internal override void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			// Same on-disk shape as WriteActionEntry — the difference is purely semantic
 			// (Phase 4+ assumes the actor's catalog lives in the journal as Define entries
 			// rather than in the lateral actionStore). On-disk records are indistinguishable
 			// from the legacy invocation rows; the meaning shift is in the caller.
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 			if (arguments == null) throw new ArgumentNullException(nameof(arguments));
 
 			byte[] record;
 			lock (writeLock)
 			{
-				record = FileSystem.BinaryEventCodec.EncodeActionEvent(entryId, now, ip, user, actionId, arguments,
+				record = FileSystem.BinaryEventCodec.EncodeActionEvent(entryId, now, actionId, arguments,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
 					exposeData: exposeData);
@@ -316,9 +295,9 @@ namespace Puppeteer.EventSourcing.DB
 			OnRecordWritten?.Invoke(entryId, record);
 		}
 
-		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
-			await Task.Run(() => WriteInvocationEntry(actionId, entryId, ip, user, now, arguments, exposeData));
+			await Task.Run(() => WriteInvocationEntry(actionId, entryId, now, arguments, exposeData));
 		}
 
 		// Phase 4 atomic write — see DiaryStorage.cs for the contract. Honest limit
@@ -326,23 +305,21 @@ namespace Puppeteer.EventSourcing.DB
 		// under the same writeLock, but a crash between the two flushes can leave
 		// the Define orphan (same atomicity level as the legacy WriteNewActionEntry,
 		// which also did two writes: _ACTION lateral + journal row).
-		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			if (defineStatementText == null) throw new ArgumentNullException(nameof(defineStatementText));
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 			if (arguments == null) throw new ArgumentNullException(nameof(arguments));
 
 			byte[] defineRecord;
 			byte[] invocationRecord;
 			lock (writeLock)
 			{
-				defineRecord = FileSystem.BinaryEventCodec.EncodeDefineEvent(defineEntryId, now, ip, user, actionId, defineStatementText,
+				defineRecord = FileSystem.BinaryEventCodec.EncodeDefineEvent(defineEntryId, now, actionId, defineStatementText,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
 					exposeData: null);
 
-				invocationRecord = FileSystem.BinaryEventCodec.EncodeActionEvent(invocationEntryId, now, ip, user, actionId, arguments,
+				invocationRecord = FileSystem.BinaryEventCodec.EncodeActionEvent(invocationEntryId, now, actionId, arguments,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
 					exposeData: exposeData);
@@ -357,9 +334,9 @@ namespace Puppeteer.EventSourcing.DB
 			OnRecordWritten?.Invoke(invocationEntryId, invocationRecord);
 		}
 
-		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
-			await Task.Run(() => WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, ip, user, now, arguments, exposeData));
+			await Task.Run(() => WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData));
 		}
 
 		protected internal override long GetLastProcessedEntryId(int followerId)
@@ -381,6 +358,19 @@ namespace Puppeteer.EventSourcing.DB
 		protected internal override (long detected, long confirmed) GetReactionCheckpoint(long reactionId, int seekLevel)
 		{
 			return reactionStore.GetCheckpoint(reactionId, seekLevel);
+		}
+
+		// Resume optimization (paso 2): dos cursores globales por reaction. FileSystem es un
+		// backend "journal local" (fila Job/Cue de la matriz) -> resume re-leyendo [closed,
+		// high-water]; no usa snapshot (esa es la fila consumidor-puro, sin journal local).
+		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
+		{
+			return reactionStore.GetFrontier(reactionId);
+		}
+
+		protected internal override void SaveReactionFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+			reactionStore.SaveFrontier(reactionId, highWater, closedFrontier);
 		}
 
 		protected internal override void SaveReactionConfirmedCheckpoint(long reactionId, int seekLevel, long entryId)
@@ -441,58 +431,6 @@ namespace Puppeteer.EventSourcing.DB
 
 				return true;
 			}
-		}
-
-		protected internal override long? NextNonElided(long entryId, RehydrateDirection direction)
-		{
-			if (entryId < 0) throw new LanguageException("entryId must be zero or greater.");
-
-			var skipSet = skipStore.Load();
-			var allEntries = sparseIndex.GetAllEntries();
-			if (allEntries.Count == 0) return null;
-
-			if (direction == RehydrateDirection.Forward)
-			{
-				long candidate = entryId + 1;
-				long maxKnown = metadata.LastWrittenEntryId;
-
-				while (candidate <= maxKnown)
-				{
-					if (!skipSet.Contains(candidate))
-					{
-						// Verify it exists in a journal file
-						int fileNumber = sparseIndex.FindFileNumberForEntryId(candidate);
-						if (fileNumber >= 0)
-						{
-							var indexEntry = sparseIndex.GetEntryByFileNumber(fileNumber);
-							if (indexEntry != null && candidate >= indexEntry.FirstEntryId && candidate <= indexEntry.LastEntryId)
-								return candidate;
-						}
-					}
-					candidate++;
-				}
-			}
-			else if (direction == RehydrateDirection.Backward)
-			{
-				long candidate = entryId - 1;
-
-				while (candidate >= 1)
-				{
-					if (!skipSet.Contains(candidate))
-					{
-						int fileNumber = sparseIndex.FindFileNumberForEntryId(candidate);
-						if (fileNumber >= 0)
-						{
-							var indexEntry = sparseIndex.GetEntryByFileNumber(fileNumber);
-							if (indexEntry != null && candidate >= indexEntry.FirstEntryId && candidate <= indexEntry.LastEntryId)
-								return candidate;
-						}
-					}
-					candidate--;
-				}
-			}
-
-			return null;
 		}
 
 		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
@@ -678,7 +616,7 @@ namespace Puppeteer.EventSourcing.DB
 				if (peekedType == EventRecordType.Define)
 				{
 					if (BinaryEventCodec.TryDecodeDefine(body, bodyLength,
-						out _, out var occurredAt, out var ip, out var user,
+						out _, out var occurredAt,
 						out var actionId, out var defineText, out var expose,
 						compression, encryption))
 					{
@@ -686,8 +624,6 @@ namespace Puppeteer.EventSourcing.DB
 							entryId: entryId,
 							kind: MaterializationRecordKind.Define,
 							occurredAt: occurredAt,
-							ip: ip,
-							user: user,
 							script: null,
 							actionId: actionId,
 							arguments: null,
@@ -698,7 +634,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 
 				if (BinaryEventCodec.TryDecode(body, bodyLength,
-					out EventRecordType eventType, out _, out var fh, out var ipS, out var userS,
+					out EventRecordType eventType, out _, out var fh,
 					out var scriptOrArgs, out var actId, out var exposeData,
 					compression, encryption))
 				{
@@ -708,8 +644,6 @@ namespace Puppeteer.EventSourcing.DB
 							entryId: entryId,
 							kind: MaterializationRecordKind.Script,
 							occurredAt: fh,
-							ip: ipS,
-							user: userS,
 							script: scriptOrArgs,
 							actionId: 0,
 							arguments: null,
@@ -722,8 +656,6 @@ namespace Puppeteer.EventSourcing.DB
 							entryId: entryId,
 							kind: MaterializationRecordKind.Invocation,
 							occurredAt: fh,
-							ip: ipS,
-							user: userS,
 							script: null,
 							actionId: actId,
 							arguments: scriptOrArgs,

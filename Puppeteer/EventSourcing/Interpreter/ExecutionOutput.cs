@@ -1,3 +1,4 @@
+using Puppeteer.EventSourcing.Interpreter.Formatters;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -29,6 +30,17 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			printBuffer.Clear();
 			exposeBuffer.Clear();
+		}
+
+		/// <summary>
+		/// Install the formatter on both inner Outputs. Called by the
+		/// pool's Rent path; propagates the active <see cref="FormatterContext"/>
+		/// down to byte-emission level.
+		/// </summary>
+		internal void InstallFormatter(IOutputFormatter prototype)
+		{
+			printBuffer.InstallFormatter(prototype);
+			exposeBuffer.InstallFormatter(prototype);
 		}
 
 		internal void Finish()
@@ -97,8 +109,15 @@ namespace Puppeteer.EventSourcing.Interpreter
 			internal ExecutionOutput Rent(bool isRehydrating)
 			{
 				var stack = _objects.Value;
-				if (stack.Count > 0) return stack.Pop();
-				return new ExecutionOutput(conSalida: _conSalida, isRehydrating: isRehydrating);
+				ExecutionOutput item = stack.Count > 0
+					? stack.Pop()
+					: new ExecutionOutput(conSalida: _conSalida, isRehydrating: isRehydrating);
+				// Install the active formatter (if any) on the inner Outputs
+				// before handing the ExecutionOutput out. FormatterContext.Active
+				// is null when no Push has happened on this thread → defaults
+				// to JsonFormatter inside InstallFormatter.
+				item.InstallFormatter(FormatterContext.Active);
+				return item;
 			}
 
 			internal void Return(ExecutionOutput item)

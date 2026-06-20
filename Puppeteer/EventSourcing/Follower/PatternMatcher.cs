@@ -303,7 +303,7 @@ namespace Puppeteer.EventSourcing.Follower
 						continue;
 
 					// Check the method against its arguments.
-					if (!MatchMethodCall(typeAccess.MemberAccess, scriptMethodCall, capturedVariables))
+					if (!MatchMethodCall(typeAccess.MemberAccess, scriptMethodCall, capturedVariables, patternAst, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 						continue;
 
 					// Mark as used and update position
@@ -444,7 +444,7 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 
 					// Check the method against its arguments.
-					if (!MatchMethodCall(instanceAccess.MemberAccess, scriptMethodCall, capturedVariables))
+					if (!MatchMethodCall(instanceAccess.MemberAccess, scriptMethodCall, capturedVariables, patternAst, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 						continue;
 
 					// Mark as used and update position
@@ -751,7 +751,10 @@ namespace Puppeteer.EventSourcing.Follower
 				return false;
 
 			int currentScriptIndex = 0;
-			var scriptAccesses = patternAst.ScriptMemberAccesses.ToList();
+			// PERF (Tier 3): ScriptMemberAccesses is already an IReadOnlyList; this
+			// loop only reads it by index, so the previous .ToList() copy was a pure
+			// per-call allocation with no purpose. Iterate the list directly.
+			var scriptAccesses = patternAst.ScriptMemberAccesses;
 
 			for (int patternIndex = 0; patternIndex < partialPattern.Patterns.Count; patternIndex++)
 			{
@@ -811,7 +814,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return true;
 		}
-		private bool MatchMethodCall(MemberAccessNode memberAccess, ScriptMethodCall scriptMethodCall, Parameters capturedVariables)
+		private bool MatchMethodCall(MemberAccessNode memberAccess, ScriptMethodCall scriptMethodCall, Parameters capturedVariables,
+			PatternListNode patternAst, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (memberAccess == null) return false;
 			if (scriptMethodCall == null) return false;
@@ -857,7 +861,22 @@ namespace Puppeteer.EventSourcing.Follower
 				System.Diagnostics.Debug.WriteLine($"[MatchMethodCall] Checking param {i}: Pattern={patternParam.GetType().Name}, Script={scriptArgument?.GetType().Name ?? "NULL"}");
 #endif
 
-				if (!MatchParameterValue(patternParam, scriptArgument, capturedVariables))
+				bool argMatched;
+				if (patternParam is NestedCallParameterNode nestedCall)
+				{
+					// Argumento que es a su vez una llamada-con-receiver: lo casamos contra
+					// las ScriptMethodCalls registradas (la llamada interna quedo registrada
+					// por la recursion en DottedId/ChainedDotAccess.PreparePatternMatching),
+					// capturando sus $vars internos. No miramos scriptArgument (placeholder).
+					argMatched = MatchExpression(nestedCall.Call, patternAst, capturedVariables,
+						usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition);
+				}
+				else
+				{
+					argMatched = MatchParameterValue(patternParam, scriptArgument, capturedVariables);
+				}
+
+				if (!argMatched)
 				{
 #if DEBUG
 					System.Diagnostics.Debug.WriteLine($"[MatchMethodCall]   FAIL: Parameter {i} did not match");
@@ -1066,10 +1085,16 @@ namespace Puppeteer.EventSourcing.Follower
 			// Intentar cada rama secuencialmente, la primera que matchea gana
 			foreach (var branch in alternative.Branches)
 			{
-				// Guardar estado para rollback si esta rama no matchea
+				// Guardar estado para rollback si esta rama no matchea.
+				// PERF (Tier 3): el snapshot solo se necesita si ya hay indices
+				// consumidos. Para alternativas que aparecen al inicio del patron
+				// (caso comun) los sets estan vacios y el rollback es un simple
+				// Clear(), evitando las dos copias de HashSet. Recursion-safe: cada
+				// invocacion (incluidas alternativas anidadas) tiene sus propias
+				// variables locales de snapshot.
 				int savedPosition = lastMatchedPosition;
-				var savedMemberIndices = new HashSet<int>(usedMemberAccessIndices);
-				var savedMethodIndices = new HashSet<int>(usedMethodCallIndices);
+				HashSet<int> savedMemberIndices = usedMemberAccessIndices.Count > 0 ? new HashSet<int>(usedMemberAccessIndices) : null;
+				HashSet<int> savedMethodIndices = usedMethodCallIndices.Count > 0 ? new HashSet<int>(usedMethodCallIndices) : null;
 
 				if (MatchExpression(branch.Expression, patternAst, capturedVariables, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 				{
@@ -1084,9 +1109,9 @@ namespace Puppeteer.EventSourcing.Follower
 				// Rollback del estado
 				lastMatchedPosition = savedPosition;
 				usedMemberAccessIndices.Clear();
-				foreach (var idx in savedMemberIndices) usedMemberAccessIndices.Add(idx);
+				if (savedMemberIndices != null) foreach (var idx in savedMemberIndices) usedMemberAccessIndices.Add(idx);
 				usedMethodCallIndices.Clear();
-				foreach (var idx in savedMethodIndices) usedMethodCallIndices.Add(idx);
+				if (savedMethodIndices != null) foreach (var idx in savedMethodIndices) usedMethodCallIndices.Add(idx);
 			}
 
 			return false;

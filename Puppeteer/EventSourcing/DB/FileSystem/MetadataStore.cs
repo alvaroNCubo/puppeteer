@@ -33,20 +33,27 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
+			// File-doesn't-exist es el caso valido "actor nuevo". Cualquier otra
+			// causa de fallo (truncado, magic numbers incorrectos, version
+			// desconocida) significa que el archivo SI esta presente pero el
+			// formato no es interpretable -- silenciarlo y devolver false haria
+			// que el caller resetee el actor a fresh perdiendo el journal previo.
+			// Mismo patron de bug que el MySQL del reporte 9553: silent fallback
+			// produce NRE downstream. Aqui falla rapido con mensaje accionable.
 			if (!File.Exists(filePath))
 				return false;
 
 			byte[] data = File.ReadAllBytes(filePath);
 			if (data.Length < FILE_SIZE)
-				return false;
+				throw new LanguageException($"Actor metadata file '{filePath}' exists but is truncated ({data.Length} bytes, expected at least {FILE_SIZE}). Back up the actor directory; restore from a snapshot if available, or delete '{filePath}' to force a metadata rebuild from the journal files (the next start will treat the actor as fresh — verify journal contents first).");
 
 			if (data[0] != MAGIC[0] || data[1] != MAGIC[1] || data[2] != MAGIC[2] || data[3] != MAGIC[3])
-				return false;
+				throw new LanguageException($"Actor metadata file '{filePath}' has an invalid magic header (expected 'PPMM'). The file is either corrupted or from an incompatible Puppeteer format. Back up the actor directory before any recovery attempt.");
 
 			int offset = 4;
 			ushort version = BitConverter.ToUInt16(data, offset); offset += 2;
 			if (version != FORMAT_VERSION)
-				return false;
+				throw new LanguageException($"Actor metadata file '{filePath}' has format version {version}, but this Puppeteer expects version {FORMAT_VERSION}. There is no automatic migration path; back up the actor directory and contact maintainers for the upgrade procedure.");
 
 			CurrentFileSequence = BitConverter.ToInt32(data, offset); offset += 4;
 			LastWrittenEntryId = BitConverter.ToInt64(data, offset); offset += 8;

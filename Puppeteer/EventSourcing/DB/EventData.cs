@@ -8,8 +8,6 @@ namespace Puppeteer.EventSourcing.DB
 		private readonly EventDataPool pool;
 		internal long EntryId { get; set; }
 		internal DateTime OccurredAt { get; set; }
-		internal string Ip { get; set; }
-		internal string User { get; set; }
 		internal string ExposeData { get; set; }
 
 
@@ -124,8 +122,6 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			eventData.EntryId = 0;
 			eventData.OccurredAt = default;
-			eventData.Ip = null;
-			eventData.User = null;
 			eventData.ExposeData = null;
 
 			switch (eventData)

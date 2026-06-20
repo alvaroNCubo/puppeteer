@@ -23,6 +23,11 @@ namespace Puppeteer.EventSourcing.Interpreter
         // Reset at the start of ParseProgram. Detects static duplicates in the same script.
         private readonly HashSet<string> upgradeNamesEnPrograma = new HashSet<string>(StringComparer.Ordinal);
 
+        // Se pone en true si el parse del Program actual crea un OpEval o EvalStatement.
+        // Reset al inicio de ParseProgram; viaja a Program.HasEval para que
+        // ValidateStatically no tenga que recorrer el AST buscando evals.
+        private bool hasEvalEnPrograma;
+
 		static Parser()
 		{
 			tiposPrimitivos["int"] = typeof(int);
@@ -76,6 +81,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		private Program ParseProgram(int[] currLevel, bool isQuery, bool isCheck)
 		{
             upgradeNamesEnPrograma.Clear();
+            hasEvalEnPrograma = false;
             List<Statement> statements = new List<Statement>();
             while (lexer.CurrentToken.Type != TokenType.eof)
 			{
@@ -98,7 +104,13 @@ namespace Puppeteer.EventSourcing.Interpreter
                 }
             }
 			lexer.Accept(TokenType.eof);
-			return new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
+			Program programaResultante = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
+			programaResultante.HasEval = hasEvalEnPrograma;
+			// Lever 1 de la optimizacion de Now: precomputar (una sola vez por parse, fuera del
+			// hot path) si el programa referencia el parametro de SISTEMA Now. Conservador con
+			// HasEval: un Eval puede sintetizar la referencia y no es visible al escaneo estatico.
+			programaResultante.ReferencesNow = hasEvalEnPrograma || programaResultante.ScriptReferencesSystemNow();
+			return programaResultante;
 		}
 
 		private void ParseWhitespace()
@@ -192,11 +204,36 @@ namespace Puppeteer.EventSourcing.Interpreter
 			else if (typeName.Equals("decimal".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(decimal);
 
+			// Un @parametro tipado como un enum del dominio se journaliza por NOMBRE del
+			// tipo (Parameters.CanonicalTypeName emite type.Name); el replay re-parsea esa
+			// cabecera `define action (estado:StateEnum) as ...` y resuelve el nombre via
+			// las DomainLibraries del actor (que ya indexan enums por nombre). El valor
+			// viaja por nombre de miembro en el blob de argumentos (Parameters.ArgumentsValue
+			// usa Enum.Parse), legible y simbolico ('FL', no su ordinal).
+			if (type == null && libraries.TryGetType(typeName.ToString(), out Type domainType) && domainType.IsEnum)
+			{
+				type = domainType;
+			}
+
 			if (type == null)
 			{
-				throw new LanguageException($"Invalid type in procedure parameters: '{typeName}' at line {Row()}, column {Column()}. Valid primitive types: int, string, bool, double, datetime, decimal.", typeName.ToString(), Row(), Column());
+				throw new LanguageException($"Invalid type in procedure parameters: '{typeName}' at line {Row()}, column {Column()}. Valid primitive types: int, string, bool, double, datetime, decimal (or a known domain enum).", typeName.ToString(), Row(), Column());
 			}
 			lexer.Accept();
+
+			// Collection (array) suffix `<elem>[]`. A collection @parameter renders its
+			// type as `<elem>[]` on the journal (Parameters.CanonicalTypeName via
+			// UserParametersAsCanonicalText). Replay re-parses that `define action`
+			// header through this parser, so the main DSL parser must consume the `[]`
+			// just like the internal Parameters parser already does (Parameters.IsArray).
+			// Without this, ParseDefineActionParameterList stops after the base type and
+			// the trailing lBracket aborts with "Expected token type 'comma'".
+			if (lexer.CurrentToken.Type == TokenType.lBracket)
+			{
+				lexer.Accept(TokenType.lBracket);
+				lexer.Accept(TokenType.rBracket);
+				type = type.MakeArrayType();
+			}
 			return type;
 		}
 
@@ -537,12 +574,22 @@ namespace Puppeteer.EventSourcing.Interpreter
         // so two equivalent declarations don't diverge).
         private static string CanonicalTypeName(Type type)
         {
+            // Collection (array) types render as `<elem>[]`, matching the journal text
+            // produced by Parameters.CanonicalTypeName so a Define header round-trips
+            // through the parser as a fixed point.
+            if (type.IsArray)
+            {
+                return CanonicalTypeName(type.GetElementType()) + "[]";
+            }
             if (type == typeof(int)) return "int";
             if (type == typeof(string)) return "string";
             if (type == typeof(bool)) return "bool";
             if (type == typeof(double)) return "double";
             if (type == typeof(DateTime)) return "datetime";
             if (type == typeof(decimal)) return "decimal";
+            // Enum del dominio: se rinde por su nombre de tipo (resuelto al re-parsear via
+            // DomainLibraries). Round-trip punto fijo con Parameters.CanonicalTypeName.
+            if (type.IsEnum) return type.Name;
             throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
         }
 
@@ -1001,6 +1048,7 @@ namespace Puppeteer.EventSourcing.Interpreter
             AstExpression exp = ParseExpression(currLevel);
             lexer.Accept(TokenType.rParen);
             lexer.Accept(TokenType.semicolon);
+            hasEvalEnPrograma = true;
             return new EvalStatement(this.libraries, symbolTable, exp, currLevel, isQuery, isCheck);
         }
 
@@ -1020,7 +1068,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 						if (lexer.CurrentToken.Type != TokenType.lParen)
 						{
 							if (resultado is Id id)
-								resultado = new DottedId(symbolTable, id, method);
+								resultado = new DottedId(libraries, symbolTable, id, method);
 							else if (resultado is DotAccess dot)
 								resultado = new ChainedDotAccess(dot, method);
 							else if (resultado is NewInstance instance)
@@ -1035,7 +1083,15 @@ namespace Puppeteer.EventSourcing.Interpreter
 							lexer.Accept(TokenType.rParen);
 
 							if (resultado is Id id)
-								resultado = new DottedId(symbolTable, id, method, args);
+							{
+								// Clausula 'in' opcional para desambiguar la homonimia de namespace de una
+								// llamada a metodo static 'Clase.Metodo(args) in Namespace.Sub'. Mismo parser
+								// que la construccion Clase(args) in Namespace. Solo se admite cuando el
+								// receptor es un Id (potencial clase); DottedId valida que efectivamente
+								// resuelva a una clase y no a una variable.
+								string staticNamespace = ParseOptionalInNamespace();
+								resultado = new DottedId(libraries, symbolTable, id, method, args, staticNamespace);
+							}
 							else if (resultado is DotAccess dot)
 								resultado = new ChainedDotAccess(dot, method, args);
 							else if (resultado is NewInstance instance)
@@ -1046,9 +1102,15 @@ namespace Puppeteer.EventSourcing.Interpreter
 						break;
 				case TokenType.lBracket:
 					lexer.Accept();
-					AstExpression indice = ParseLogicalExpression(currLevel);
+					List<AstExpression> subscriptIndices = new List<AstExpression>();
+					subscriptIndices.Add(ParseLogicalExpression(currLevel));
+					while (lexer.CurrentToken.Type == TokenType.comma)
+					{
+						lexer.Accept();
+						subscriptIndices.Add(ParseLogicalExpression(currLevel));
+					}
 					lexer.Accept(TokenType.rBracket);
-					resultado = new SubscriptAstExpression(resultado, indice);
+					resultado = new SubscriptAstExpression(resultado, subscriptIndices.ToArray());
 					break;
 				case TokenType.lParen:
 					lexer.Accept();
@@ -1056,29 +1118,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 					var arguments = ParseArguments(currLevel);
 					lexer.Accept(TokenType.rParen);
 
-					string nombreNamespace = null;
-					if (lexer.CurrentToken.Type == TokenType.IN)
-					{
-						lexer.Accept();
-						if (lexer.CurrentToken.Type != TokenType.id)
-							throw new LanguageException($"Expected a namespace identifier after 'in' at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
-
-					StringBuilder namespaceBuilder = new StringBuilder();
-					namespaceBuilder.Append(lexer.CurrentLexeme().ToString());
-					lexer.Accept();
-
-					while (lexer.CurrentToken.Type == TokenType.dot)
-					{
-						namespaceBuilder.Append('.');
-						lexer.Accept();
-						if (lexer.CurrentToken.Type != TokenType.id)
-							throw new LanguageException($"Expected an identifier after the dot in the namespace at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
-						namespaceBuilder.Append(lexer.CurrentLexeme().ToString());
-						lexer.Accept();
-					}
-
-					nombreNamespace = namespaceBuilder.ToString();
-					}
+					string nombreNamespace = ParseOptionalInNamespace();
 
 					resultado = new NewInstance(libraries, symbolTable, clazz, arguments, nombreNamespace);
 					break;
@@ -1087,6 +1127,38 @@ namespace Puppeteer.EventSourcing.Interpreter
 				}
 				type = lexer.CurrentToken.Type;
 			}
+		}
+
+		// Parsea la clausula opcional 'in Namespace.Sub' que sigue a una construccion
+		// 'Clase(args) in Ns' o a una llamada static 'Clase.Metodo(args) in Ns'. Retorna el
+		// namespace completo, o null si no hay clausula 'in'. Centralizado para que ambos usos
+		// compartan exactamente la misma gramatica del namespace.
+		private string ParseOptionalInNamespace()
+		{
+			if (lexer.CurrentToken.Type != TokenType.IN)
+			{
+				return null;
+			}
+
+			lexer.Accept(TokenType.IN);
+			if (lexer.CurrentToken.Type != TokenType.id)
+				throw new LanguageException($"Expected a namespace identifier after 'in' at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
+
+			StringBuilder namespaceBuilder = new StringBuilder();
+			namespaceBuilder.Append(lexer.CurrentLexeme().ToString());
+			lexer.Accept();
+
+			while (lexer.CurrentToken.Type == TokenType.dot)
+			{
+				namespaceBuilder.Append('.');
+				lexer.Accept();
+				if (lexer.CurrentToken.Type != TokenType.id)
+					throw new LanguageException($"Expected an identifier after the dot in the namespace at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
+				namespaceBuilder.Append(lexer.CurrentLexeme().ToString());
+				lexer.Accept();
+			}
+
+			return namespaceBuilder.ToString();
 		}
 
 		private AstExpression[] ParseArguments(int[] currLevel)
@@ -1193,7 +1265,7 @@ namespace Puppeteer.EventSourcing.Interpreter
             {
                 throw new LanguageException($"Expected a date literal at line {Row()}, column {Column()}, but found token '{lexer.CurrentToken.Type}'. Please verify the date format (MM/dd/yyyy).", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
-            DateTime resultado = DateTime.Parse(lexer.CurrentLexeme());
+            DateTime resultado = DateTime.Parse(lexer.CurrentLexeme(), CultureInfo.InvariantCulture);
 			lexer.Accept(TokenType.date);
             return resultado;
         }
@@ -1215,11 +1287,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 			ReadOnlySpan<char> timeSpan = lexer.CurrentLexeme();
 			Span<char> buffer = stackalloc char[19]; // "MM/dd/yyyy HH:mm:ss" = 19 chars
-			date.TryFormat(buffer.Slice(0, 10), out _, "MM/dd/yyyy");
+			date.TryFormat(buffer.Slice(0, 10), out _, "MM/dd/yyyy", CultureInfo.InvariantCulture);
 			buffer[10] = ' ';
 			timeSpan.CopyTo(buffer.Slice(11));
 
-			DateTime resultado = DateTime.Parse(buffer.Slice(0, 11 + timeSpan.Length));
+			DateTime resultado = DateTime.Parse(buffer.Slice(0, 11 + timeSpan.Length), CultureInfo.InvariantCulture);
 			lexer.Accept(TokenType.time);
             return resultado;
         }
@@ -1455,13 +1527,6 @@ namespace Puppeteer.EventSourcing.Interpreter
 						}
                     }
                     break;
-                case TokenType.EVAL:
-                    lexer.Accept();
-                    lexer.Accept(TokenType.lParen);
-                    resultado = ParseAtomicExpression(currLevel);
-                    lexer.Accept(TokenType.rParen);
-                    resultado = new OpEval(this.symbolTable, resultado);
-                    break;
                 case TokenType.begin:
                     resultado = ParseList(currLevel);
                     break;
@@ -1503,11 +1568,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 			switch (literalType)
 			{
                 case TokenType.number:
-					resultado = ParseNumero();
+					resultado = ParseNumber();
 					break;
 
                 case TokenType.stringLit:
-					resultado = ParseHilera();
+					resultado = ParseString();
 					break;
 
                 case TokenType.@decimal:
@@ -1554,7 +1619,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return resultado;
 		}
 
-		private AstExpression ParseHilera()
+		private AstExpression ParseString()
 		{
 			ReadOnlySpan<char> raw = lexer.CurrentLexeme();
 
@@ -1585,7 +1650,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 			string literal = sb.ToString();
 			lexer.Accept();
-			return literal == "" ? LiteralString.VACIA : new LiteralString(literal);
+			return literal == "" ? LiteralString.EMPTY : new LiteralString(literal);
 		}
 
 		private AstExpression ParseDouble()
@@ -1611,7 +1676,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return resultado;
 		}
 
-		private AstExpression ParseNumero()
+		private AstExpression ParseNumber()
 		{
 			AstExpression resultado = new LiteralNumber(int.Parse(lexer.CurrentLexeme()));
 			lexer.Accept();

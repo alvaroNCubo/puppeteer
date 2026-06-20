@@ -69,6 +69,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 		}
 
+		// B.3.1: include the wrapped expression. The actual evaluated body is
+		// dynamic and only known at runtime, so the hash captures the static
+		// shape of the eval-expression itself (which is what's parsed and
+		// journaled as part of the host script).
+		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
+		{
+			hc.Add(nameof(EvalStatement));
+			expression.AccumulatePromotionCandidateHash(ref hc);
+		}
+
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;
@@ -76,6 +86,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
 				resultado.Append(forDairy);
+			}
+			else
+			{
+				// forDairy lo setea Execute con la forma EXPANDIDA del eval (e.g.
+				// `id = 1;`). Pero ActorHandler invoca ConvertToString del programa
+				// padre ANTES de Perform — el snapshot va al journal mientras forDairy
+				// es null y, sin esta rama, la asignacion sintetizada por Eval se
+				// pierde. Sin ella, la rehidratacion ve un script con referencias
+				// libres a la variable creada por Eval (typeof(object)) y la validacion
+				// estatica lanza `Unknown property or method 'X' on type 'Y'.`.
+				// Reproducido por DotAccessHomonymResolutionTests.Recovery_FromJournal_*
+				// (la version stripped del bloque de creacion de perfiles de
+				// LiquidityAPI). Al emitir el Eval literal el AST replayed contiene
+				// EvalStatement, hasEvals==true en Program.ValidateStatically, y la
+				// validacion estatica se omite — replay re-ejecuta el Eval y reconstruye
+				// las globals de manera determinista (mismo orden de NextProfileId(), etc.).
+				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+				resultado.Append("Eval(");
+				expression.write(resultado, databaseType);
+				resultado.Append(");\r");
 			}
 		}
 

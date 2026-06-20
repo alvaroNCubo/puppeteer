@@ -133,8 +133,6 @@ namespace Puppeteer
 		private static long ApproximateRecordBytes(MaterializationRecord record)
 		{
 			long bytes = 24;
-			if (record.Ip != null) bytes += record.Ip.Length * 2;
-			if (record.User != null) bytes += record.User.Length * 2;
 			if (record.Script != null) bytes += record.Script.Length * 2;
 			if (record.Arguments != null) bytes += record.Arguments.Length * 2;
 			if (record.DefineStatementText != null) bytes += record.DefineStatementText.Length * 2;

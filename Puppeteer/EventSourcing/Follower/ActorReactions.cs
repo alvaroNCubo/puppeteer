@@ -34,6 +34,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 		string IActorEventJournalClient.ActorName => actorHandler.Name;
 
+		IPuppeteerLogger IActorEventJournalClient.Logger => actorHandler.Logger;
+
 		bool IActorEventJournalClient.IsNew
 		{
 			set => (actorHandler as IActorEventJournalClient).IsNew = value;
@@ -168,7 +170,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 				bool success = BinaryEventCodec.TryDecode(body, bodyLength,
 					out EventRecordType eventType, out long decodedEntryId, out DateTime occurredAt,
-					out string ip, out string user, out string scriptOrArguments, out int actionId,
+					out string scriptOrArguments, out int actionId,
 					out string exposeData);
 
 				if (!success) continue;
@@ -179,8 +181,6 @@ namespace Puppeteer.EventSourcing.Follower
 					var scriptEvent = eventDataPool.RentScript();
 					scriptEvent.EntryId = decodedEntryId;
 					scriptEvent.OccurredAt = occurredAt;
-					scriptEvent.Ip = ip;
-					scriptEvent.User = user;
 					scriptEvent.Script = scriptOrArguments;
 					scriptEvent.ExposeData = exposeData;
 					eventData = scriptEvent;
@@ -190,8 +190,6 @@ namespace Puppeteer.EventSourcing.Follower
 					var actionEvent = eventDataPool.RentAction();
 					actionEvent.EntryId = decodedEntryId;
 					actionEvent.OccurredAt = occurredAt;
-					actionEvent.Ip = ip;
-					actionEvent.User = user;
 					actionEvent.ActionId = actionId;
 					actionEvent.Arguments = scriptOrArguments;
 					actionEvent.ExposeData = exposeData;

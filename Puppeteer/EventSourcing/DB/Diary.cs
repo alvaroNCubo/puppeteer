@@ -8,20 +8,18 @@ using Puppeteer.EventSourcing.DB.FileSystem;
 
 namespace Puppeteer.EventSourcing.DB
 {
-	internal enum RehydrateDirection
-	{
-		Forward,
-		Backward
-	}
-
 	internal class Diary : IDisposable
 	{
 
 		private readonly DiaryStorage diaryStorage;
 		internal DiaryStorage Storage => diaryStorage;
-		internal const string EXECUTION_ERROR_TAG = "//EXECUTION ERROR WAS DETECTED ON THIS COMMAND";
+		// Pre-2026-05-19: el script de un PerformCmd que fallaba en runtime se
+		// journalizaba con un prefijo "//EXECUTION ERROR WAS DETECTED ON THIS COMMAND"
+		// para que la rehidratacion posterior lo identificara. Eliminado: el script
+		// se persiste integro y la informacion del fallo viaja por IPuppeteerLogger.
+		// El journal es un registro fidedigno de comandos intentados, no un canal
+		// para metadata de errores.
 		private readonly DatabaseType dbType;
-		private readonly Func<UserInLog, string> UserInLogToStringStorageFormat;
 
 		// Buffering: local WAL + asynchronous replication to the remote storage.
 		private DiaryStorageFileSystem localBuffer;
@@ -42,43 +40,66 @@ namespace Puppeteer.EventSourcing.DB
 		internal long ReplicationFailureCount => IsBuffered ? replicationAgent.ReplicationFailureCount : 0L;
 		internal string LastReplicationError => IsBuffered ? replicationAgent.LastReplicationError : null;
 
-		internal Diary(DatabaseType dbType, string connectionString, IActorEventJournalClient eventJournalClient, string localBufferPath = null)
+		internal Diary(DatabaseType dbType, string connectionString, IActorEventJournalClient eventJournalClient)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(connectionString);
 			ArgumentNullException.ThrowIfNull(eventJournalClient);
 
 			this.dbType = dbType;
-			this.localBufferPath = localBufferPath;
+
+			(string backendConnectionString, string parsedLocalBufferPath) =
+				StorageConnectionString.Extract(connectionString);
+
+			// IN_MEMORY ignora silenciosamente la key (buffer a memoria no tiene sentido:
+			// el storage canonico ya es el medio mas rapido posible). Resto de dbTypes
+			// honran la presencia/ausencia de la key como switch on/off del buffer.
+			if (dbType == DatabaseType.IN_MEMORY)
+				parsedLocalBufferPath = null;
+
+			ValidateEagerPaths(dbType, backendConnectionString, parsedLocalBufferPath);
+
+			this.localBufferPath = parsedLocalBufferPath;
 
 			if (dbType == DatabaseType.MySQL)
 			{
-				diaryStorage = new DiaryStorageMySQL(eventJournalClient, connectionString);
-				UserInLogToStringStorageFormat = (UserInLog u) => u.ToMySQLFormat();
+				diaryStorage = new DiaryStorageMySQL(eventJournalClient, backendConnectionString);
 			}
 			else if (dbType == DatabaseType.SQLServer)
 			{
-				diaryStorage = new DiaryStorageSQLServer(eventJournalClient, connectionString);
-				UserInLogToStringStorageFormat = (UserInLog u) => u.ToString();
+				diaryStorage = new DiaryStorageSQLServer(eventJournalClient, backendConnectionString);
 			}
 			else if (dbType == DatabaseType.IN_MEMORY)
 			{
 				diaryStorage = new DiaryStorageInMemory(eventJournalClient);
-				UserInLogToStringStorageFormat = (UserInLog u) => u.ToString();
 			}
 			else if (dbType == DatabaseType.FileSystem)
 			{
-				diaryStorage = new DiaryStorageFileSystem(eventJournalClient, connectionString);
-				UserInLogToStringStorageFormat = (UserInLog u) => u.Id;
+				diaryStorage = new DiaryStorageFileSystem(eventJournalClient, backendConnectionString);
 			}
 			else
 			{
 				throw new Exception($"Unknown database type '{dbType}'.");
 			}
 
-			if (!string.IsNullOrWhiteSpace(localBufferPath))
+			if (!string.IsNullOrWhiteSpace(parsedLocalBufferPath))
 			{
 				InitializeBuffering(eventJournalClient);
 			}
+		}
+
+		private static void ValidateEagerPaths(DatabaseType dbType, string backendConnectionString, string localBufferPath)
+		{
+			if (dbType == DatabaseType.FileSystem)
+			{
+				var fsCs = new Puppeteer.EventSourcing.DB.FileSystem.FileSystemConnectionString(backendConnectionString);
+				StoragePathValidator.EnsureFileSystemPathIsUsable(fsCs.Path);
+
+				if (!string.IsNullOrWhiteSpace(localBufferPath))
+					StoragePathValidator.EnsureBufferAndCanonicalAreDistinct(fsCs.Path, localBufferPath);
+			}
+
+			if (!string.IsNullOrWhiteSpace(localBufferPath))
+				StoragePathValidator.EnsureLocalBufferPathIsUsable(localBufferPath);
 		}
 
 		private void InitializeBuffering(IActorEventJournalClient eventJournalClient)
@@ -150,9 +171,12 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					externalOnRecordWritten = value;
 				}
-				else if (diaryStorage is DiaryStorageFileSystem fs)
+				else
 				{
-					fs.OnRecordWritten = value;
+					// OnRecordWritten lives on DiaryStorage (abstract base) — all
+					// backends (FS / SQL / InMemory) inherit it. FS produces wire
+					// bytes naturally; SQL / InMemory synthesize via BinaryEventCodec.
+					diaryStorage.OnRecordWritten = value;
 				}
 			}
 		}
@@ -161,7 +185,7 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			if (callback == null) throw new ArgumentNullException(nameof(callback));
 
-			// Lab 3 fix: two Cued reactions race on the same fs.OnRecordWritten
+			// Lab 3 fix: two Cued reactions race on the same OnRecordWritten
 			// field (each one wraps `previous` around its own callback). Without
 			// CAS-style synchronisation the late-starting wrapper can read
 			// `previous = null` and overwrite the earlier reaction's callback,
@@ -182,17 +206,20 @@ namespace Puppeteer.EventSourcing.DB
 						return;
 				}
 			}
-			else if (diaryStorage is DiaryStorageFileSystem fs)
+			else
 			{
+				// OnRecordWritten lives on DiaryStorage (abstract base) — every
+				// backend has it. CAS over the base-class field generalises the
+				// previous DiaryStorageFileSystem-only branch.
 				while (true)
 				{
-					var previous = fs.OnRecordWritten;
+					var previous = diaryStorage.OnRecordWritten;
 					Action<long, byte[]> next = (entryId, record) =>
 					{
 						previous?.Invoke(entryId, record);
 						callback(entryId, record);
 					};
-					if (System.Threading.Interlocked.CompareExchange(ref fs.OnRecordWritten, next, previous) == previous)
+					if (System.Threading.Interlocked.CompareExchange(ref diaryStorage.OnRecordWritten, next, previous) == previous)
 						return;
 				}
 			}
@@ -310,31 +337,31 @@ namespace Puppeteer.EventSourcing.DB
 		// WriteNewActionEntry (sync + async). Use WriteInvocationEntry /
 		// WriteDefineEntry / WriteDefineWithFirstInvocation instead.
 
-		internal void WriteScriptEntry(long entryId, string script, IpAddress ip, UserInLog user, DateTime now, string exposeData = null)
+		internal void WriteScriptEntry(long entryId, string script, DateTime now, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				localBuffer.WriteScriptEntry(entryId, script, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				localBuffer.WriteScriptEntry(entryId, script, now, exposeData);
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				diaryStorage.WriteScriptEntry(entryId, script, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				diaryStorage.WriteScriptEntry(entryId, script, now, exposeData);
 			}
 		}
 
-		internal async Task WriteScriptEntryAsync(long entryId, string script, IpAddress ip, UserInLog user, DateTime now, string exposeData = null)
+		internal async Task WriteScriptEntryAsync(long entryId, string script, DateTime now, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				await Task.Run(() => localBuffer.WriteScriptEntry(entryId, script, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData));
+				await Task.Run(() => localBuffer.WriteScriptEntry(entryId, script, now, exposeData));
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				await diaryStorage.WriteScriptEntryAsync(entryId, script, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				await diaryStorage.WriteScriptEntryAsync(entryId, script, now, exposeData);
 			}
 		}
 
@@ -343,59 +370,59 @@ namespace Puppeteer.EventSourcing.DB
 		// split-model firmado: Define + Invocation are TWO separate journal rows on
 		// the first invocation, so MarkAsSkip on a first invocation cannot
 		// collaterally erase the Define declaration.
-		internal void WriteDefineEntry(int actionId, string defineStatementText, long entryId, IpAddress ip, UserInLog user, DateTime now, string exposeData = null)
+		internal void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				localBuffer.WriteDefineEntry(actionId, defineStatementText, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				localBuffer.WriteDefineEntry(actionId, defineStatementText, entryId, now, exposeData);
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				diaryStorage.WriteDefineEntry(actionId, defineStatementText, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				diaryStorage.WriteDefineEntry(actionId, defineStatementText, entryId, now, exposeData);
 			}
 		}
 
-		internal async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, IpAddress ip, UserInLog user, DateTime now, string exposeData = null)
+		internal async Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				await Task.Run(() => localBuffer.WriteDefineEntry(actionId, defineStatementText, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData));
+				await Task.Run(() => localBuffer.WriteDefineEntry(actionId, defineStatementText, entryId, now, exposeData));
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				await diaryStorage.WriteDefineEntryAsync(actionId, defineStatementText, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, exposeData);
+				await diaryStorage.WriteDefineEntryAsync(actionId, defineStatementText, entryId, now, exposeData);
 			}
 		}
 
-		internal void WriteInvocationEntry(int actionId, long entryId, IpAddress ip, UserInLog user, DateTime now, string arguments, string exposeData = null)
+		internal void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				localBuffer.WriteInvocationEntry(actionId, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				localBuffer.WriteInvocationEntry(actionId, entryId, now, arguments, exposeData);
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				diaryStorage.WriteInvocationEntry(actionId, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				diaryStorage.WriteInvocationEntry(actionId, entryId, now, arguments, exposeData);
 			}
 		}
 
-		internal async Task WriteInvocationEntryAsync(int actionId, long entryId, IpAddress ip, UserInLog user, DateTime now, string arguments, string exposeData = null)
+		internal async Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				await Task.Run(() => localBuffer.WriteInvocationEntry(actionId, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData));
+				await Task.Run(() => localBuffer.WriteInvocationEntry(actionId, entryId, now, arguments, exposeData));
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				await diaryStorage.WriteInvocationEntryAsync(actionId, entryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				await diaryStorage.WriteInvocationEntryAsync(actionId, entryId, now, arguments, exposeData);
 			}
 		}
 
@@ -403,31 +430,31 @@ namespace Puppeteer.EventSourcing.DB
 		// ActorHandler cutover on cache miss with parameters: emits the Define +
 		// first Invocation as TWO separate journal rows in a single transactional
 		// unit per backend.
-		internal void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, IpAddress ip, UserInLog user, DateTime now, string arguments, string exposeData = null)
+		internal void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				localBuffer.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				localBuffer.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData);
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				diaryStorage.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				diaryStorage.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData);
 			}
 		}
 
-		internal async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, IpAddress ip, UserInLog user, DateTime now, string arguments, string exposeData = null)
+		internal async Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			if (IsBuffered)
 			{
 				WaitIfDiskFull();
-				await Task.Run(() => localBuffer.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData));
+				await Task.Run(() => localBuffer.WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData));
 			}
 			else
 			{
 				diaryStorage.DateOfLastActivity = DateTime.Now;
-				await diaryStorage.WriteDefineWithFirstInvocationAsync(actionId, defineStatementText, defineEntryId, invocationEntryId, ip.Ip, UserInLogToStringStorageFormat(user), now, arguments, exposeData);
+				await diaryStorage.WriteDefineWithFirstInvocationAsync(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData);
 			}
 		}
 

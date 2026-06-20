@@ -100,6 +100,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// B.3.1: propagate promotion-candidate hash through inner statements.
+		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
+		{
+			hc.Add(nameof(BlockStatement));
+			hc.Add(statements.Length);
+			foreach (Statement source in statements)
+			{
+				source.AccumulatePromotionCandidateHash(ref hc);
+			}
+		}
+
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;

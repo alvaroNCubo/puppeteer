@@ -7,6 +7,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace Puppeteer.EventSourcing.Follower
 {
@@ -92,15 +93,19 @@ namespace Puppeteer.EventSourcing.Follower
 		private long lastProcessedEntryId = long.MinValue;
 		internal long LastProcessedEntryId => lastProcessedEntryId;
 
+		// IActorIntrospection (ShowReactions / ShowReaction) reads the
+		// reactionId assigned during Execute() to query the DiaryStorage
+		// checkpoint tuple per Seek. Returns long.MinValue when the Reaction
+		// has never been executed; the introspection surface treats that as
+		// (detected=0, confirmed=0) since no checkpoint row exists yet.
+		internal long ReactionId => reactionId;
+
 		internal void RequestShutdown()
 		{
 			actorReactions?.RequestShutdown();
 		}
 
 		private List<ReactionEngine> reactionEngines;
-
-		private RehydrateDirection direction;
-		private bool directionSet = false;
 
 		private bool isNew;
 
@@ -109,14 +114,51 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private string hydrationUntilSeek = null;
 
+		// Cuantificador universal del Reaction: (a,b,c) in $x × $y × $z. Declarado
+		// despues del Seek que captura las colecciones fuente; el conjunto de
+		// obligaciones (producto cartesiano) se materializa al matchear ese Seek (F1b).
+		private ForEachSpec forEachSpec = null;
+
+		// Resume optimization (rediseño de checkpoint, paso 4). Opt-in de la fila
+		// "Cue / Replicación / consumidor-puro" de la matriz: el transporte push (Svix) NO
+		// rebobina, asi que el cold-start no puede re-leer. En su lugar se restauran los matches
+		// de cobertura abiertos desde un snapshot y se resume en el frente. Para Job/Cue con
+		// journal local (default) NO se activa: ahi el resume es re-leer [closed, high-water].
+		private bool useSnapshotResume = false;
+
 		private MatchTree matchTree;
 		private ReactionAction reactionAction;
+		// SymbolTable scope invariant: Reaction owns a SymbolTable INSTANCE
+		// SEPARATE from actorHandler.symbolTable. It is created in Execute()
+		// and populated with Reaction-only globals ('time' = Temporal helper
+		// for time.Days/Hours/..., plus per-engine globals registered during
+		// Action parsing via UpdateSymbolTableFromProgram). Any Parser used
+		// to parse Reaction-scope scripts (event scripts, Where expressions,
+		// cached Action programs) MUST be constructed against THIS instance
+		// — a parser bound to actorHandler.symbolTable cannot resolve 'time'
+		// (or any Reaction-only global) and silently types it as Object,
+		// breaking static validation. This is why the Parser pool lives on
+		// Reaction itself, not on ActorHandler.
 		private SymbolTable symbolTable;
+		// Per-Reaction Parser pool. Bound to this Reaction's local symbolTable
+		// (which holds 'time' and per-engine globals — distinct from
+		// actorHandler.symbolTable). Allocated alongside symbolTable in
+		// Execute() and reused for every script parse during that Execute
+		// (event scripts in Pattern.Match, Action cache misses in
+		// SolveActionReferences, Where pre-compile in CompileWhereExpressions,
+		// and UpdateSymbolTable). Eliminates per-event Parser allocations
+		// in the hot path.
+		internal ActorHandler.ConcurrentParsersPool ParsersPool;
 
 		private ReactionActionType actionType = ReactionActionType.None;
 
 		private string scriptForCmd;
 		private string scriptForChk;
+		// Check de una Causation.Continue(check:, script). A diferencia de
+		// scriptForChk (el `when:` de Program.Emit, que se evalua localmente
+		// antes del emit), este check NO se evalua aqui: viaja en el
+		// TellEnvelope.Check para que el RECEPTOR lo corra como CheckThenCommand.
+		private string causationCheck;
 		private Action<Parameters> _configureParameters;
 
 		// ===== VALIDITY METADATA (PHASE 6) =====
@@ -152,13 +194,49 @@ namespace Puppeteer.EventSourcing.Follower
 		private ActorReactions actorReactions;
 		private readonly EventDataPool pushEventDataPool = new EventDataPool(32);
 
+		// B.2: Reaction-level match cache. Keyed by (Pattern, parsed Program
+		// AST, initial Parameters signature, expose data JSON). Negative
+		// caching included: failed matches are stored with Matched=false so
+		// repeated events with identical inputs skip the matcher entirely.
+		// Single-threaded access assumed (consistent with cachedProgramas
+		// above); the cache lives on the Reaction so multiple Patterns of
+		// the same Reaction share the dictionary while remaining
+		// distinguishable via the Pattern reference in the key.
+		private readonly ReactionMatchCache matchCache = new ReactionMatchCache();
+		internal ReactionMatchCache MatchCache => matchCache;
+
+		// Phase A: aggregate count of complete matches (OnMatch chain reached
+		// the final Seek and the action was about to execute). Plus a fixed-
+		// size ring buffer of the last N MatchSnapshots, capturing the
+		// bindings and chain at the moment of detection. The ring is
+		// in-memory only; lock is taken on every append and on every read
+		// (snapshot copy is returned). Capacity intentionally fixed: 32
+		// covers typical retrospective-assertion windows without growing
+		// per-Reaction memory unbounded across long-running pods.
+		private const int LastMatchesCapacity = 32;
+		private long matchCount;
+		private readonly MatchSnapshot[] lastMatchesBuffer = new MatchSnapshot[LastMatchesCapacity];
+		private int lastMatchesCursor;
+		private int lastMatchesCount;
+		private readonly object lastMatchesLock = new object();
+
+		// Shadow Replay — S3 (skip-preview). EntryIds que las reactions Elide marcarian
+		// en modo dry-run sobre un shadow, SIN commitear la elision. Acumulado por
+		// RecordWouldSkip; reseteado por ResetCounters.
+		private readonly List<long> wouldSkip = new List<long>();
+		private readonly object wouldSkipLock = new object();
+
 		internal Reaction(Reactions reactions, string name, ReactionMode mode, ReactionActivation activation)
 		{
 			ArgumentNullException.ThrowIfNull(reactions);
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(name);
 
 			this.name = name;
-			this.direction = RehydrateDirection.Forward;
+			// Reactions replay the journal forward only — the append-only substrate
+			// has a single natural reading order. reactionEngines is allocated here
+			// (formerly inside ReadForward/ReadBackward) so the list is ready before
+			// the first Seek(); an empty list is the "no Seek declared yet" state.
+			this.reactionEngines = new List<ReactionEngine>();
 			this.reactions = reactions;
 			this.actorHandler = reactions.ActorHandler;
 			this.mode = mode;
@@ -176,6 +254,12 @@ namespace Puppeteer.EventSourcing.Follower
 		public long ActionEventsProcessed          => actionEventsProcessed;
 		public long CacheHits                      => cacheHits;
 		public long CacheMisses                    => cacheMisses;
+		// B.2: match-cache observability. CacheHits/CacheMisses above count the
+		// parsed-Program LRU (Commit E); these count the new per-Pattern match
+		// cache (skip the matcher entirely on hit).
+		public long MatchCacheHits                 => matchCache.Hits;
+		public long MatchCacheMisses               => matchCache.Misses;
+		public int MatchCacheSize                  => matchCache.Count;
 		public long ParametersRegistered           => parametersRegistered;
 		public long ActionIdNotFoundErrors         => actionIdNotFoundErrors;
 		public long ArgumentsDeserializationErrors => argumentsDeserializationErrors;
@@ -183,13 +267,127 @@ namespace Puppeteer.EventSourcing.Follower
 		public TimeSpan ParameterRegistrationTime  => parameterRegistrationTime.Elapsed;
 		public DateTime LastActionAt               { get; private set; }
 
+		// Phase A observability. MatchCount counts complete-match detections
+		// (advance through the final Seek); LastMatches returns the most
+		// recent N snapshots in chronological order (oldest first, newest
+		// last). Reads are snapshot copies, so the caller can iterate without
+		// holding any lock. ResetCounters() is the in-memory reset for tests
+		// or operational tooling that wants a fresh zero baseline without
+		// re-invoking Execute(); cero I/O.
+		public long MatchCount => Interlocked.Read(ref matchCount);
+
+		public IReadOnlyList<MatchSnapshot> LastMatches
+		{
+			get
+			{
+				lock (lastMatchesLock)
+				{
+					int count = lastMatchesCount;
+					if (count == 0) return Array.Empty<MatchSnapshot>();
+
+					var result = new MatchSnapshot[count];
+					int start = (count < LastMatchesCapacity) ? 0 : lastMatchesCursor;
+					for (int i = 0; i < count; i++)
+					{
+						result[i] = lastMatchesBuffer[(start + i) % LastMatchesCapacity];
+					}
+					return result;
+				}
+			}
+		}
+
+		// Shadow Replay — S3. WouldSkip expone, en modo skip-preview (dry-run sobre un
+		// shadow), los EntryIds que las reactions Elide marcarian SIN commitear la
+		// elision. Es a Elide lo que LastMatches es a los matches: un buffer observable
+		// de "que elidiria", no un efecto persistido. Lectura = copia snapshot.
+		public IReadOnlyList<long> WouldSkip
+		{
+			get
+			{
+				lock (wouldSkipLock)
+				{
+					return wouldSkip.ToArray();
+				}
+			}
+		}
+
+		public void ResetCounters()
+		{
+			Interlocked.Exchange(ref matchCount, 0);
+
+			if (reactionEngines != null)
+			{
+				foreach (var engine in reactionEngines)
+				{
+					engine.ResetSeekCounters();
+				}
+			}
+
+			lock (lastMatchesLock)
+			{
+				for (int i = 0; i < LastMatchesCapacity; i++)
+				{
+					lastMatchesBuffer[i] = null;
+				}
+				lastMatchesCursor = 0;
+				lastMatchesCount = 0;
+			}
+
+			lock (wouldSkipLock)
+			{
+				wouldSkip.Clear();
+			}
+		}
+
+		// Called from MatchTree.ExecuteCompleteMatch the moment the chain is
+		// fully resolved (after CollectAllParametersFromChain, before
+		// ExecuteAction). Bindings are filtered to exclude Now/User/Ip so
+		// the snapshot reflects domain captures only — mirrors the filter
+		// applied by HashParameters8 for the lab callbacks.
+		internal void RecordCompleteMatch(long triggeringEntryId, DateTime occurredAt, long[] chain, Parameters parameters)
+		{
+			ArgumentNullException.ThrowIfNull(chain);
+
+			Interlocked.Increment(ref matchCount);
+
+			var bindings = new Dictionary<string, object>();
+			if (parameters != null)
+			{
+				foreach (var p in parameters)
+				{
+					if (p.Name == "Now" || p.Name == "User" || p.Name == "Ip") continue;
+					bindings[p.Name ?? string.Empty] = p.GetValue();
+				}
+			}
+
+			var snapshot = new MatchSnapshot(triggeringEntryId, occurredAt, chain, bindings);
+
+			lock (lastMatchesLock)
+			{
+				lastMatchesBuffer[lastMatchesCursor] = snapshot;
+				lastMatchesCursor = (lastMatchesCursor + 1) % LastMatchesCapacity;
+				if (lastMatchesCount < LastMatchesCapacity) lastMatchesCount++;
+			}
+		}
+
+		// Shadow Replay — S3. Llamado desde MatchTree.ExecuteCompleteMatch cuando el
+		// shadow corre en skip-preview: captura el batch de EntryIds que la Elide
+		// marcaria, SIN commitear (no MarkEventsAsElidedWithCheckpoint).
+		internal void RecordWouldSkip(long[] batch)
+		{
+			ArgumentNullException.ThrowIfNull(batch);
+			lock (wouldSkipLock)
+			{
+				wouldSkip.AddRange(batch);
+			}
+		}
+
 		// Fired at the end of Execute(...) when the reaction stops gracefully
 		// (cancellation, batch end, etc.). Subscribers (e.g. PerformanceTracer)
 		// snapshot the counters above to emit a final Span. NOT fired on hard
 		// process crash — that case relies on the periodic sampling.
 		public event Action<Reaction> OnExecutionStopped;
 
-		internal RehydrateDirection Direction => direction;
 
 		internal ActorHandler ActorHandler => actorHandler;
 
@@ -199,9 +397,45 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal ReactionActivation Activation => activation;
 
+		// Decide si una activacion corre dado el rol vivo del nodo. DirectorOnly
+		// solo en el director/primary; CastOnly solo en el Cast/follower; Company
+		// en ambos.
+		private static bool ActivationAllowsRole(ReactionActivation activation, bool isActingAsDirector)
+		{
+			switch (activation)
+			{
+				case ReactionActivation.DirectorOnly: return isActingAsDirector;
+				case ReactionActivation.CastOnly: return !isActingAsDirector;
+				case ReactionActivation.Company: return true;
+				default: throw new LanguageException($"Unknown ReactionActivation '{activation}'.");
+			}
+		}
+
 		internal PatternsGroup Patterns => new PatternsGroup(this);
 
+		// IActorIntrospection (ShowReaction) reads the hydration configuration
+		// to format it as a single readable string like "Shared(untilSeek: 'X')".
+		// Default is Shared with no untilSeek; the bool tells us if the user
+		// explicitly set it, but for the introspection surface we just report
+		// the effective values, not whether they were defaulted.
+		internal HydrationMode HydrationMode => hydrationMode;
+		internal string HydrationUntilSeek => hydrationUntilSeek;
+
+		// IActorIntrospection (ShowReaction) reads the Action plane configuration
+		// to render a human-readable "action" string like "Metadata.Elide" or
+		// "Program.Emit" or "None". The MetadataKind sub-distinction is exposed
+		// so the introspection surface can also note Materialize destinations.
+		internal ReactionActionType ActionType => actionType;
+		internal MetadataKind MetadataKind => metadataKind;
+		internal string MaterializeDestination => materializeDestination;
+
 		internal ReadOnlyCollection<ReactionEngine> ReactionEngines => reactionEngines.AsReadOnly();
+
+		// IActorIntrospection (ShowReactions) walks every defined Reaction;
+		// a Reaction with no Seek declared yet has an empty reactionEngines
+		// list. The introspection surface tolerates partial definitions:
+		// report what is there.
+		internal IReadOnlyList<ReactionEngine> ReactionEnginesOrEmpty => reactionEngines;
 
 		private DiaryStorage DiaryStorage
 		{
@@ -214,39 +448,10 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 
-		public Reaction ReadForward()
-		{
-			if (reactionEngines != null) throw new LanguageException("ReadForward() must be called before the first Seek().");
-
-			if (this.directionSet) throw new LanguageException("The read direction has already been set; it cannot be set more than once per Reaction.");
-
-			this.direction = RehydrateDirection.Forward;
-			this.directionSet = true;
-
-			this.reactionEngines = new List<ReactionEngine>();
-
-			return this;
-		}
-
-		public Reaction ReadBackward()
-		{
-			if (mode == ReactionMode.Cue) throw new LanguageException("Cue() reactions only support ReadForward(). Push feed is forward-only.");
-			if (reactionEngines != null) throw new LanguageException("ReadBackward() must be called before the first Seek().");
-
-			if (this.directionSet) throw new LanguageException("The read direction has already been set; it cannot be set more than once per Reaction.");
-
-			this.direction = RehydrateDirection.Backward;
-			this.directionSet = true;
-
-			this.reactionEngines = new List<ReactionEngine>();
-
-			return this;
-		}
-
 		public Reaction WithSharedHydration(string untilSeek = null)
 		{
 			if (this.hydrationModenSet) throw new LanguageException("The hydration strategy cannot be set more than once per Reaction.");
-			if (reactionEngines != null && reactionEngines.Count > 0) throw new LanguageException("WithSharedHydration() must be called before the first Seek().");
+			if (reactionEngines.Count > 0) throw new LanguageException("WithSharedHydration() must be called before the first Seek().");
 
 			this.hydrationMode = HydrationMode.Shared;
 			this.hydrationModenSet = true;
@@ -279,7 +484,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public Reaction WithIndependentHydration(string untilSeek = null)
 		{
 			if (this.hydrationModenSet) throw new LanguageException("The hydration strategy cannot be set more than once per Reaction.");
-			if (reactionEngines != null && reactionEngines.Count > 0) throw new LanguageException("WithIndependentHydration() must be called before the first Seek().");
+			if (reactionEngines.Count > 0) throw new LanguageException("WithIndependentHydration() must be called before the first Seek().");
 
 			this.hydrationMode = HydrationMode.Independent;
 			this.hydrationModenSet = true;
@@ -287,6 +492,47 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return this;
 		}
+
+		internal ForEachSpec ForEachSpec => forEachSpec;
+
+		// Cuantificador universal: declara la tupla y el producto cartesiano de
+		// colecciones capturadas. Se invoca DESPUES del Seek que captura las fuentes
+		// (las $vars deben estar capturadas para que F1b materialice el producto). En
+		// F1a solo parsea/valida/almacena la spec; la materializacion y el binding de
+		// las variables de la tupla a los Seeks siguientes llegan en F1b.
+		public Reaction ForEach(string spec)
+		{
+			ArgumentNullException.ThrowIfNullOrWhiteSpace(spec);
+
+			if (this.forEachSpec != null) throw new LanguageException("ForEach() solo puede declararse una vez por Reaction.");
+			if (reactionEngines.Count == 0) throw new LanguageException("ForEach() debe declararse despues del Seek que captura las colecciones fuente.");
+
+			this.forEachSpec = ForEachSpec.Parse(spec);
+
+			return this;
+		}
+
+		// Resume optimization (paso 4): opt-in del cold-start por snapshot para la topologia
+		// consumidor-puro de replicacion (sin journal local que re-leer). Debe llamarse antes
+		// del primer Seek(), igual que los modificadores de hidratacion.
+		public Reaction WithSnapshotResume()
+		{
+			if (reactionEngines.Count > 0) throw new LanguageException("WithSnapshotResume() debe llamarse antes del primer Seek().");
+
+			useSnapshotResume = true;
+			return this;
+		}
+
+		// Resume optimization: la frontera-cerrada / snapshot solo aplican a reactions de
+		// cobertura (ForEach) que eliden. El resto sigue con el checkpoint escalar per-seek.
+		private bool IsCoverageElide => forEachSpec != null
+			&& actionType == ReactionActionType.Metadata
+			&& metadataKind == MetadataKind.Elide;
+
+		// Paso 5 de la matriz: un Shadow (SkipPreview) NO toca checkpoint — no commitea (la rama
+		// dry-run de ExecuteCompleteMatch retorna antes del commit) ni resume; replaya one-shot
+		// desde génesis. Por eso el resume por frontera/snapshot se desactiva bajo SkipPreview.
+		private bool UseClosedFrontierResume => IsCoverageElide && !actorHandler.SkipPreviewEnabled;
 
 		private static readonly HashSet<string> ReservedSeekNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 		{
@@ -304,28 +550,10 @@ namespace Puppeteer.EventSourcing.Follower
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDescription);
 			ValidateSeekName(patternDescription);
 
-			if (!directionSet) throw new LanguageException("Call ReadForward() or ReadBackward() before the first Seek().");
 			if (!hydrationModenSet) throw new LanguageException("Call WithSharedHydration() or WithIndependentHydration() before the first Seek().");
-			if (reactionEngines == null || reactionEngines.Count != 0) throw new LanguageException("Seek() can only be called once per Reaction and must be at the start of the pattern. Use ThenSeek()/ThenFinalSeek() for subsequent steps.");
+			if (reactionEngines.Count != 0) throw new LanguageException("Seek() can only be called once per Reaction and must be at the start of the pattern. Use ThenSeek()/ThenFinalSeek() for subsequent steps.");
 
 			var engine = new ReactionEngine(this, patternDescription, isFinalSeek: false);
-
-			this.reactionEngines.Add(engine);
-
-			return engine;
-		}
-
-		public ReactionEngine RepeatSeek(string patternDescription)
-		{
-			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDescription);
-			ValidateSeekName(patternDescription);
-
-			if (!directionSet) throw new LanguageException("Call ReadForward() or ReadBackward() before the first RepeatSeek().");
-			if (!hydrationModenSet) throw new LanguageException("Call WithSharedHydration() or WithIndependentHydration() before the first RepeatSeek().");
-			if (reactionEngines == null || reactionEngines.Count != 0) throw new LanguageException("RepeatSeek() can only be called once per Reaction and must be at the start of the pattern. Use ThenSeek()/ThenFinalSeek() for subsequent steps.");
-
-			var engine = new ReactionEngine(this, patternDescription, isFinalSeek: false);
-			engine.SetRepeatSeek();
 
 			this.reactionEngines.Add(engine);
 
@@ -337,7 +565,7 @@ namespace Puppeteer.EventSourcing.Follower
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDescription);
 			ValidateSeekName(patternDescription);
 
-			if (reactionEngines == null || reactionEngines.Count == 0) throw new LanguageException("ThenSeek() is used to add a subsequent pattern step. At the start of a Reaction you must use Seek() first.");
+			if (reactionEngines.Count == 0) throw new LanguageException("ThenSeek() is used to add a subsequent pattern step. At the start of a Reaction you must use Seek() first.");
 
 			if (HasFinalSeek()) throw new LanguageException("Cannot add ThenSeek() after ThenFinalSeek(). ThenFinalSeek() must be the last Seek of the Reaction.");
 
@@ -353,7 +581,7 @@ namespace Puppeteer.EventSourcing.Follower
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDescription);
 			ValidateSeekName(patternDescription);
 
-			if (reactionEngines == null || reactionEngines.Count == 0) throw new LanguageException("ThenFinalSeek() is used to add a subsequent pattern step. At the start of a Reaction you must use Seek() first.");
+			if (reactionEngines.Count == 0) throw new LanguageException("ThenFinalSeek() is used to add a subsequent pattern step. At the start of a Reaction you must use Seek() first.");
 
 			if (HasFinalSeek()) throw new LanguageException("Only one ThenFinalSeek() is allowed per Reaction, and it must be the last Seek.");
 
@@ -366,8 +594,6 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private bool HasFinalSeek()
 		{
-			if (reactionEngines == null) return false;
-
 			foreach (var engine in reactionEngines)
 			{
 				if (engine.IsFinalSeek) return true;
@@ -378,7 +604,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private void ValidateFinalSeek()
 		{
-			if (reactionEngines == null || reactionEngines.Count == 0) return;
+			if (reactionEngines.Count == 0) return;
 
 			int finalSeekCount = 0;
 			int finalSeekIndex = -1;
@@ -405,11 +631,29 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"[Reaction.ValidateFinalSeek] Validation passed: FinalSeekCount={finalSeekCount}, LastSeekIndex={reactionEngines.Count - 1}, IsSingleSeek={reactionEngines.Count == 1}");
 		}
 
+		// K.2: cuantificadores exact-family (None/One/Exactly) son indecidibles sin
+		// punto de cierre en journal abierto. Requieren .Within(...) que define el
+		// rango (EntryIds o TimeSpan) donde el cuantificador se evalua. Sin Within,
+		// el count jamas se finaliza y el fire queda pendiente para siempre.
+		private void ValidateExactRequiresWithin()
+		{
+			for (int i = 0; i < reactionEngines.Count; i++)
+			{
+				var engine = reactionEngines[i];
+				if (engine.IsExact && !engine.HasWithinWindow)
+				{
+					throw new LanguageException(
+						$"Seek '{engine.PatternDescription}' uses an exact-family quantifier (None/One/Exactly) without .Within(...). " +
+						"Exact counts are indecidible in an open journal without a closing window — chain .Within(entries) or .Within(span) after the quantifier.");
+				}
+			}
+		}
+
 		internal int MaxDepth
 		{
 			get
 			{
-				if (this.reactionEngines == null) throw new LanguageException("MaxDepth is not available until ReadForward() or ReadBackward() and at least one Seek() have been called.");
+				if (this.reactionEngines.Count == 0) throw new LanguageException("MaxDepth is not available until at least one Seek() has been called.");
 
 				// MaxDepth is the number of Seek/ThenSeek calls (i.e. the number of engines).
 				// Each engine represents a distinct level that must match a different event.
@@ -435,6 +679,17 @@ namespace Puppeteer.EventSourcing.Follower
 
 		public void Execute(ReactionExecutionMode executionMode = ReactionExecutionMode.Batch, System.Threading.CancellationToken cancellationToken = default)
 		{
+			// Gate de ReactionActivation: la Reaction solo corre si su activacion
+			// calza con el rol vivo del nodo. DirectorOnly solo en el
+			// director/primary; CastOnly solo en un Cast/follower; Company en
+			// ambos. El rol lo provee Choreography (Stage.IsDirector /
+			// Performance.!isFollower); un actor standalone defaultea a director.
+			// Es el chokepoint unico (lo invocan tanto Reactions.Execute como el
+			// path Cued/Continuous), asi un fan-out replicado no re-dispara en el
+			// nodo equivocado.
+			if (!ActivationAllowsRole(activation, actorHandler.IsActingAsDirector))
+				return;
+
 			// NOTE ON REHYDRATION:
 			// The current Reactions implementation is "stateless" - pattern matching
 			// does not depend on actor state, only on the variable types.
@@ -456,6 +711,10 @@ namespace Puppeteer.EventSourcing.Follower
 
 			// Validate ThenFinalSeek (if present, it must be the last Seek).
 			ValidateFinalSeek();
+
+			// K.2: Exact-family quantifiers (None/One/Exactly) require .Within(...)
+			// — sin window no hay punto de cierre en journal abierto.
+			ValidateExactRequiresWithin();
 
 			var diaryStorage = DiaryStorage;
 
@@ -511,24 +770,56 @@ namespace Puppeteer.EventSourcing.Follower
 			reactionAction = new ReactionAction();
 			reactionAction.ActionType = actionType;
 			reactionAction.MetadataKind = metadataKind;
+			reactionAction.ElideTargetSeeks = elideTargetSeeks;
 
 			// Resolve the Seek index up to which the rehydration mode applies.
 			int untilSeekIndex = GetSeekIndexByName(hydrationUntilSeek);
 
-			matchTree = new MatchTree(ActorHandler, reactionAction, hydrationMode, untilSeekIndex, checkpointVector, diaryStorage, reactionId);
+			matchTree = new MatchTree(ActorHandler, reactionAction, hydrationMode, untilSeekIndex, checkpointVector, diaryStorage, reactionId, forEachSpec: forEachSpec);
 			symbolTable = new SymbolTable();
 			cachedProgramas = new Dictionary<int, (Program program, int lastAccessTick)>();
+
+			// Resume optimization (rediseño de checkpoint, pasos 2-4 — notes/reactions-checkpoint-policy.md).
+			// Para cobertura el resume NO es desde génesis: lo gobierna la frontera-cerrada (re-read
+			// local) o un snapshot (consumidor-puro). Se decide aqui, con el matchTree ya creado, porque
+			// el restore inyecta los nodos de matches abiertos ANTES de la rehidratacion.
+			if (UseClosedFrontierResume && reactionId > 0)
+			{
+				var (highWater, closedFrontier) = diaryStorage.GetReactionFrontier(reactionId);
+
+				bool restoredFromSnapshot = false;
+				if (useSnapshotResume)
+				{
+					var snapshots = CoverageSnapshotCodec.Decode(diaryStorage.GetReactionMatchSnapshot(reactionId));
+					if (snapshots.Count > 0)
+					{
+						matchTree.RestoreOpenCoverageMatches(snapshots, reactionEngines);
+						restoredFromSnapshot = true;
+					}
+				}
+
+				// Consumidor-puro con snapshot restaurado: el transporte (Svix) no rebobina -> resume
+				// en el frente, sin re-leer. En cualquier otro caso (Job/Cue local, o snapshot vacio) se
+				// re-lee la ventana [closed, high-water]; closedFrontier=0 en el primer Execute => génesis.
+				afterEntryId = restoredFromSnapshot ? highWater : closedFrontier;
+			}
 
 			// PHASE 5: register a Temporal instance as the global 'time' in the table.
 			// Lets Where expressions use time.Days(14), time.Hours(3), etc. to obtain a TimeSpan.
 			// A single shared instance per Reaction.Execute (Temporal is stateless).
 			symbolTable.SetVariable("time", new Temporal(), typeof(Temporal));
 
+			// Per-Reaction Parser pool. Created AFTER symbolTable so the pool's
+			// constructor binds to the SymbolTable that holds 'time' and the
+			// other Reaction-local globals. actorHandler.ParsersPool cannot be
+			// reused here because it is bound to a different SymbolTable.
+			ParsersPool = new ActorHandler.ConcurrentParsersPool(actorHandler.Libraries, symbolTable);
+
 			// PHASE 3: statically validate every engine's Where expression at startup.
-			// Values for @Now/@User/@Ip/@EntryId are injected per event in MatchTree.EvaluateWhere
-			// as SystemParameters. The lexer treats '@' as whitespace and discards it, so '@Now'
-			// is parsed as 'Now' and matches the SystemParameters Now/Ip/User pre-populated
-			// by the Parameters pool (we add EntryId as an extra one).
+			// Fase 4.5 refactor Playbill: los simbolos validos en Where son @Now y @EntryId
+			// (Ip/User dejaron de inyectarse). El lexer trata '@' como whitespace y lo
+			// descarta, asi que '@Now' parsea a 'Now' y coincide con el parametro Now
+			// pre-populado por el pool; EntryId se inyecta per-event.
 			CompileWhereExpressions();
 
 			// Reset optimization metrics.
@@ -543,6 +834,12 @@ namespace Puppeteer.EventSourcing.Follower
 			actionIdNotFoundErrors = 0;
 			argumentsDeserializationErrors = 0;
 			parseErrors = 0;
+
+			// Reset Phase A counters so each Execute() starts from zero.
+			// Equivalent in scope to ResetCounters() but happens automatically
+			// at the natural entry point. Tests that snapshot before/after a
+			// single Execute() see MatchCount and SeekEntered/Matched as deltas.
+			ResetCounters();
 
 			// Create ActorReactions wrapper to encapsulate execution logic.
 			actorReactions = new ActorReactions(actorHandler, this);
@@ -571,7 +868,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			// Steps 4B-6: DiaryStorage produces events one by one (batch catch-up).
 			bool includeExposeData = true;
-			diaryStorage.RehydrateFromEvent(actorReactions, afterEntryId, direction, includeExposeData);
+			diaryStorage.RehydrateFromEvent(actorReactions, afterEntryId, includeExposeData);
 
 			// Step 6B: in Cue mode, enter the push loop (filters out events already processed in the batch).
 			if (mode == ReactionMode.Cue && !cancellationToken.IsCancellationRequested)
@@ -598,6 +895,34 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"  Parse errors:            {parseErrors}");
 			System.Diagnostics.Debug.WriteLine($"======================================");
 			System.Diagnostics.Debug.WriteLine($"");
+
+			// Resume optimization (rediseño de checkpoint, pasos 2-4). Persistir los dos cursores
+			// globales ANTES de limpiar el matchTree (la frontera-cerrada se computa de sus roots
+			// abiertos). Solo cobertura, nunca bajo Shadow/SkipPreview (paso 5).
+			if (UseClosedFrontierResume && reactionId > 0)
+			{
+				var (prevHighWater, prevClosedFrontier) = diaryStorage.GetReactionFrontier(reactionId);
+
+				// high-water = max entryId escaneado (monotono entre Executes). lastProcessedEntryId
+				// es long.MinValue si no se replayo ningun evento; se acota a >= 0.
+				long scanned = lastProcessedEntryId > 0 ? lastProcessedEntryId : 0;
+				long highWater = Math.Max(prevHighWater, scanned);
+
+				// frontera-cerrada = (ancla abierta mas vieja)-1, o high-water si todo cerro. Clamp
+				// monotono: nunca retrocede (re-leer de mas es correcto/idempotente, pero retroceder
+				// la frontera persistida solo desperdiciaria trabajo en el proximo Execute).
+				long closedFrontier = matchTree.ComputeClosedFrontier(highWater);
+				if (closedFrontier < prevClosedFrontier) closedFrontier = prevClosedFrontier;
+
+				diaryStorage.SaveReactionFrontier(reactionId, highWater, closedFrontier);
+
+				// Paso 4: snapshot de matches abiertos para el cold-start consumidor-puro.
+				if (useSnapshotResume)
+				{
+					var openMatches = matchTree.SnapshotOpenCoverageMatches();
+					diaryStorage.SaveReactionMatchSnapshot(reactionId, CoverageSnapshotCodec.Encode(openMatches));
+				}
+			}
 
 			// Step 9: clean up resources (incomplete nodes, pools, etc.).
 			matchTree.Clear();
@@ -636,7 +961,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// The three planes a Reaction's Action can address. The plane
 		// describes what the verb touches (the system surface). Each is
 		// exposed as a property — ontology, not a builder configuration
-		// step like ReadForward() / WithSharedHydration().
+		// step like WithSharedHydration().
 		//
 		// Program   — `.Program.Emit(script[, when: check])` — read-only
 		//             execution against the actor's libraries.
@@ -668,6 +993,9 @@ namespace Puppeteer.EventSourcing.Follower
 		// delivery worker. Null when metadataKind != Materialize.
 		private string materializeDestination;
 
+		// F4 Elide(seek:/seeks:): Seeks cuyos entryIds se eliden. null = cadena completa.
+		private string[] elideTargetSeeks;
+
 		// Plane terminator helpers — invoked by the Plane types when the
 		// developer calls `.Program.Emit(...)` / `.Causation.Continue(...)`
 		// / `.Metadata.Elide()` / `.Metadata.Materialize(dest)`. Build-time
@@ -684,17 +1012,44 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal void SetCausationAction(string script)
 		{
+			SetCausationAction(script, null);
+		}
+
+		internal void SetCausationAction(string script, string check)
+		{
 			EnsureNoActionConfigured();
 			this.scriptForCmd = script;
+			this.causationCheck = check;  // null cuando no se dio check:
 			this.actionType = ReactionActionType.Causation;
 		}
 
-		internal void SetMetadataAction(MetadataKind kind, string destination)
+		internal void SetMetadataAction(MetadataKind kind, string destination, string[] elideSeeks = null)
 		{
 			EnsureNoActionConfigured();
 			this.actionType = ReactionActionType.Metadata;
 			this.metadataKind = kind;
 			this.materializeDestination = destination;
+
+			// F4: validar que cada Seek objetivo de Elide(seek:/seeks:) exista. Elide es el
+			// terminador (tras todos los ThenSeek), asi que reactionEngines ya esta completo.
+			if (elideSeeks != null)
+			{
+				foreach (string seekName in elideSeeks)
+				{
+					bool found = false;
+					foreach (var engine in reactionEngines)
+					{
+						if (string.Equals(engine.PatternDescription, seekName, StringComparison.OrdinalIgnoreCase))
+						{
+							found = true;
+							break;
+						}
+					}
+					if (!found)
+						throw new LanguageException($"Elide(seek/seeks): el Seek '{seekName}' no existe en esta Reaction. Seeks: {string.Join(", ", reactionEngines.ConvertAll(e => e.PatternDescription))}.");
+				}
+			}
+			this.elideTargetSeeks = elideSeeks;
 		}
 
 		private void EnsureNoActionConfigured()
@@ -814,7 +1169,19 @@ namespace Puppeteer.EventSourcing.Follower
 				actorHandler.EnterReactionActionScope();
 				try
 				{
-					actorHandler.PerformCmd(this.scriptForCmd, parameters);
+					// El check (si lo hay) NO se evalua aqui: se hornea en el
+					// TellEnvelope.Check que construye TellStatement.Execute durante
+					// este PerformCmd, para que el RECEPTOR lo corra como
+					// CheckThenCommand. Se limpia siempre tras el body.
+					actorHandler.CausationTellCheck = this.causationCheck;
+					try
+					{
+						actorHandler.PerformCmd(this.scriptForCmd, parameters);
+					}
+					finally
+					{
+						actorHandler.CausationTellCheck = null;
+					}
 				}
 				finally
 				{
@@ -872,16 +1239,13 @@ namespace Puppeteer.EventSourcing.Follower
 				var ordered = new List<(string Name, string Type, string Value)>();
 				foreach (var p in parameters)
 				{
-					// Filter by NAME to exclude the well-known system parameters
-					// (Now/Ip/User). Filtering by ParameterKind is not enough —
-					// the indexer setter `parameters[name, type] = value` (used
-					// in ExecuteEmit to copy matched captures into the rented
-					// pool slot) ALWAYS marks the parameter as User, even when
-					// the name is a system one. The pool is shared with
-					// PerformEmit which sets Now=DateTime.Now, leaving the
-					// wall-clock value visible to the hash. Excluding these
-					// names keeps the hash a pure function of the pattern's
-					// matched captures.
+					// Filter by NAME to exclude well-known non-domain parameters.
+					// Now es el unico parametro especial vivo tras Fase 4.5 (Ip/User
+					// dejaron de inyectarse, pero los filtramos defensivamente por si
+					// algun script legacy todavia los pasa como parametros de usuario).
+					// El pool es compartido con PerformEmit que setea Now=DateTime.Now,
+					// dejando el wall-clock visible al hash; excluir estos nombres
+					// mantiene el hash como funcion pura de las capturas matcheadas.
 					if (p.Name == "Now" || p.Name == "Ip" || p.Name == "User") continue;
 					object v = p.GetValue();
 					ordered.Add((p.Name ?? "", p.ParameterType?.FullName ?? "", v == null ? "" : v.ToString()));
@@ -904,7 +1268,6 @@ namespace Puppeteer.EventSourcing.Follower
 			var sb = new StringBuilder();
 
 			sb.AppendLine($"Name: {name}");
-			sb.AppendLine($"Direction: {direction}");
 			if (this.hydrationModenSet)
 			{
 				sb.AppendLine($"HydrationMode: {hydrationMode}");
@@ -934,15 +1297,20 @@ namespace Puppeteer.EventSourcing.Follower
 			return sb.ToString();
 		}
 
-		private void ConsumeEvent(int level, EventData eventData)
+		// PERF (Tier 1): per-event resolution, hoisted out of the level loop in
+		// ReplayEvent. Returns false (and a null script) when the event cannot be
+		// matched (e.g. ActionId not found in cache), so the caller skips the loop.
+		// Everything here is level-independent: script extraction, cached-Program
+		// resolution, parameter (re)load and the one-time symbol-table update that
+		// previously sat behind `level == 0`.
+		private bool ResolveEventForMatching(EventData eventData, out string script, out Program cachedProgram, out bool cachedProgramIsCanonical)
 		{
-			string script = ExtractScript(eventData);
-			if (script == null) return;
+			cachedProgram = null;
+			cachedProgramIsCanonical = false;
 
-			Program cachedProgram = null;
+			script = ExtractScript(eventData);
+			if (script == null) return false;
 
-			// Update the symbol table with this event's variables.
-			// Only done at level 0 to avoid duplicates.
 			if (eventData is ActionEventData actionData)
 			{
 				// Check whether the Program is already in our local cache.
@@ -950,10 +1318,14 @@ namespace Puppeteer.EventSourcing.Follower
 
 				if (isFirstTime)
 				{
+					// First sighting of this ActionId: parse, register references and
+					// load THIS event's argument values (SolveActionReferences does the
+					// LoadArguments internally), then cache the Program.
 					SolveActionReferences(actionData);
 				}
 				else
 				{
+					// Cached structure: reload only this event's parameter values.
 					SolveActionParameters(actionData);
 				}
 
@@ -961,14 +1333,39 @@ namespace Puppeteer.EventSourcing.Follower
 				if (cachedProgramas.TryGetValue(actionData.ActionId, out var entry))
 				{
 					cachedProgram = entry.program;
+					// Canonical: same Program reference is reused across every event
+					// with this ActionId, so MatchCache entries on (Program, ...)
+					// have meaningful hit rates.
+					cachedProgramIsCanonical = true;
 				}
 			}
-			else if (level == 0)
+			else
 			{
-				UpdateSymbolTable(script);
+				// B.2 ext: last-executed-script fast path. Push-mode Cue/Job
+				// Reactions typically consume an entry within microseconds of
+				// the writer publishing it, so the entry just executed under
+				// the actor's write lock is highly likely to be the very next
+				// EntryId the Reaction processes. On hit we reuse the parsed
+				// + reference-solved Program from the writer and skip both
+				// the parse and the SolveReferences walk inside UpdateSymbolTable.
+				cachedProgram = actorHandler.TryGetLastExecutedScript(eventData.EntryId);
+
+				if (cachedProgram != null)
+				{
+					UpdateSymbolTableFromProgram(cachedProgram);
+				}
+				else
+				{
+					UpdateSymbolTable(script);
+				}
+				// cachedProgramIsCanonical stays false: the Program is per-EntryId
+				// (single-use); engaging the per-Pattern MatchCache on it would
+				// add entries that can never re-hit (each EntryId is unique) and
+				// would retain the Program in memory unnecessarily. Pattern.Match
+				// treats this as a parse-skip-only optimization.
 			}
 
-			matchTree.TryMatchAtLevel(level, eventData, reactionEngines, script, symbolTable, cachedProgram);
+			return true;
 		}
 
 		// ===== REFERENCE RESOLUTION FOR ActionEventData (Commits C-D-E) =====
@@ -1024,9 +1421,17 @@ namespace Puppeteer.EventSourcing.Follower
 				// The ActorHandler already has the Program parsed and compiled with its parameters defined,
 				// BUT we cannot reuse it directly because it is shared.
 				// We need to parse again to obtain our own Program instance.
-				var parser = new Parser(actorHandler.Libraries, symbolTable);
-				parser.SetSource(entry.Script);
-				var program = parser.Parse(isQuery: false, isCheck: false);
+				var parser = ParsersPool.Rent();
+				Program program;
+				try
+				{
+					parser.SetSource(entry.Script);
+					program = parser.Parse(isQuery: false, isCheck: false);
+				}
+				finally
+				{
+					ParsersPool.Return(parser);
+				}
 
 				// Validate that the cache's parameter structure matches the event's,
 				// and build real Parameters for IN/INOUT/EVAL from actionData.Arguments.
@@ -1038,25 +1443,23 @@ namespace Puppeteer.EventSourcing.Follower
 				if (!cacheParameters.IsStructuralEquivalentTo(eventParameters)) throw new LanguageException("Parameter structure mismatch between cache and event");
 
 				// Logging: show registered parameters.
+				// Playbill final refactor: ya no se filtra IsNow (no existe SystemParameter — todo es user param).
 				System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] Parameters registered for ActionId={actionData.ActionId}:");
 				foreach (var param in eventParameters)
 				{
-					if (param.Kind == ParameterKind.User)
-					{
-						string modifierStr = param.ParameterModifier == Parameter.In ? "IN" :
-											 param.ParameterModifier == Parameter.Out ? "OUT" :
-											 param.ParameterModifier == Parameter.InOut ? "INOUT" :
-											 param.ParameterModifier == Parameter.Eval ? "EVAL" : "UNKNOWN";
+					string modifierStr = param.ParameterModifier == Parameter.In ? "IN" :
+										 param.ParameterModifier == Parameter.Out ? "OUT" :
+										 param.ParameterModifier == Parameter.InOut ? "INOUT" :
+										 param.ParameterModifier == Parameter.Eval ? "EVAL" : "UNKNOWN";
 
-						string valueStr = param.ParameterModifier == Parameter.Out ? "(no value - OUT)" :
-										  (param.IsEmpty ? "(empty)" : param.GetValue()?.ToString() ?? "(null)");
+					string valueStr = param.ParameterModifier == Parameter.Out ? "(no value - OUT)" :
+									  (param.IsEmpty ? "(empty)" : param.GetValue()?.ToString() ?? "(null)");
 
-						System.Diagnostics.Debug.WriteLine($"  - {param.Name} : {param.ParameterType.Name} [{modifierStr}] = {valueStr}");
-					}
+					System.Diagnostics.Debug.WriteLine($"  - {param.Name} : {param.ParameterType.Name} [{modifierStr}] = {valueStr}");
 				}
 
 				// Load parameters into the program and resolve references.
-				program.CargarArgumentos(eventParameters);
+				program.LoadArguments(eventParameters);
 				program.SolveReferences(eventParameters, withStaticValidation: true);
 
 				// Store the Program with its Parameters in the cache.
@@ -1073,10 +1476,11 @@ namespace Puppeteer.EventSourcing.Follower
 				cachedProgramas[actionData.ActionId] = (program, cacheAccessTick);
 
 				// Count parameters for metrics.
+				// Playbill final refactor: ya no se filtra IsNow — todo parametro es de usuario.
 				int userParamCount = 0;
 				foreach (var param in eventParameters)
 				{
-					if (param.Kind == ParameterKind.User) userParamCount++;
+					userParamCount++;
 				}
 				parametersRegistered += userParamCount;
 				parameterRegistrationTime.Stop();
@@ -1144,21 +1548,19 @@ namespace Puppeteer.EventSourcing.Follower
 				// Reload ONLY parameter values (structure is already resolved).
 				cacheEntry.program.Parameters.LoadArguments(actionData.Arguments);
 
+				// Playbill final refactor: ya no se filtra IsNow.
 				System.Diagnostics.Debug.WriteLine($"[SolveActionParameters] Reloaded parameter values for ActionId={actionData.ActionId}:");
 				foreach (var param in cacheEntry.program.Parameters)
 				{
-					if (param.Kind == ParameterKind.User)
-					{
-						string modifierStr = param.ParameterModifier == Parameter.In ? "IN" :
-											 param.ParameterModifier == Parameter.Out ? "OUT" :
-											 param.ParameterModifier == Parameter.InOut ? "INOUT" :
-											 param.ParameterModifier == Parameter.Eval ? "EVAL" : "UNKNOWN";
+					string modifierStr = param.ParameterModifier == Parameter.In ? "IN" :
+										 param.ParameterModifier == Parameter.Out ? "OUT" :
+										 param.ParameterModifier == Parameter.InOut ? "INOUT" :
+										 param.ParameterModifier == Parameter.Eval ? "EVAL" : "UNKNOWN";
 
-						string valueStr = param.ParameterModifier == Parameter.Out ? "(no value - OUT)" :
-										  (param.IsEmpty ? "(empty)" : param.GetValue()?.ToString() ?? "(null)");
+					string valueStr = param.ParameterModifier == Parameter.Out ? "(no value - OUT)" :
+									  (param.IsEmpty ? "(empty)" : param.GetValue()?.ToString() ?? "(null)");
 
-						System.Diagnostics.Debug.WriteLine($"  - {param.Name} : {param.ParameterType.Name} [{modifierStr}] = {valueStr}");
-					}
+					System.Diagnostics.Debug.WriteLine($"  - {param.Name} : {param.ParameterType.Name} [{modifierStr}] = {valueStr}");
 				}
 			}
 			catch (Exception ex)
@@ -1171,14 +1573,21 @@ namespace Puppeteer.EventSourcing.Follower
 
 		// PHASES 3+2: statically validate Where expressions at startup and pre-process
 		// SeekName.@Symbol references into placeholders that are resolved at runtime.
-		// Each evaluation re-parses the Where to avoid issues from compile-once caching.
+		// Where compilation: the parsed Program is cached on the engine
+		// (CachedWhereProgram) so MatchTree.EvaluateWhere can compile-once /
+		// execute-many via Program.ExecuteExpression instead of re-parsing per event.
 		private static readonly System.Text.RegularExpressions.Regex SeekScopedRefPattern =
 			new System.Text.RegularExpressions.Regex(@"(\w+)\.@(Now|User|Ip|EntryId)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
+		// Test-only switch that forces EvaluateWhere down the re-parse fallback path
+		// by suppressing population of engine.CachedWhereProgram. Used by parity and
+		// micro-benchmark tests to A/B the cached vs uncached implementations on the
+		// same journal. Set to true under [TestInitialize] and reset under
+		// [TestCleanup] in tests that need it; left false in production paths.
+		internal static bool BypassWhereCompilationCacheForTests = false;
+
 		private void CompileWhereExpressions()
 		{
-			if (reactionEngines == null) return;
-
 			// PHASE 2: valid seek names used to resolve SeekName.@X references.
 			var seekNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 			foreach (var engine in reactionEngines)
@@ -1214,9 +1623,29 @@ namespace Puppeteer.EventSourcing.Follower
 
 				try
 				{
-					var parser = new Parser(actorHandler.Libraries, symbolTable);
-					parser.SetSource(wrappedScript);
-					var program = parser.Parse(isQuery: true, isCheck: false);
+					var parser = ParsersPool.Rent();
+					Program program;
+					try
+					{
+						parser.SetSource(wrappedScript);
+						program = parser.Parse(isQuery: true, isCheck: false);
+					}
+					finally
+					{
+						ParsersPool.Return(parser);
+					}
+					// Where compilation: cache the parsed Program. SolveReferences + Compile
+					// are deferred to the first per-event invocation (lazy JIT) because the
+					// concrete parameter types are not known until a Pattern produces a
+					// match. Force compiled mode regardless of the actor's policy: a Where
+					// is evaluated N times per Reaction.Execute (one per candidate event),
+					// so amortizing a single Compile is always net-positive vs the previous
+					// per-event re-parse path.
+					program.AdjustCompilationMode(useInterpretedMode: false, CompilationModePolicy.AlwaysCompiled);
+					if (!BypassWhereCompilationCacheForTests)
+					{
+						engine.CachedWhereProgram = program;
+					}
 				}
 				catch (LanguageException ex)
 				{
@@ -1230,9 +1659,17 @@ namespace Puppeteer.EventSourcing.Follower
 			try
 			{
 				// Parse the script using the symbol table.
-				var parser = new Parser(actorHandler.Libraries, symbolTable);
-				parser.SetSource(script);
-				var program = parser.Parse(isQuery: false, isCheck: false);
+				var parser = ParsersPool.Rent();
+				Program program;
+				try
+				{
+					parser.SetSource(script);
+					program = parser.Parse(isQuery: false, isCheck: false);
+				}
+				finally
+				{
+					ParsersPool.Return(parser);
+				}
 
 				// We need a temporary Parameters for SolveReferences.
 				// The parser adds variables during parsing, but SolveReferences
@@ -1242,19 +1679,7 @@ namespace Puppeteer.EventSourcing.Follower
 				{
 					program.SolveReferences(tempParams, withStaticValidation: true);
 
-					// After resolving references and validating, extract global variable
-					// declarations and add them to the symbol table with their type.
-					var declaraciones = program.Declaraciones;
-					if (declaraciones != null)
-					{
-						foreach (var id in declaraciones)
-						{
-							if (id.IsGlobalVariable && id.ForcedType != null)
-							{
-								symbolTable.SetVariable(id.Name, null, id.ForcedType);
-							}
-						}
-					}
+					UpdateSymbolTableFromProgram(program);
 				}
 				finally
 				{
@@ -1269,6 +1694,25 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				// If the script does not parse, ignore it.
 				System.Diagnostics.Debug.WriteLine($"[UpdateSymbolTable] ERROR parsing script: {script}, Error: {ex.Message}");
+			}
+		}
+
+		// B.2 ext: extract global variable declarations from an already-parsed
+		// and reference-solved Program. Used by the last-executed-script fast
+		// path so the Reaction's symbolTable receives the same globals as
+		// UpdateSymbolTable(script) without re-parsing.
+		private void UpdateSymbolTableFromProgram(Program program)
+		{
+			ArgumentNullException.ThrowIfNull(program);
+
+			var declaraciones = program.Declaraciones;
+			if (declaraciones == null) return;
+			foreach (var id in declaraciones)
+			{
+				if (id.IsGlobalVariable && id.ForcedType != null)
+				{
+					symbolTable.SetVariable(id.Name, null, id.ForcedType);
+				}
 			}
 		}
 
@@ -1372,6 +1816,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 		string DB.IActorEventJournalClient.ActorName => actorHandler.Name;
 
+		IPuppeteerLogger DB.IActorEventJournalClient.Logger => actorHandler.Logger;
+
 		bool DB.IActorEventJournalClient.IsNew { set => isNew = value; }
 
 		bool DB.IActorEventJournalClient.IsActionKnown(int actionId)
@@ -1412,9 +1858,18 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(eventData);
 
-			for (int level = 0; level < MaxDepth; level++)
+			// PERF (Tier 1): resolve the per-event work ONCE before the level loop.
+			// Script extraction, cached-Program resolution and parameter (re)load do
+			// not depend on `level`; previously they ran inside ConsumeEvent on every
+			// iteration, repeating LoadArguments + dictionary lookups MaxDepth times
+			// for the same event. The only level-dependent work is the per-level
+			// match attempt (matchTree.TryMatchAtLevel), which stays inside the loop.
+			if (ResolveEventForMatching(eventData, out string script, out Program cachedProgram, out bool cachedProgramIsCanonical))
 			{
-				ConsumeEvent(level, eventData);
+				for (int level = 0; level < MaxDepth; level++)
+				{
+					matchTree.TryMatchAtLevel(level, eventData, reactionEngines, script, symbolTable, cachedProgram, cachedProgramIsCanonical);
+				}
 			}
 
 			lastProcessedEntryId = eventData.EntryId;

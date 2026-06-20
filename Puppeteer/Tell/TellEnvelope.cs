@@ -14,5 +14,9 @@ namespace Puppeteer.Tell
 		string CommandText,
 		string Transport,
 		string CausalEventId,
-		string ReactionName);
+		string ReactionName,
+		// Predicado DSL opcional de un Causation.Continue(check:, ...). Cuando no
+		// es null, el receptor debe correr el CommandText como CheckThenCommand
+		// (check primero, contra su propio estado) para idempotencia del fan-out.
+		string Check = null);
 }

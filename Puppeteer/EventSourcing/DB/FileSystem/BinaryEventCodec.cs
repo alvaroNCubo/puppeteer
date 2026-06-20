@@ -38,19 +38,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		private const byte ENCRYPTION_BIT = 0x40;
 		private const byte TYPE_MASK = 0x3F;
 
-		internal static byte[] EncodeScriptEvent(long entryId, DateTime occurredAt, string ip, string user, string script,
+		internal static byte[] EncodeScriptEvent(long entryId, DateTime occurredAt, string script,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null,
 			string exposeData = null)
 		{
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 			if (script == null) throw new ArgumentNullException(nameof(script));
-
-			byte[] ipBytes = ip == IpAddress.DEFAULT.Ip ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(ip);
-			if (ipBytes.Length > 255) throw new ArgumentException("IP string exceeds 255 bytes when UTF8 encoded.", nameof(ip));
-
-			byte[] userBytes = user == UserInLog.ANONYMOUS.Id ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(user);
-			if (userBytes.Length > 65535) throw new ArgumentException("User string exceeds 65535 bytes when UTF8 encoded.", nameof(user));
 
 			byte[] scriptBytes = Encoding.UTF8.GetBytes(script);
 			byte[] payloadBytes = ApplyTransformations(scriptBytes, compression, encryption, encryptionKey);
@@ -66,7 +58,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			if (compression != PayloadCompression.None) typeByte |= COMPRESSION_BIT;
 			if (encryption != EncryptionMode.None) typeByte |= ENCRYPTION_BIT;
 
-			int bodySize = 1 + 8 + 8 + 1 + ipBytes.Length + 2 + userBytes.Length + 4 + payloadBytes.Length + 4 + exposeBytes.Length;
+			int bodySize = 1 + 8 + 8 + 4 + payloadBytes.Length + 4 + exposeBytes.Length;
 			int totalSize = 4 + bodySize + 4;
 
 			byte[] buffer = new byte[totalSize];
@@ -78,12 +70,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			buffer[offset++] = typeByte;
 			WriteInt64(buffer, ref offset, entryId);
 			WriteInt64(buffer, ref offset, occurredAt.ToBinary());
-			buffer[offset++] = (byte)ipBytes.Length;
-			Buffer.BlockCopy(ipBytes, 0, buffer, offset, ipBytes.Length);
-			offset += ipBytes.Length;
-			WriteUInt16(buffer, ref offset, (ushort)userBytes.Length);
-			Buffer.BlockCopy(userBytes, 0, buffer, offset, userBytes.Length);
-			offset += userBytes.Length;
 			WriteInt32(buffer, ref offset, payloadBytes.Length);
 			Buffer.BlockCopy(payloadBytes, 0, buffer, offset, payloadBytes.Length);
 			offset += payloadBytes.Length;
@@ -100,19 +86,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return buffer;
 		}
 
-		internal static byte[] EncodeActionEvent(long entryId, DateTime occurredAt, string ip, string user, int actionId, string arguments,
+		internal static byte[] EncodeActionEvent(long entryId, DateTime occurredAt, int actionId, string arguments,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null,
 			string exposeData = null)
 		{
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 			if (arguments == null) throw new ArgumentNullException(nameof(arguments));
-
-			byte[] ipBytes = ip == IpAddress.DEFAULT.Ip ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(ip);
-			if (ipBytes.Length > 255) throw new ArgumentException("IP string exceeds 255 bytes when UTF8 encoded.", nameof(ip));
-
-			byte[] userBytes = user == UserInLog.ANONYMOUS.Id ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(user);
-			if (userBytes.Length > 65535) throw new ArgumentException("User string exceeds 65535 bytes when UTF8 encoded.", nameof(user));
 
 			byte[] argsBytes = Encoding.UTF8.GetBytes(arguments);
 			byte[] payloadBytes = ApplyTransformations(argsBytes, compression, encryption, encryptionKey);
@@ -128,7 +106,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			if (compression != PayloadCompression.None) typeByte |= COMPRESSION_BIT;
 			if (encryption != EncryptionMode.None) typeByte |= ENCRYPTION_BIT;
 
-			int bodySize = 1 + 8 + 8 + 1 + ipBytes.Length + 2 + userBytes.Length + 4 + 4 + payloadBytes.Length + 4 + exposeBytes.Length;
+			int bodySize = 1 + 8 + 8 + 4 + 4 + payloadBytes.Length + 4 + exposeBytes.Length;
 			int totalSize = 4 + bodySize + 4;
 
 			byte[] buffer = new byte[totalSize];
@@ -140,12 +118,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			buffer[offset++] = typeByte;
 			WriteInt64(buffer, ref offset, entryId);
 			WriteInt64(buffer, ref offset, occurredAt.ToBinary());
-			buffer[offset++] = (byte)ipBytes.Length;
-			Buffer.BlockCopy(ipBytes, 0, buffer, offset, ipBytes.Length);
-			offset += ipBytes.Length;
-			WriteUInt16(buffer, ref offset, (ushort)userBytes.Length);
-			Buffer.BlockCopy(userBytes, 0, buffer, offset, userBytes.Length);
-			offset += userBytes.Length;
 			WriteInt32(buffer, ref offset, actionId);
 			WriteInt32(buffer, ref offset, payloadBytes.Length);
 			Buffer.BlockCopy(payloadBytes, 0, buffer, offset, payloadBytes.Length);
@@ -165,16 +137,16 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 		internal static bool TryDecode(byte[] recordBuffer, int recordLength,
 			out EventRecordType eventType, out long entryId, out DateTime occurredAt,
-			out string ip, out string user, out string scriptOrArguments, out int actionId,
+			out string scriptOrArguments, out int actionId,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null)
 		{
 			return TryDecode(recordBuffer, recordLength, out eventType, out entryId, out occurredAt,
-				out ip, out user, out scriptOrArguments, out actionId, out _, compression, encryption, encryptionKey);
+				out scriptOrArguments, out actionId, out _, compression, encryption, encryptionKey);
 		}
 
 		internal static bool TryDecode(byte[] recordBuffer, int recordLength,
 			out EventRecordType eventType, out long entryId, out DateTime occurredAt,
-			out string ip, out string user, out string scriptOrArguments, out int actionId,
+			out string scriptOrArguments, out int actionId,
 			out string exposeData,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null)
 		{
@@ -183,8 +155,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			eventType = EventRecordType.Script;
 			entryId = 0;
 			occurredAt = default;
-			ip = null;
-			user = null;
 			scriptOrArguments = null;
 			actionId = 0;
 			exposeData = null;
@@ -212,17 +182,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 			entryId = ReadInt64(recordBuffer, ref offset);
 			occurredAt = DateTime.FromBinary(ReadInt64(recordBuffer, ref offset));
-
-			int ipLen = recordBuffer[offset++];
-			if (offset + ipLen > crcOffset) return false;
-			ip = ipLen == 0 ? IpAddress.DEFAULT.Ip : Encoding.UTF8.GetString(recordBuffer, offset, ipLen);
-			offset += ipLen;
-
-			if (offset + 2 > crcOffset) return false;
-			int userLen = ReadUInt16(recordBuffer, ref offset);
-			if (offset + userLen > crcOffset) return false;
-			user = userLen == 0 ? UserInLog.ANONYMOUS.Id : Encoding.UTF8.GetString(recordBuffer, offset, userLen);
-			offset += userLen;
 
 			if (eventType == EventRecordType.Action)
 			{
@@ -264,19 +223,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		// EncodeActionEvent but the body payload is the canonical DSL sentence
 		// (`define action <id> (params) as <body> end;`) instead of the
 		// invocation arguments.
-		internal static byte[] EncodeDefineEvent(long entryId, DateTime occurredAt, string ip, string user, int actionId, string defineStatementText,
+		internal static byte[] EncodeDefineEvent(long entryId, DateTime occurredAt, int actionId, string defineStatementText,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null,
 			string exposeData = null)
 		{
-			if (ip == null) throw new ArgumentNullException(nameof(ip));
-			if (user == null) throw new ArgumentNullException(nameof(user));
 			if (defineStatementText == null) throw new ArgumentNullException(nameof(defineStatementText));
-
-			byte[] ipBytes = ip == IpAddress.DEFAULT.Ip ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(ip);
-			if (ipBytes.Length > 255) throw new ArgumentException("IP string exceeds 255 bytes when UTF8 encoded.", nameof(ip));
-
-			byte[] userBytes = user == UserInLog.ANONYMOUS.Id ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(user);
-			if (userBytes.Length > 65535) throw new ArgumentException("User string exceeds 65535 bytes when UTF8 encoded.", nameof(user));
 
 			byte[] defineBytes = Encoding.UTF8.GetBytes(defineStatementText);
 			byte[] definePayload = ApplyTransformations(defineBytes, compression, encryption, encryptionKey);
@@ -292,7 +243,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			if (compression != PayloadCompression.None) typeByte |= COMPRESSION_BIT;
 			if (encryption != EncryptionMode.None) typeByte |= ENCRYPTION_BIT;
 
-			int bodySize = 1 + 8 + 8 + 1 + ipBytes.Length + 2 + userBytes.Length + 4 + 4 + definePayload.Length + 4 + exposeBytes.Length;
+			int bodySize = 1 + 8 + 8 + 4 + 4 + definePayload.Length + 4 + exposeBytes.Length;
 			int totalSize = 4 + bodySize + 4;
 
 			byte[] buffer = new byte[totalSize];
@@ -304,12 +255,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			buffer[offset++] = typeByte;
 			WriteInt64(buffer, ref offset, entryId);
 			WriteInt64(buffer, ref offset, occurredAt.ToBinary());
-			buffer[offset++] = (byte)ipBytes.Length;
-			Buffer.BlockCopy(ipBytes, 0, buffer, offset, ipBytes.Length);
-			offset += ipBytes.Length;
-			WriteUInt16(buffer, ref offset, (ushort)userBytes.Length);
-			Buffer.BlockCopy(userBytes, 0, buffer, offset, userBytes.Length);
-			offset += userBytes.Length;
 			WriteInt32(buffer, ref offset, actionId);
 			WriteInt32(buffer, ref offset, definePayload.Length);
 			Buffer.BlockCopy(definePayload, 0, buffer, offset, definePayload.Length);
@@ -332,7 +277,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		// the existing TryDecode. Phase 4 split-model firmado: Define records do not
 		// carry arguments — first invocation is a separate record.
 		internal static bool TryDecodeDefine(byte[] recordBuffer, int recordLength,
-			out long entryId, out DateTime occurredAt, out string ip, out string user,
+			out long entryId, out DateTime occurredAt,
 			out int actionId, out string defineStatementText, out string exposeData,
 			PayloadCompression compression = PayloadCompression.None, EncryptionMode encryption = EncryptionMode.None, byte[] encryptionKey = null)
 		{
@@ -340,8 +285,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 			entryId = 0;
 			occurredAt = default;
-			ip = null;
-			user = null;
 			actionId = 0;
 			defineStatementText = null;
 			exposeData = null;
@@ -363,17 +306,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 			entryId = ReadInt64(recordBuffer, ref offset);
 			occurredAt = DateTime.FromBinary(ReadInt64(recordBuffer, ref offset));
-
-			int ipLen = recordBuffer[offset++];
-			if (offset + ipLen > crcOffset) return false;
-			ip = ipLen == 0 ? IpAddress.DEFAULT.Ip : Encoding.UTF8.GetString(recordBuffer, offset, ipLen);
-			offset += ipLen;
-
-			if (offset + 2 > crcOffset) return false;
-			int userLen = ReadUInt16(recordBuffer, ref offset);
-			if (offset + userLen > crcOffset) return false;
-			user = userLen == 0 ? UserInLog.ANONYMOUS.Id : Encoding.UTF8.GetString(recordBuffer, offset, userLen);
-			offset += userLen;
 
 			if (offset + 4 > crcOffset) return false;
 			actionId = ReadInt32(recordBuffer, ref offset);

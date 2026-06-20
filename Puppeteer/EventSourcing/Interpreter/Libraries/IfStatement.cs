@@ -103,6 +103,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (elseBranchStatement != null) elseBranchStatement.PreparePatternMatching(patternAst, ref position);
 		}
 
+		// B.3.1: include condition + branches.
+		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
+		{
+			hc.Add(nameof(IfStatement));
+			expression.AccumulatePromotionCandidateHash(ref hc);
+			if (ifBranchStatement != null) { hc.Add(1); ifBranchStatement.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
+			if (elseBranchStatement != null) { hc.Add(1); elseBranchStatement.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
+		}
+
 		internal override void Visit(ASTVisitor v)
 		{
 			if (this.GetType() == v.Target)

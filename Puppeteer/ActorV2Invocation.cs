@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using Puppeteer.EventSourcing.Playbill;
 
 namespace Puppeteer
 {
@@ -10,6 +11,19 @@ namespace Puppeteer
 		private readonly string _script;
 		private readonly Parameters _parameters;
 		private readonly bool _parametersAutoRented;
+		// True cuando _parameters proviene de un Rent POR FORMA (clave = _script):
+		// WithParameters(configure) o el auto-rent de los Perform*. Falso para el lease
+		// externo RentedParameter, que se rentea/devuelve keyless. Gobierna si el Return
+		// va al pool keyed o al keyless.
+		private readonly bool _parametersKeyed;
+
+		// Playbill context — null when the invocation has no playbill attached
+		// (typical for perf.Actor.Using(...) legacy path or for Performances that
+		// never called .Playbill(...)). Constructed via Performance.Using(...) for
+		// the Playbill-aware path.
+		private readonly Playbill _playbill;
+		private readonly string _playbillSchemaName;
+		private readonly Parameters _playbillValues;
 
 		internal ActorV2Invocation(ActorV2 actor, string script)
 		{
@@ -18,6 +32,10 @@ namespace Puppeteer
 			_script = script;
 			_parameters = null;
 			_parametersAutoRented = false;
+			_parametersKeyed = false;
+			_playbill = null;
+			_playbillSchemaName = null;
+			_playbillValues = null;
 		}
 
 		internal ActorV2Invocation(ActorV2 actor, string scriptForChk, string script)
@@ -27,16 +45,54 @@ namespace Puppeteer
 			_script = script;
 			_parameters = null;
 			_parametersAutoRented = false;
+			_parametersKeyed = false;
+			_playbill = null;
+			_playbillSchemaName = null;
+			_playbillValues = null;
+		}
+
+		// Playbill-aware constructors — used by Performance.Using(...) to attach
+		// the Playbill context. The Performance is responsible for ensuring the
+		// schemaName is registered in the Playbill before construction.
+		internal ActorV2Invocation(ActorV2 actor, string script, Playbill playbill, string playbillSchemaName)
+		{
+			_actor = actor;
+			_scriptForChk = null;
+			_script = script;
+			_parameters = null;
+			_parametersAutoRented = false;
+			_parametersKeyed = false;
+			_playbill = playbill;
+			_playbillSchemaName = playbillSchemaName;
+			_playbillValues = null;
+		}
+
+		internal ActorV2Invocation(ActorV2 actor, string scriptForChk, string script, Playbill playbill, string playbillSchemaName)
+		{
+			_actor = actor;
+			_scriptForChk = scriptForChk;
+			_script = script;
+			_parameters = null;
+			_parametersAutoRented = false;
+			_parametersKeyed = false;
+			_playbill = playbill;
+			_playbillSchemaName = playbillSchemaName;
+			_playbillValues = null;
 		}
 
 		private ActorV2Invocation(ActorV2 actor, string scriptForChk, string script,
-			Parameters parameters, bool parametersAutoRented)
+			Parameters parameters, bool parametersAutoRented, bool parametersKeyed,
+			Playbill playbill, string playbillSchemaName, Parameters playbillValues)
 		{
 			_actor = actor;
 			_scriptForChk = scriptForChk;
 			_script = script;
 			_parameters = parameters;
 			_parametersAutoRented = parametersAutoRented;
+			_parametersKeyed = parametersKeyed;
+			_playbill = playbill;
+			_playbillSchemaName = playbillSchemaName;
+			_playbillValues = playbillValues;
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -46,10 +102,14 @@ namespace Puppeteer
 		{
 			ArgumentNullException.ThrowIfNull(configure);
 
-			var parameters = _actor.Handler.ParametersPool.Rent();
+			// Rent POR FORMA con clave = _script: la forma de parametros es invariante
+			// por operacion, asi que el instance rentado conserva sus slots y configure
+			// solo sobreescribe valores.
+			var parameters = _actor.Handler.ParametersPool.Rent(_script);
 			configure(parameters);
 
-			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false);
+			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false, parametersKeyed: true,
+				_playbill, _playbillSchemaName, _playbillValues);
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -63,7 +123,43 @@ namespace Puppeteer
 			var parameters = rentedParameter.Parameters;
 			configure(parameters);
 
-			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false);
+			// Lease externo: rentado/devuelto keyless (RentedParameter no tiene script
+			// en su Rent), por eso parametersKeyed: false.
+			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false, parametersKeyed: false,
+				_playbill, _playbillSchemaName, _playbillValues);
+		}
+
+		// Playbill values setter. Only valid when this Invocation was constructed
+		// via Performance.Using(...) with a playbill attached. Builds a fresh
+		// Parameters instance from the schema's canonical declarations text and
+		// hands it to the dev to configure via the V2 indexer pattern.
+		public ActorV2Invocation WithPlaybill(Action<Parameters> configure)
+		{
+			ArgumentNullException.ThrowIfNull(configure);
+			if (_playbill == null) throw new LanguageException("WithPlaybill called but Performance has no Playbill schema. Declare one via Performance.Playbill(...) first.");
+			if (_playbillSchemaName == null) throw new LanguageException("WithPlaybill called but no schema is currently selected on the Performance.");
+
+			string declarations = _playbill.GetSchemaDeclarations(_playbillSchemaName);
+			if (declarations == null) throw new LanguageException($"Playbill schema '{_playbillSchemaName}' is not registered.");
+
+			// Strip '?' from optional field names before passing to Parameters parser.
+			// The '?' is a Playbill marker and lives only in the canonical declarations
+			// text — V2's Parameters parser treats it as an unknown character.
+			string parseableDeclarations = declarations.Replace("?:", ":");
+			var playbillValues = new Parameters(parseableDeclarations);
+
+			// Pre-initialize every declared field with its type default. The shared
+			// Parameters serializer rejects null Values, so any optional field the
+			// dev does NOT set explicitly inside `configure` must arrive at
+			// SerializeForTransport with a non-null value. The dev's configure
+			// callback then overwrites whatever fields it cares about; the rest
+			// stays at type default and round-trips cleanly through the wire.
+			PreInitializeDefaults(playbillValues);
+
+			configure(playbillValues);
+
+			return new ActorV2Invocation(_actor, _scriptForChk, _script, _parameters, _parametersAutoRented, _parametersKeyed,
+				_playbill, _playbillSchemaName, playbillValues);
 		}
 
 		public string PerformCheckThenCommand()
@@ -75,13 +171,15 @@ namespace Puppeteer
 			var autoRented = _parametersAutoRented;
 			if (parameters == null)
 			{
-				parameters = _actor.Handler.ParametersPool.Rent();
+				parameters = _actor.Handler.ParametersPool.Rent(_script);
 				autoRented = true;
 			}
 
 			try
 			{
-				return _actor.Handler.PerformCheckThenCmd(_scriptForChk, _script, parameters);
+				string output = _actor.Handler.PerformCheckThenCmd(_scriptForChk, _script, parameters);
+				WritePlaybillIfNeeded();
+				return output;
 			}
 			catch (Exception ex)
 			{
@@ -91,13 +189,19 @@ namespace Puppeteer
 			}
 			finally
 			{
-				if (autoRented)
+				if (parameters != null)
 				{
-					_actor.Handler.ParametersPool.Return(parameters);
-				}
-				else if (parameters != null)
-				{
-					_actor.Handler.ParametersPool.Return(parameters);
+					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
+					// WithParameters(configure)); keyless para el lease externo
+					// RentedParameter. La clave es _script (forma invariante por operacion).
+					if (autoRented || _parametersKeyed)
+					{
+						_actor.Handler.ParametersPool.Return(_script, parameters);
+					}
+					else
+					{
+						_actor.Handler.ParametersPool.Return(parameters);
+					}
 				}
 			}
 		}
@@ -111,13 +215,15 @@ namespace Puppeteer
 			var autoRented = _parametersAutoRented;
 			if (parameters == null)
 			{
-				parameters = _actor.Handler.ParametersPool.Rent();
+				parameters = _actor.Handler.ParametersPool.Rent(_script);
 				autoRented = true;
 			}
 
 			try
 			{
-				return _actor.Handler.PerformCmd(_script, parameters);
+				string output = _actor.Handler.PerformCmd(_script, parameters);
+				WritePlaybillIfNeeded();
+				return output;
 			}
 			catch (Exception ex)
 			{
@@ -127,13 +233,19 @@ namespace Puppeteer
 			}
 			finally
 			{
-				if (autoRented)
+				if (parameters != null)
 				{
-					_actor.Handler.ParametersPool.Return(parameters);
-				}
-				else if (parameters != null)
-				{
-					_actor.Handler.ParametersPool.Return(parameters);
+					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
+					// WithParameters(configure)); keyless para el lease externo
+					// RentedParameter. La clave es _script (forma invariante por operacion).
+					if (autoRented || _parametersKeyed)
+					{
+						_actor.Handler.ParametersPool.Return(_script, parameters);
+					}
+					else
+					{
+						_actor.Handler.ParametersPool.Return(parameters);
+					}
 				}
 			}
 		}
@@ -150,7 +262,7 @@ namespace Puppeteer
 			var autoRented = _parametersAutoRented;
 			if (parameters == null)
 			{
-				parameters = _actor.Handler.ParametersPool.Rent();
+				parameters = _actor.Handler.ParametersPool.Rent(_script);
 				autoRented = true;
 			}
 
@@ -166,14 +278,50 @@ namespace Puppeteer
 			}
 			finally
 			{
-				if (autoRented)
+				if (parameters != null)
 				{
-					_actor.Handler.ParametersPool.Return(parameters);
+					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
+					// WithParameters(configure)); keyless para el lease externo
+					// RentedParameter. La clave es _script (forma invariante por operacion).
+					if (autoRented || _parametersKeyed)
+					{
+						_actor.Handler.ParametersPool.Return(_script, parameters);
+					}
+					else
+					{
+						_actor.Handler.ParametersPool.Return(parameters);
+					}
 				}
-				else if (parameters != null)
-				{
-					_actor.Handler.ParametersPool.Return(parameters);
-				}
+			}
+		}
+
+		// Second-write: after the actor's journal write succeeds, persist the
+		// playbill record using the EntryId the handler just allocated. Let-it-fail
+		// policy (firmado en project_playbill_design.md): if this write throws,
+		// the journal entry remains and the exception propagates to the caller —
+		// gap detection via LEFT JOIN forensic query.
+		private void WritePlaybillIfNeeded()
+		{
+			if (_playbill == null) return;
+			if (_playbillValues == null) return; // dev did not chain WithPlaybill — permissive policy
+
+			long entryId = _actor.Handler.EntryId;
+			_playbill.WriteRecord(entryId, _playbillSchemaName, _playbillValues);
+		}
+
+		private static void PreInitializeDefaults(Parameters values)
+		{
+			foreach (var p in values)
+			{
+				// Playbill final refactor: ya no hay SystemParameter (incluido Now) — todo es user.
+				var t = p.ParameterType;
+				if (t == typeof(string)) values[p.Name, typeof(string)] = string.Empty;
+				else if (t == typeof(int)) values[p.Name, typeof(int)] = 0;
+				else if (t == typeof(long)) values[p.Name, typeof(long)] = 0L;
+				else if (t == typeof(bool)) values[p.Name, typeof(bool)] = false;
+				else if (t == typeof(decimal)) values[p.Name, typeof(decimal)] = 0m;
+				else if (t == typeof(double)) values[p.Name, typeof(double)] = 0.0;
+				else if (t == typeof(DateTime)) values[p.Name, typeof(DateTime)] = DateTime.MinValue;
 			}
 		}
 	}

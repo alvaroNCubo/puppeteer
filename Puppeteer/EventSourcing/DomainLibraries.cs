@@ -28,6 +28,7 @@ namespace Puppeteer.EventSourcing
 
 		private readonly Dictionary<string, Type> typesByName;
 		private readonly Dictionary<string, List<ClassInfo>> classesByName;
+		private readonly List<string> ingestedAssemblyNames;
 
 		private DomainLibraries(Assembly assembly)
 		{
@@ -35,6 +36,7 @@ namespace Puppeteer.EventSourcing
 
 			typesByName = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
 			classesByName = new Dictionary<string, List<ClassInfo>>(StringComparer.OrdinalIgnoreCase);
+			ingestedAssemblyNames = new List<string>();
 
 			IngestAssembly(assembly);
 		}
@@ -45,6 +47,7 @@ namespace Puppeteer.EventSourcing
 
 			typesByName = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
 			classesByName = new Dictionary<string, List<ClassInfo>>(StringComparer.OrdinalIgnoreCase);
+			ingestedAssemblyNames = new List<string>();
 
 			foreach (var assembly in assemblies.Where(a => a != null).Distinct())
 			{
@@ -54,6 +57,16 @@ namespace Puppeteer.EventSourcing
 
 		private void IngestAssembly(Assembly assembly)
 		{
+			// Registramos el nombre del assembly ingerido para el diagnostico de
+			// NewInstance: cuando una clase no se encuentra, listar los assemblies
+			// que SI se cargaron es el dato que hace obvia una mala configuracion de
+			// librerias (p.ej. follower que pasa el assembly de la app en vez del del dominio).
+			string assemblyName = assembly.GetName().Name ?? assembly.FullName ?? assembly.ToString();
+			if (!ingestedAssemblyNames.Contains(assemblyName))
+			{
+				ingestedAssemblyNames.Add(assemblyName);
+			}
+
 			foreach (var type in LoadTypesFromAssembly(assembly))
 			{
 				var classInfo = new ClassInfo(type);
@@ -131,7 +144,11 @@ namespace Puppeteer.EventSourcing
 			}
 			foreach (Type t in types)
 			{
-				if ((t.IsPublic || t.IsNestedPublic || (t.IsNotPublic && !t.IsNestedPrivate)) && t.IsClass && t.IsSubclassOf(typeof(object)))
+				// Incluye clases y ENUMS del dominio. Los enums se indexan por nombre para que el
+				// cast explicito (MiEnum)'Valor' los resuelva via GetTypeOrThrow. El path por
+				// defecto (parametro/literal/simbolo en slot enum) NO depende de esto: alli el tipo
+				// del enum se descubre de la firma del metodo/constructor.
+				if ((t.IsPublic || t.IsNestedPublic || (t.IsNotPublic && !t.IsNestedPrivate)) && ((t.IsClass && t.IsSubclassOf(typeof(object))) || t.IsEnum))
 				{
 					result.Add(t);
 				}
@@ -180,5 +197,13 @@ namespace Puppeteer.EventSourcing
 		}
 
 		internal int TypeCount => typesByName.Count;
+
+		// Nombres (simples) de los assemblies ingeridos en esta libreria. Usado solo
+		// por el diagnostico de NewInstance al reportar una clase ausente.
+		internal IReadOnlyList<string> LoadedAssemblyNames => ingestedAssemblyNames;
+
+		// Nombres simples de las clases conocidas por la libreria. Usado solo por el
+		// diagnostico de NewInstance (preview acotado) para sugerir lo que SI esta cargado.
+		internal IEnumerable<string> KnownClassNames => classesByName.Keys;
 	}
 }

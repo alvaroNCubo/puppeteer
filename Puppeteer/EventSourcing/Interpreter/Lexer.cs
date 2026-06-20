@@ -323,7 +323,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 							input.Backtrack();
 						}
 
-						CurrentToken = ProcesarNumero();
+						CurrentToken = ProcessNumber();
 						break;
 					}
 					else if (input.CurrentChar == '$')
@@ -331,7 +331,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 						input.SkipChar();
 						if (IsIdentifierChar())
 						{
-							ProcesarIdentificador();
+							ProcessIdentifier();
 							CurrentToken = new Token(TokenType.variable, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
@@ -349,7 +349,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 							}
 						}
 
-						ProcesarIdentificador();
+						ProcessIdentifier();
 
 						var cadenaActualOriginal = input.CurrentString();
 
@@ -450,7 +450,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 						switch (input.CurrentChar)
 						{
 							case '\'':
-								ProcesarLiteralString();
+								ProcessStringLiteral();
 								CurrentToken = new Token(TokenType.stringLit, input.LexemeStart, input.LexemeEnd);
 								return;
 							case '.':
@@ -483,13 +483,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 								if (esComentarioDeLinea)
 								{
 									input.ConsumeChar();
-									ProcesarComentarioDeLinea();
+									ProcessLineComment();
 									continue;
 								}
 								else if (esComentarioDeBloque)
 								{
 									input.ConsumeChar();
-									ProcesarComentarioDeBloque();
+									ProcessBlockComment();
 									continue;
 								}
 								else
@@ -631,7 +631,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void ProcesarComentarioDeLinea()
+		private void ProcessLineComment()
 		{
 			while (!IsEndOfStatement())
 			{
@@ -640,7 +640,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void ProcesarComentarioDeBloque()
+		private void ProcessBlockComment()
 		{
 			while (true)
 			{
@@ -681,7 +681,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private Token ProcesarNumero()
+		private Token ProcessNumber()
 		{
 			Token result;
 			bool esDecimal = false;
@@ -727,7 +727,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void ProcesarIdentificador()
+		private void ProcessIdentifier()
 		{
 			while (IsIdentifierChar() || IsDigit())
 			{
@@ -736,7 +736,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private void ProcesarLiteralString()
+		private void ProcessStringLiteral()
 		{
 			char comillaInicial = input.CurrentChar;
 			input.ConsumeChar();
@@ -876,7 +876,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			private string script;
 			private int indiceProximoChar;
 
-			private Positions posiciones;
+			private Positions positions;
 
 			internal int LexemeStart { get; private set; }
 			internal int LexemeEnd { get; private set; }
@@ -887,13 +887,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 				Column = 0;
 
 				indiceProximoChar = 0;
-				posiciones = new Positions(32);
+				positions = new Positions(32);
 
 				this.script = script;
 				CurrentChar = script.Length > 0 ? this.script[0] : '\t';
 
 
-				posiciones.SavePosition(Row, Column, indiceProximoChar);
+				positions.SavePosition(Row, Column, indiceProximoChar);
 
 				LexemeStart = 0;
 				LexemeEnd = 0;
@@ -907,12 +907,12 @@ namespace Puppeteer.EventSourcing.Interpreter
 					Column = 0;
 
 					indiceProximoChar = 0;
-					posiciones.ResetForNextToken();
+					positions.ResetForNextToken();
 
 					this.script = value;
 					CurrentChar = script.Length > 0 ? this.script[0] : '\t';
 
-					posiciones.SavePosition(Row, Column, indiceProximoChar);
+					positions.SavePosition(Row, Column, indiceProximoChar);
 
 					LexemeStart = 0;
 					LexemeEnd = 0;
@@ -935,8 +935,8 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				LexemeStart = indiceProximoChar;
 				LexemeEnd = indiceProximoChar;
-				posiciones.ResetForNextToken();
-				posiciones.SavePosition(Row, Column, indiceProximoChar);
+				positions.ResetForNextToken();
+				positions.SavePosition(Row, Column, indiceProximoChar);
 			}
 
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -972,7 +972,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
 			internal void AdvanceCursor()
 			{
-				posiciones.SavePosition(Row, Column, indiceProximoChar);
+				positions.SavePosition(Row, Column, indiceProximoChar);
 
 				if (indiceProximoChar < script.Length)
 				{
@@ -1037,10 +1037,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 			internal void Backtrack()
 			{
-				indiceProximoChar = posiciones.IndiceActual;
-				Column = posiciones.Column;
-				Row = posiciones.Row;
-				posiciones.QuitarLaUltimaPosicion();
+				indiceProximoChar = positions.IndiceActual;
+				Column = positions.Column;
+				Row = positions.Row;
+				positions.RemoveLastPosition();
 				LexemeEnd = indiceProximoChar - 1;
 				if (indiceProximoChar < script.Length && indiceProximoChar > 0)
 				{
@@ -1065,8 +1065,12 @@ namespace Puppeteer.EventSourcing.Interpreter
 					var length = ultimoIndiceNoBlanco - LexemeStart + 1;
 					if (length > 0 && LexemeStart + length <= script.Length)
 					{
-						var result = script.Substring(LexemeStart, length);
-						return result.AsSpan();
+						// AsSpan sobre el script en vez de Substring: CurrentString() se invoca
+						// para cada token identificador (matcheo de keywords en Advance), asi que
+						// el Substring alocaba un string transitorio por identificador. Sobre un
+						// journal de millones de tokens eso es presion de GC que golpea todas las
+						// etapas del pipeline de rehidratacion. El span apunta directo al script.
+						return script.AsSpan(LexemeStart, length);
 					}
 				}
 
@@ -1117,7 +1121,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
-			internal void QuitarLaUltimaPosicion()
+			internal void RemoveLastPosition()
 			{
 				index--;
 			}

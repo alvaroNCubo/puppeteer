@@ -13,7 +13,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
     {
         private readonly DomainLibraries libraries;
         private readonly SymbolTable symbolTable;
-		private readonly List<Statement> statements;
+		// B.1c: no longer readonly — ReleaseStatements() nulls it once the
+		// compiled lambda (_executable) is built, to free the resolved AST of
+		// cached compiled Actions. See ReleaseStatements for the invariant.
+		private List<Statement> statements;
+		private bool statementsReleased;
+		private bool cachedHasSingleTellStatement;
+		internal bool StatementsReleased => statementsReleased;
 
         private readonly bool elProgramaEsUnEval;
         internal Statement lastExecutedStatement;
@@ -30,12 +36,68 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		private readonly bool isCheck;
 
 		internal DateTime Now { get; set; }
-        internal IpAddress Ip { get; set; }
-		internal UserInLog User { get; set; }
 		internal long EntryId { get; set; }
         internal string Script { get;}
 		internal bool IsCompiledMode { get; private set; } = false;
+
+		// Lo setea el Parser al construir el Program: true sii el parse creo algun
+		// EvalStatement. ValidateStatically lo lee en vez de hacer
+		// Collect<EvalStatement>() (un recorrido completo del
+		// AST por cada entry). En el journal de rehidratacion no hay un solo Eval
+		// (se calcularon y sustituyeron por texto antes de persistir), asi que el
+		// flag queda false y ValidateStatically toma el camino de validacion completa
+		// sin pagar los dos traversals.
+		internal bool HasEval { get; set; } = false;
+
+		// Lever 1 de la optimizacion de Now: true sii el script referencia el parametro de
+		// SISTEMA Now (como Id 'Now'/'@Now'), o conservadoramente si HasEval (un Eval puede
+		// sintetizar la referencia en tiempo de ejecucion y no es visible al Collect<Id>
+		// estatico). Lo computa el Parser tras el parse (con los statements presentes) y
+		// viaja cacheado con el Program en el cache de operaciones. El framework solo inyecta
+		// Now en cada Perform en vivo cuando este flag es true: las operaciones que no usan el
+		// reloj no pagan el box ni el set de Now. OccurredAt del journal sale del 'now' local
+		// del Perform, no del parametro, asi que omitir la inyeccion no lo afecta. Calcular
+		// por NOMBRE no puede sub-inyectar: 'Now' es nombre reservado (no declarable), de modo
+		// que la unica forma de referenciarlo es escribir Now/@Now, que Collect<Id> si ve.
+		internal bool ReferencesNow { get; set; }
 		internal string LastExposeData { get; private set; }
+
+		// B.1: AST property + Expression<Func<AST>> compiled delegate. The
+		// Program IS the AST root (Program : AST). The AstFactory delegate is
+		// built from an Expression tree that captures this parsed instance and
+		// is compiled JIT on first access — replays and Reactions read the
+		// AST via the delegate, never re-parsing the script text. Singleton
+		// is viable because the AST is treated as immutable post-parse:
+		// pattern matches live in caches on the Reaction, not on the AST.
+		// Journal storage keeps the raw script text for human legibility; the
+		// AST is the canonical machine-readable form.
+		internal AST AST => this;
+
+		private Func<AST> astFactory;
+		private System.Linq.Expressions.Expression<Func<AST>> astFactoryExpression;
+		internal System.Linq.Expressions.Expression<Func<AST>> AstFactoryExpression
+		{
+			get
+			{
+				if (astFactoryExpression == null)
+				{
+					astFactoryExpression = System.Linq.Expressions.Expression.Lambda<Func<AST>>(
+						System.Linq.Expressions.Expression.Constant(this, typeof(AST)));
+				}
+				return astFactoryExpression;
+			}
+		}
+		internal Func<AST> AstFactory
+		{
+			get
+			{
+				if (astFactory == null)
+				{
+					astFactory = AstFactoryExpression.Compile();
+				}
+				return astFactory;
+			}
+		}
 
 		// Shared ParameterExpressions for globals referenced from this script's
 		// compiled lambda. AllocateGlobalStorageExpression caches one per name
@@ -78,6 +140,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         {
             get
             {
+                // B.1c: after ReleaseStatements the AST is gone; the bool was
+                // snapshotted at release time (tell-elision runs on every
+                // execution, including post-release compiled re-invocations).
+                if (statementsReleased) return cachedHasSingleTellStatement;
                 return statements.Count == 1 && statements[0] is TellStatement;
             }
         }
@@ -177,6 +243,42 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			parameters.Clear();	
 
 			return result;
+		}
+
+		// B.1c: drop the resolved AST of a compiled Program once its lambda is
+		// built. Memory win for the unbounded actionCommands cache: each cached
+		// compiled Action retains a full resolved AST (fat Id nodes with
+		// ForcedType / parameter / symbol / storage-expression refs) that is
+		// dead weight after compilation — execution runs through _executable,
+		// the journal needs only Script + Parameters (both retained), and the
+		// canonical text is preserved in builderStr.
+		//
+		// Invariant: release ONLY when IsCompiledMode && _executable != null.
+		// Interpreted Programs (V1 scripts) run Execute() which walks statements
+		// on EVERY invocation, so they must keep it — but interpreted Programs
+		// are never cached in actionCommands (they are ephemeral per-event), so
+		// this gate effectively targets V2 Actions and promoted Actions.
+		//
+		// Pattern matching is unaffected: Reactions re-parse entry.Script into
+		// their own per-Reaction Program copy (Reaction.SolveActionReferences),
+		// never touching this instance's statements.
+		internal void ReleaseStatements(DatabaseType databaseType)
+		{
+			if (statementsReleased) return;
+			if (!IsCompiledMode || _executable == null) return;
+			if (statements == null) return;
+
+			// Warm the canonical-text cache before dropping the AST it renders from.
+			_ = ConvertToString(databaseType);
+			// Preserve the cheap shape query that must outlive the AST.
+			cachedHasSingleTellStatement = statements.Count == 1 && statements[0] is TellStatement;
+
+			// Drop the Statement tree and the all-references list. idDeclarations
+			// is kept (small, and Declaraciones may be queried) — the bulk freed
+			// is the Statement nodes plus the Ids reachable only via idAllReferences.
+			statements = null;
+			idAllReferences = null;
+			statementsReleased = true;
 		}
 
 		internal Expression<Func<Parameters, Output, string>> ProgramExpression()
@@ -279,12 +381,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return Execute(false);
         }
 
-        internal string EjecutarCheck()
+        internal string ExecuteCheck()
         {
             return Execute(false);
         }
 
-        internal void CargarArgumentos(Parameters arguments)
+        internal void LoadArguments(Parameters arguments)
         {
 			if (!this.IsCompiledMode || _executable == null)
 			{
@@ -352,6 +454,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return builderStr;
         }
 
+        // ConvertToString cachea builderStr en la primera llamada. ActorHandler
+        // invoca ese primer render en PrepareCommand, ANTES de Perform — para un
+        // programa con Eval ese render es la forma LITERAL `Eval(<expr>);` porque
+        // EvalStatement.forDairy aun es null. Tras ejecutar (cuando cada Eval
+        // ejecutado ya poblo su forDairy con la asignacion evaluada), ActorHandler
+        // invalida este cache para re-renderizar la forma EVALUADA y journalizarla
+        // (determinismo en replay). Solo se usa en el path Eval (HasEval).
+        internal void InvalidateDairyRenderCache()
+        {
+            builderStr = null;
+        }
+
         internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
         {
             foreach (Statement source in statements)
@@ -359,6 +473,38 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 source.PreparePatternMatching(patternAst, ref position);
             }
         }
+
+		// B.3.1: promotion-candidate structural hash override. Walks the
+		// top-level statements to mix their contributions; descendant
+		// Statement/Expression subclasses override AccumulatePromotionCandidateHash
+		// to propagate structure while holding literal values blind. Cached
+		// on first read since the AST is treated as immutable post-parse.
+		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
+		{
+			hc.Add(nameof(Program));
+			hc.Add(statements.Count);
+			foreach (Statement source in statements)
+			{
+				source.AccumulatePromotionCandidateHash(ref hc);
+			}
+		}
+
+		private int promotionCandidateHash;
+		private bool promotionCandidateHashComputed;
+		internal int PromotionCandidateHash
+		{
+			get
+			{
+				if (!promotionCandidateHashComputed)
+				{
+					HashCode hc = new HashCode();
+					AccumulatePromotionCandidateHash(ref hc);
+					promotionCandidateHash = hc.ToHashCode();
+					promotionCandidateHashComputed = true;
+				}
+				return promotionCandidateHash;
+			}
+		}
 
         internal PatternMatcher CreatePatternMatcher(ActorHandler.ConcurrentParametersPool parametersPool)
         {
@@ -417,12 +563,38 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal void ValidateStatically()
 		{
-			bool hayEvals = this.Collect<EvalStatement>().Any() || this.Collect<OpEval>().Any();
-			if (! hayEvals)
+			bool hasEvals = this.HasEval;
+			if (! hasEvals)
 			{
 				foreach (var source in this.statements)
 				{
 					source.ValidateStatically();
+				}
+			}
+			else
+			{
+				// Best-effort: cuando hay Eval omitimos la validacion estatica completa
+				// (los identifiers sintetizados por Eval no se conocen en tiempo de resolve), pero
+				// propagamos el tipo declarado de cada global asignada via NewInstanceStatement
+				// cuyo rValue.ComputeType() resuelve sin tocar el path de Eval. Sin esto, el
+				// setter Id.ForcedType nunca corre para `g = Guardian(company);` y
+				// SymbolTable.Entry("g").type queda en null al terminar el resolverTask de esta
+				// entry. Si una entry posterior del journal referencia ese global como RValue,
+				// el resolver no le puede asignar ForcedType (Program.cs:667-670 requiere
+				// symbol.type != null) y la static validation de la entry posterior cae en
+				// DotAccess.ComputeCallExpressionType con instanceClass==null. El symptom
+				// produccion es resolverTask logueando NRE/LanguageException por cada entry
+				// dependiente del global. Documentado en
+				// BUG_RehydrationStaticValidation_AccountsCreate_ExchangeAPI §4.1, §4.2, §7.2.
+				foreach (var statement in this.statements.OfType<NewInstanceStatement>())
+				{
+					if (statement.LValue is Id id && id.IsOriginalLValueDeclaration && id.ForcedType == null)
+					{
+						Type t;
+						try { t = statement.RValue.ComputeType(); }
+						catch { t = null; }
+						if (t != null) id.ForcedType = t;
+					}
 				}
 			}
 		}
@@ -434,6 +606,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				source.Program = this;
 			}
+		}
+
+		// Lever 1 de la optimizacion de Now: escanea los Id del programa una sola vez (en
+		// parse-time, statements presentes) buscando una referencia al parametro de SISTEMA
+		// Now. Reusa el mismo Collect<Id> que ReferencesSolver usa como vista canonica de
+		// todos los ids, asi que es tan completo como la resolucion de referencias. Normaliza
+		// el alias '@' (CLAUDE.md: '@Now' es alias de 'Now') por span sin asignar. El llamador
+		// (Parser) combina con HasEval para el caso conservador.
+		internal bool ScriptReferencesSystemNow()
+		{
+			foreach (Id id in this.Collect<Id>())
+			{
+				ReadOnlySpan<char> name = id.Name.AsSpan();
+				if (name.Length > 0 && name[0] == '@') name = name.Slice(1);
+				if (name.Equals(Parameters.SystemNowName.AsSpan(), StringComparison.OrdinalIgnoreCase))
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
         internal List<Id> Declaraciones
@@ -534,6 +726,44 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					id.MarkAsLValue();
                 }
 
+				// Eval re-declaration unification:
+				// EvalStatement.Execute re-entra a SolveReferences pasando las
+				// declaraciones del programa interno como DeclaracionesExternas del
+				// padre (y viceversa al parsear el siguiente Eval). En el TOP-LEVEL
+				// el filtro HasVariable evita el problema porque el x del eval queda
+				// Global. Dentro de un bloque el x es Local (IsolatedStorage), no
+				// entra al SymbolTable y cada Eval('x = ...;') sucesivo produce un
+				// x_evalN nuevo en localDeclarations. Sin unificar, parent termina con
+				// dos OriginalLValueDeclaration distintas para el mismo nombre y, al
+				// re-resolver tras el segundo Eval, ReferencesTo intenta rebindear el
+				// x RValue ya bindeado a x_eval1 hacia x_eval2 y lanza "ambigous
+				// declaration". Aqui detectamos ese caso y unificamos el local con
+				// el external: el assignment del Eval interno termina escribiendo al
+				// mismo symbol que ya ven los reads del bloque externo.
+				if (program.DeclaracionesExternas.Count > 0)
+				{
+					var externalsByName = program.DeclaracionesExternas
+						.Where(ext => ext.IsLValue && ext.IsOriginalLValueDeclaration)
+						.ToLookup(ext => ext.Name, StringComparer.OrdinalIgnoreCase);
+					var unified = new List<Id>();
+					foreach (var localLValue in localDeclarations)
+					{
+						if (!localLValue.IsLValue) continue;
+						if (!localLValue.IsOriginalLValueDeclaration) continue;
+						var matchingExternal = externalsByName[localLValue.Name]
+							.FirstOrDefault(ext => ext != localLValue && ext.IsReferencedBy(localLValue));
+						if (matchingExternal != null)
+						{
+							localLValue.ReferencesTo(matchingExternal);
+							unified.Add(localLValue);
+						}
+					}
+					foreach (var localLValue in unified)
+					{
+						todasLasDeclaraciones.Remove(localLValue);
+					}
+				}
+
                 foreach (var id in todosLosIds)
                 {
 					id.Program = program;
@@ -549,7 +779,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
                 }
 
-				if (! program.IsCompiledMode)
+				// program.HasEval evita el Collect<EvalStatement>() (un recorrido completo del
+				// AST) cuando el Program no tiene evals — el caso de todos los scripts del
+				// journal en rehidratacion. Si no hay evals el foreach no haria nada de todos
+				// modos, pero el Collect igual caminaba el arbol entero.
+				if (! program.IsCompiledMode && program.HasEval)
 				{
 					foreach(var eval in program.Collect<EvalStatement>())
 					{

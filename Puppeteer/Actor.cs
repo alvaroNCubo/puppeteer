@@ -43,10 +43,34 @@ namespace Puppeteer
 
 		public Reactions Reactions => Handler.Reactions;
 
+		// Logger per-actor. Default es un ConsoleLogger util en desarrollo
+		// (Error -> stderr, Debug -> stdout). El host inyecta su impl via
+		// UseLogger(...); el sink vive en ActorHandler, no en un singleton
+		// process-wide. Dos actores en el mismo proceso pueden tener loggers
+		// distintos sin contaminarse. Choreography pasa este sink al transport
+		// que construye en ConfigureTransport.
+		public IPuppeteerLogger Logger => Handler.Logger;
+		public void UseLogger(IPuppeteerLogger logger) => Handler.UseLogger(logger);
+
 		// Paper 5 / Materialize v2 — Fase 0. Administra destinations para
 		// transferencia de estado (Register / Deregister / List). El watermark
 		// monotonico por destination (ConfirmoUntil) llega en Fase 1.
 		public Materialization Materialization => Handler.Materialization;
+
+		// Superficie read-only de inspeccion para uso CLI / IA / MCP / test-harness.
+		// Separada del DSL del dominio por construccion: los verbos viven en una
+		// interfaz que TODO actor expone por ser Puppeteer, no por ser Banco /
+		// Tetris / etc. Read-only por contrato — escribir va por Perform / Tell,
+		// nunca por aqui. Habilita el modo shadow del CLI IA-native: una IA que
+		// solo tiene Introspection no puede mutar el journal del primary aunque
+		// quiera. Etapa 1 (firmada 2026-05-31): solo ShowEntry.
+		public Puppeteer.EventSourcing.IActorIntrospection Introspection => Handler;
+
+		// Head actual del journal del actor (EntryId del ultimo registro escrito).
+		// Expuesto publico para que hosts externos (puppeteer-cli, ShadowPerformance,
+		// follower harness) sepan hasta donde sincronizar / mirrorear sin necesitar
+		// InternalsVisibleTo. El equivalente en Shadow ya estaba publico (Shadow.CurrentEntryId).
+		public long CurrentEntryId => Handler.CurrentEntryId;
 
 		public Assembly[] LibraryAssemblies => Handler.LibraryAssemblies;
 
@@ -59,6 +83,17 @@ namespace Puppeteer
 		public void ConfigureStorage(DatabaseType dbType, string connectionString)
 		{
 			Handler.EventSourcingStorage(dbType, connectionString);
+		}
+
+		// Configure storage SIN rehidratacion. Path read-only para herramientas de
+		// introspeccion (puppeteer-cli, IA-attach, MCP) que necesitan abrir un
+		// journal cualquiera de disco sin cargar el dominio. Solo los verbos de
+		// IActorIntrospection (ShowEntry y siguientes) son seguros despues de esta
+		// llamada — Perform / Tell / Reactions fallaran porque el actor no fue
+		// rehidratado.
+		public void ConfigureStorageForIntrospection(DatabaseType dbType, string connectionString)
+		{
+			Handler.ConfigureStorageForIntrospection(dbType, connectionString);
 		}
 
 		public void GracefulExit()
@@ -82,6 +117,23 @@ namespace Puppeteer
 		public DistillCommand Distill()
 		{
 			return new DistillCommand(Handler);
+		}
+
+		// Shadow Replay — S1 (handoff_shadow_S1_implementation.md / design §3.0).
+		// Fachada del primitivo: produce un actor derivado-laboratorio aislado de
+		// este actor de produccion. Lee el journal real (replay via SyncUntil) pero
+		// escribe en su PROPIO storage y produce CERO efecto externo. El Shadow es un
+		// primitivo del actor, NO un subtipo de Performance; un ShadowPerformance lo
+		// hospeda por composicion para deployment.
+		//
+		// Las reactions del primary NO se clonan automaticamente (el builder es
+		// imperativo). El caller re-declara las que quiera observar + experimentales
+		// via cfg.ConfigureReactions, con la misma API de Tema A apuntando al shadow.
+		public Shadow Shadow(ShadowConfig cfg)
+		{
+			ArgumentNullException.ThrowIfNull(cfg);
+			ActorHandler shadowHandler = Handler.CreateShadow(cfg);
+			return new Shadow(shadowHandler.ShadowActor, cfg);
 		}
 	}
 }

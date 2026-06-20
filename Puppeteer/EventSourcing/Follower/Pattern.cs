@@ -10,6 +10,9 @@ namespace Puppeteer.EventSourcing.Follower
 	{
 		private readonly string patternText;
 		private readonly ActorHandler actorHandler;
+		// B.2: kept as a direct field so the per-Reaction match cache can be
+		// consulted from Match() without walking back through ReactionEngine.
+		private readonly Reaction reaction;
 
 		private readonly PatternListNode patternAst;
 		private readonly QuickTest quickTest;
@@ -21,7 +24,8 @@ namespace Puppeteer.EventSourcing.Follower
 			ArgumentNullException.ThrowIfNull(patternText);
 
 			this.patternText = patternText;
-			this.actorHandler = reactionEngine.Reaction.ActorHandler;
+			this.reaction = reactionEngine.Reaction;
+			this.actorHandler = reaction.ActorHandler;
 			this.libraries = actorHandler.Libraries;
 
 			var parser = new PatternParser();
@@ -37,7 +41,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal PatternListNode PatternAst => patternAst;
 
-		internal bool Match(string script, DateTime eventTimestamp, Parameters parameters, SymbolTable symbolTable, Program cachedProgram = null, string exposeDataJson = null)
+		internal bool Match(string script, DateTime eventTimestamp, Parameters parameters, SymbolTable symbolTable, Program cachedProgram = null, bool cachedProgramIsCanonical = false, string exposeDataJson = null)
 		{
 			ArgumentNullException.ThrowIfNull(script);
 			ArgumentNullException.ThrowIfNull(parameters);
@@ -78,7 +82,7 @@ namespace Puppeteer.EventSourcing.Follower
 				// the event's OccurredAt — the same value ActorHandler.Perform uses
 				// when replaying the event. Keeps pattern matching deterministic
 				// across re-executions of the same journal.
-				cachedProgram.Parameters.SystemParameter<DateTime>("Now", eventTimestamp);
+				cachedProgram.Parameters["Now", typeof(DateTime)] = eventTimestamp;
 #if DEBUG
 				System.Diagnostics.Debug.WriteLine($"[Pattern.Match] Using cached Program with parameters already loaded");
 #endif
@@ -92,28 +96,75 @@ namespace Puppeteer.EventSourcing.Follower
 				// resolves to the event's OccurredAt (the moment the entry was journaled),
 				// not to the pool's default(DateTime). Mirrors the behavior of
 				// ActorHandler.Perform and MatchTree.EvaluateWhere for '@Now'.
-				parametersForTyping.SystemParameter<DateTime>("Now", eventTimestamp);
+				parametersForTyping["Now", typeof(DateTime)] = eventTimestamp;
 
-				var parser = new Parser(libraries, symbolTable);
-				parser.SetSource(script);
-
+				var parser = reaction.ParsersPool.Rent();
 				try
 				{
-					scriptAst = parser.Parse(isQuery: false, isCheck: false);
-					scriptAst.SolveReferences(parametersForTyping, withStaticValidation: true);
+					parser.SetSource(script);
+
+					try
+					{
+						scriptAst = parser.Parse(isQuery: false, isCheck: false);
+						scriptAst.SolveReferences(parametersForTyping, withStaticValidation: true);
 #if DEBUG
-					System.Diagnostics.Debug.WriteLine($"[Pattern.Match] Script parsed successfully");
+						System.Diagnostics.Debug.WriteLine($"[Pattern.Match] Script parsed successfully");
 #endif
+					}
+					catch (LanguageException ex)
+					{
+						// If the script does not parse correctly, there is no match.
+#if DEBUG
+						System.Diagnostics.Debug.WriteLine($"[Pattern.Match] Parse/SolveReferences FAILED: {ex.Message}");
+#endif
+						parametersForTyping.PurgeUserParameters();
+						parametersPool.Return(parametersForTyping);
+						return false;
+					}
 				}
-				catch (LanguageException ex)
+				finally
 				{
-					// If the script does not parse correctly, there is no match.
+					reaction.ParsersPool.Return(parser);
+				}
+			}
+
+			// B.2: per-Reaction match cache. Only canonical Programs participate.
+			// "Canonical" means the Program reference is reused across many
+			// events (currently: ActionEvents via the Reaction's per-ActionId
+			// LRU, which mirrors actorHandler.actionCommands). ScriptEvents
+			// reuse a Program only for the immediate next consumer via the
+			// last-executed-script fast path (`cachedProgram != null` but
+			// `cachedProgramIsCanonical == false`); engaging the per-Pattern
+			// MatchCache on such transient Programs would add entries that
+			// can never re-hit (each EntryId is unique) and would retain the
+			// Program in memory unnecessarily, so the match cache is skipped
+			// for that path — only the parse skip is harvested.
+			MatchCacheEntry cachedEntry = null;
+			MatchCacheKey cacheKey = null;
+			ReactionMatchCache cache = reaction.MatchCache;
+			bool cacheable = cachedProgram != null && cachedProgramIsCanonical;
+			if (cacheable)
+			{
+				string initialVarsSignature = MatchCacheKey.SignatureOf(parameters);
+				string programParametersSignature = MatchCacheKey.SignatureOf(scriptAst.Parameters);
+				cacheKey = new MatchCacheKey(this, scriptAst, initialVarsSignature, programParametersSignature, exposeDataJson);
+
+				if (cache.TryGet(cacheKey, out cachedEntry))
+				{
+					if (needsCleanup)
+					{
+						parametersForTyping.PurgeUserParameters();
+						parametersPool.Return(parametersForTyping);
+					}
 #if DEBUG
-					System.Diagnostics.Debug.WriteLine($"[Pattern.Match] Parse/SolveReferences FAILED: {ex.Message}");
+					System.Diagnostics.Debug.WriteLine($"[Pattern.Match] MatchCache HIT (matched={cachedEntry.Matched})");
 #endif
-					parametersForTyping.PurgeUserParameters();
-					parametersPool.Return(parametersForTyping);
-					return false;
+					if (!cachedEntry.Matched) return false;
+					foreach (var cap in cachedEntry.Captures)
+					{
+						parameters[cap.Name, cap.Type] = cap.Value;
+					}
+					return true;
 				}
 			}
 
@@ -130,6 +181,8 @@ namespace Puppeteer.EventSourcing.Follower
 			catch (LanguageException ex)
 			{
 				// Re-throw exceptions related to OUT-parameter validation.
+				// Exceptional paths are NOT cached — they represent invalid
+				// pattern definitions, not "match/no-match" outcomes over data.
 				if (ex.Message.Contains("Cannot match an OUT parameter"))
 				{
 					if (needsCleanup)
@@ -168,10 +221,31 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				System.Diagnostics.Debug.WriteLine($"[Pattern.Match] PatternMatcher MATCHED! Captured params: {capturedCount}");
 #endif
-				// Copy the matched parameters into 'parameters'.
-				foreach (var param in matchResult)
+				if (cacheable)
 				{
-					parameters[param.Name, param.ParameterType] = param.GetValue();
+					// B.2: snapshot captures into the cache entry BEFORE returning
+					// matchResult to the pool (the pool reset clears Name/Type/Value).
+					List<CapturedValue> snapshot = new List<CapturedValue>();
+					foreach (var param in matchResult)
+					{
+						snapshot.Add(new CapturedValue(param.Name, param.ParameterType, param.GetValue()));
+					}
+					cache.Store(cacheKey, new MatchCacheEntry(matched: true, captures: snapshot));
+
+					foreach (var cap in snapshot)
+					{
+						parameters[cap.Name, cap.Type] = cap.Value;
+					}
+				}
+				else
+				{
+					// ScriptEvent passthrough — copy captures directly without
+					// snapshotting; nothing to cache because the Program
+					// instance is fresh and will not be reused.
+					foreach (var param in matchResult)
+					{
+						parameters[param.Name, param.ParameterType] = param.GetValue();
+					}
 				}
 				matchResult.PurgeUserParameters();
 				parametersPool.Return(matchResult);
@@ -180,6 +254,13 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 			System.Diagnostics.Debug.WriteLine($"[Pattern.Match] PatternMatcher DID NOT MATCH");
 #endif
+			// B.2: negative caching — record the no-match outcome so subsequent
+			// identical (Pattern, Program, initialVars, programParams, expose)
+			// tuples short-circuit. ScriptEvents skip this step (cacheable=false).
+			if (cacheable)
+			{
+				cache.Store(cacheKey, MatchCacheEntry.NegativeMiss);
+			}
 			return false;
 		}
 		private QuickTest GenerateQuickTest(PatternListNode patternAst)
@@ -212,8 +293,17 @@ namespace Puppeteer.EventSourcing.Follower
 					break;
 
 				case InstanceAccessNode instanceAccess:
-					// [instance:Type].Member → search for "Type" and "Member".
-					substrings.Add(instanceAccess.TypeName);
+					// [instance:Type].Member - el tipo de la instancia NO aparece
+					// literalmente en el script: el script usa el nombre de la
+					// variable enlazada (counter.Bump(5)), no el nombre del tipo
+					// (DemoCounter). El binding de tipo se resuelve via SymbolTable
+					// en el PatternMatcher; aqui solo se requiere que la cadena
+					// de miembros aparezca como prefiltro rapido. Antes se exigia
+					// el TypeName como substring y dejaba pasar solo aquellos
+					// scripts donde el nombre de la variable contenia el nombre del
+					// tipo como substring (case-insensitive) — un falso negativo
+					// que silenciaba el push loop de las Cued reactions cuando la
+					// variable se llamaba distinto al tipo.
 					if (instanceAccess.MemberAccess != null)
 					{
 						ExtractMemberSubstrings(instanceAccess.MemberAccess, substrings);

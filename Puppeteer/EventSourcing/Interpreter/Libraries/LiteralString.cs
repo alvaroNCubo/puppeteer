@@ -10,7 +10,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal const Char SLASH_OR_SINGLE_QUOTED_CHARACTER = '\u0000'; //Para SQLServer es SINGLE_QUOTED && MySQL es SLASH
 		internal const Char DOUBLE_QUOTED_CHARACTER = '\u0001';
 		internal const Char PIPE_CHARACTER = '\u0002';
-		internal readonly static LiteralString VACIA = new LiteralString("");
+		internal readonly static LiteralString EMPTY = new LiteralString("");
 
 		private readonly string value;
 
@@ -46,7 +46,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal static void Write(StringBuilder output, string value, DatabaseType databaseType)
 		{
-			if (databaseType == DatabaseType.MySQL)
+			// Las cuatro ramas comparten el mismo invariante: el Lexer
+			// (ProcessStringLiteral) solo reconoce \' y \\ como secuencias
+			// de escape dentro de un literal '...'. La rama MySQL antes emitia
+			// la ' interna sin escapar (bug reportado), y SQLServer ademas no
+			// duplicaba el \. Se unifican MySQL/SQLServer al mismo formato
+			// canonico que ya usaba IN_MEMORY/FileSystem para la apostrofe.
+			// El handling del \ se preserva por rama para no romper el
+			// formato historico que ya pinaban los tests de Parameters.
+			if (value == null) throw new ArgumentNullException(nameof(value));
+
+			if (databaseType == DatabaseType.MySQL || databaseType == DatabaseType.SQLServer)
 			{
 				output.Append('\'');
 				foreach (char c in value)
@@ -54,36 +64,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					switch (c)
 					{
 						case '\'':
-							output.Append('\'');
-							break;
-						case '"':
-							output.Append('\"');
+							output.Append('\\').Append('\'');
 							break;
 						case '\\':
 							output.Append('\\').Append('\\');
-							break;
-						default:
-							output.Append(c);
-							break;
-					}
-				}
-				output.Append('\'');
-			}
-			else if (databaseType == DatabaseType.SQLServer)
-			{
-				output.Append('\'');
-				foreach (char c in value)
-				{
-					switch (c)
-					{
-						case '\'':
-							output.Append('\'');
-							break;
-						case '"':
-							output.Append('"');
-							break;
-						case '\\':
-							output.Append('\\');
 							break;
 						default:
 							output.Append(c);
@@ -100,8 +84,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					switch (c)
 					{
 						case '\'':
-							output.Append('\\');
-							output.Append('\'');
+							output.Append('\\').Append('\'');
 							break;
 						default:
 							output.Append(c);

@@ -42,6 +42,8 @@ namespace Puppeteer
 			}
 		}
 
+		public IPuppeteerLogger Logger => actor.Logger;
+
 		internal long LastProcessedEntryId
 		{
 			get

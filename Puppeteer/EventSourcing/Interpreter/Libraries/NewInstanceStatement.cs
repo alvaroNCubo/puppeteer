@@ -64,10 +64,28 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 
 			}
+			else if (lValue is SubscriptAstExpression subscript)
+			{
+				object valorDeLaExpresionDerecha = rValue.Execute();
+				subscript.ExecuteAssignment(valorDeLaExpresionDerecha);
+			}
 			else
 			{
 				object valorDeLaExpresionDerecha = rValue.Execute();
-				Type rightExpressionType = valorDeLaExpresionDerecha == null ? null : valorDeLaExpresionDerecha.GetType();
+				// Pasar el tipo DECLARADO del rValue, no el runtime concreto. El
+				// declarado es el que el setter de ForcedType habria fijado durante
+				// ValidateStatically; si se almacena el concreto en symbol.type, una
+				// PerformCmd posterior que reasigne la misma global ve ese tipo como
+				// ForcedType del lValue y rechaza reasignaciones legitimas con un
+				// tipo mas general (sintoma: "Type X does not inherit from Y" donde X
+				// es el declarado y Y el concreto). Disparado cuando la PerformCmd
+				// actual saltea ValidateStatically (p.ej. contiene Eval); el
+				// runtime sigue inspeccionable via symbol.value.GetType().
+				Type rightExpressionType = rValue.ComputeType();
+				if (rightExpressionType == null && valorDeLaExpresionDerecha != null)
+				{
+					rightExpressionType = valorDeLaExpresionDerecha.GetType();
+				}
 				string nuevaVariable = ((Id)lValue).Name;
 				((Id)lValue).Store(valorDeLaExpresionDerecha, rightExpressionType);
 			}
@@ -82,6 +100,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (lValue is ChainedDotAccess)
 			{
 				throw new NotImplementedException();
+			}
+			else if (lValue is SubscriptAstExpression)
+			{
+				return Expression.Empty();
 			}
 			else if (lValue is Id referenciaId)
 			{
@@ -104,6 +126,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				else if (lValue is ChainedDotAccess)
 				{
 					throw new NotImplementedException();
+				}
+				else if (lValue is SubscriptAstExpression)
+				{
+					return null;
 				}
 				else if (lValue is Id id)
 				{
@@ -165,6 +191,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (lValue is ChainedDotAccess)
 			{
 				return Expression.Empty();
+			}
+			else if (lValue is SubscriptAstExpression subscript)
+			{
+				var valorDerechaExpr = rValue.ExecuteExpression(parametersParam);
+				return subscript.ExecuteAssignmentExpression(parametersParam, valorDerechaExpr);
 			}
 			else
 			{
@@ -258,10 +289,43 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 			}
 
-			if (lValue.ForcedType != null && !lValue.ForcedType.IsAssignableFrom(type)) throw new LanguageException($"Type {type} does not inherit from {lValue.ForcedType}.");
+			if (lValue.ForcedType != null && !lValue.ForcedType.IsAssignableFrom(type))
+			{
+				// Permissive resolution for covariant returns and identity-return
+				// methods: when rValue is a method call, the runtime value may be
+				// assignable to lValue.ForcedType even though the declared static
+				// return type is not. Two distinct shapes are covered:
+				//   (a) The receiver is abstract/interface (or non-sealed) and a
+				//       concrete subclass overrides the method with a more refined
+				//       return type. Documentado en
+				//       BUG_StaticValidationBaseTypeReassign §6.1.
+				//   (b) The receiver is concrete and the method's declared return
+				//       type is a strict BASE of ForcedType — typically a body that
+				//       returns its own caller-supplied argument (identity-return /
+				//       accumulator). Documentado en
+				//       BUG_StaticValidationCovariantReturnReassign §6.1.
+				// Mirrors the polymorphic resolution already applied in
+				// DotAccess.ComputeCallExpressionType and DotAccess.InvokeMethodExpression
+				// for the symmetric "member only on subclass" pattern.
+				bool covariantOverrideAccepted = rValue is DotAccess rValueAsDotAccess
+					&& rValueAsDotAccess.HasOverrideReturnTypeAssignableTo(lValue.ForcedType);
+				if (!covariantOverrideAccepted) throw new LanguageException($"Type {type} does not inherit from {lValue.ForcedType}.");
+			}
 
-			lValue.ValidateStatically();
+			if (lValue is SubscriptAstExpression subscriptLValue)
+				subscriptLValue.ValidateAsLValue();
+			else
+				lValue.ValidateStatically();
 			rValue.ValidateStatically();
+		}
+
+		// B.3.1: include LValue + RValue contributions so two assignments with
+		// the same shape but different literal RHS hash equally.
+		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
+		{
+			hc.Add(nameof(NewInstanceStatement));
+			lValue.AccumulatePromotionCandidateHash(ref hc);
+			rValue.AccumulatePromotionCandidateHash(ref hc);
 		}
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
@@ -346,21 +410,38 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (instanceType == null)
 				throw new LanguageException($"Could not determine the object type for reference '{reference.Id()}.{targetFieldName}'.");
 
-			FieldInfo fieldEncontrado = null;
-			foreach (FieldInfo field in instanceType.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+			FieldInfo fieldEncontrado = FindAssignableFieldOn(instanceType, targetFieldName);
+			if (fieldEncontrado != null) return fieldEncontrado;
+
+			// Polymorphic resolution: if the declared type is abstract/interface,
+			// search assignable concrete subclasses for the field. ExecuteExpression
+			// will cast via fieldInfo.DeclaringType, so returning a subclass field
+			// works transparently.
+			if (DotAccess.CanHaveConcreteSubclasses(instanceType))
 			{
-				if (field.IsPublic || field.IsAssembly)
+				foreach (Type derived in DotAccess.EnumerateAssignableConcreteSubclasses(instanceType))
 				{
-					string fieldName = field.Name;
-					if (string.Equals(fieldName, targetFieldName, StringComparison.OrdinalIgnoreCase))
-					{
-						fieldEncontrado = field;
-						break;
-					}
+					fieldEncontrado = FindAssignableFieldOn(derived, targetFieldName);
+					if (fieldEncontrado != null) return fieldEncontrado;
 				}
 			}
 
-			return fieldEncontrado;
+			return null;
+		}
+
+		private static FieldInfo FindAssignableFieldOn(Type objectType, string targetFieldName)
+		{
+			foreach (FieldInfo field in objectType.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+			{
+				if (field.IsPublic || field.IsAssembly)
+				{
+					if (string.Equals(field.Name, targetFieldName, StringComparison.OrdinalIgnoreCase))
+					{
+						return field;
+					}
+				}
+			}
+			return null;
 		}
 
 		private PropertyInfo FindProperty()
@@ -411,11 +492,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (instanceType == null)
 				throw new LanguageException($"Could not determine the object type for reference '{reference.Id()}.{targetPropertyName}'.");
 
-			PropertyInfo foundProperty = null;
-			foreach (PropertyInfo property in instanceType.GetProperties(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+			PropertyInfo foundProperty = FindAssignablePropertyOn(instanceType, targetPropertyName, reference);
+			if (foundProperty != null) return foundProperty;
+
+			// Polymorphic resolution: if the declared type is abstract/interface,
+			// search assignable concrete subclasses. ExecuteExpression casts via
+			// propertyInfo.DeclaringType, so a subclass property works transparently.
+			if (DotAccess.CanHaveConcreteSubclasses(instanceType))
 			{
-				string propertyName = property.Name;
-				if (string.Equals(propertyName, targetPropertyName, StringComparison.OrdinalIgnoreCase) && property.SetMethod != null)
+				foreach (Type derived in DotAccess.EnumerateAssignableConcreteSubclasses(instanceType))
+				{
+					foundProperty = FindAssignablePropertyOn(derived, targetPropertyName, reference);
+					if (foundProperty != null) return foundProperty;
+				}
+			}
+
+			return null;
+		}
+
+		private PropertyInfo FindAssignablePropertyOn(Type objectType, string targetPropertyName, DottedId reference)
+		{
+			foreach (PropertyInfo property in objectType.GetProperties(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+			{
+				if (string.Equals(property.Name, targetPropertyName, StringComparison.OrdinalIgnoreCase) && property.SetMethod != null)
 				{
 					ParameterInfo[] variables = property.SetMethod.GetParameters();
 					variables = RemoveValueFromSetter(variables);
@@ -429,14 +528,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 						bool validSignatures = reference.ValidateArgumentSignature(variables);
 						if (validSignatures)
 						{
-							foundProperty = property;
-							break;
+							return property;
 						}
 					}
 				}
 			}
-
-			return foundProperty;
+			return null;
 		}
 
 		private ParameterInfo[] RemoveValueFromSetter(ParameterInfo[] parameters)

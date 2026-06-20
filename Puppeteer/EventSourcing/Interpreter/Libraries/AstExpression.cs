@@ -57,21 +57,133 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// --- Soporte de coercion simbolo->enum ---------------------------------------------
+		// Un argumento puede ligar a un parametro enum de dos formas:
+		//   Symbol      : identificador pelado sin scope (foo(Febrero)). No tiene valor en
+		//                 runtime — su NOMBRE es el miembro del enum. ComputeType() == object/null
+		//                 y no se le puede Execute()/ExecuteExpression() (scope indefinido).
+		//   StringValue : un string con valor (parametro string @mes, variable string, o literal
+		//                 'Febrero'). Su VALOR runtime es el nombre del miembro. ComputeType()==string.
+		// Un OpCast (incluido (string)x) NO es enum-bindable por esta via: respeta el tipo declarado
+		// del cast — eso da el opt-out de desambiguacion cuando coexisten foo(Mes) y foo(string).
+		internal enum EnumArgKind { NotEnumBindable, Symbol, StringValue }
+
+		internal static EnumArgKind ClassifyEnumArg(AstExpression arg)
+		{
+			if (arg == null) return EnumArgKind.NotEnumBindable;
+			if (arg is LiteralString) return EnumArgKind.StringValue;
+			if (arg is Id id)
+			{
+				Type t = id.ComputeType();
+				if (t == null || t == typeof(object)) return EnumArgKind.Symbol;
+				if (t == typeof(string)) return EnumArgKind.StringValue;
+			}
+			return EnumArgKind.NotEnumBindable;
+		}
+
+		internal static bool EnumNameExists(Type enumType, string name)
+		{
+			if (name == null) return false;
+			foreach (string n in Enum.GetNames(enumType))
+			{
+				if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return true;
+			}
+			return false;
+		}
+
+		internal static LanguageException EnumValueUnknown(Type enumType, string written)
+		{
+			string options = string.Join(" or ", Enum.GetNames(enumType));
+			return new LanguageException(string.Format("You are trying to assign a value of type '{0}' but wrote '{1}'; the expected value is one of: {2}.", enumType.Name, written, options));
+		}
+
+		// Llamada en runtime (interpretado y compilado) para convertir el nombre simbolico al
+		// valor del enum. Lanza LanguageException (no ArgumentException) en caso de nombre invalido.
+		internal static object ParseEnumOrThrow(Type enumType, string name)
+		{
+			if (!Enum.TryParse(enumType, name, true, out object value))
+			{
+				throw EnumValueUnknown(enumType, name);
+			}
+			return value;
+		}
+
+		// Compatibilidad estatica de un argumento contra un parametro enum.
+		// Symbol/LiteralString: el nombre/valor se conoce en parse -> debe existir en el enum.
+		// StringValue por Id (parametro/variable): el valor es runtime -> compatible, se difiere.
+		internal static bool IsEnumArgCompatible(Type enumType, AstExpression arg)
+		{
+			switch (ClassifyEnumArg(arg))
+			{
+				case EnumArgKind.Symbol:
+					return EnumNameExists(enumType, ((Id)arg).Name);
+				case EnumArgKind.StringValue:
+					if (arg is LiteralString)
+					{
+						return EnumNameExists(enumType, (string)arg.Execute());
+					}
+					return true;
+				default:
+					return false;
+			}
+		}
+
+		// Valor enum (boxed) para modo interpretado.
+		internal static object ParseEnumArgValue(Type enumType, AstExpression arg)
+		{
+			switch (ClassifyEnumArg(arg))
+			{
+				case EnumArgKind.Symbol:
+					return ParseEnumOrThrow(enumType, ((Id)arg).Name);
+				case EnumArgKind.StringValue:
+					return ParseEnumOrThrow(enumType, (string)arg.Execute());
+				default:
+					throw new LanguageException($"Argument cannot be bound to enum '{enumType.Name}'.");
+			}
+		}
+
+		// Expression que produce el valor enum para modo compilado.
+		internal static Expression ParseEnumArgExpression(Type enumType, AstExpression arg, ParameterExpression parametersParam)
+		{
+			Expression nameExpr;
+			switch (ClassifyEnumArg(arg))
+			{
+				case EnumArgKind.Symbol:
+					nameExpr = Expression.Constant(((Id)arg).Name, typeof(string));
+					break;
+				case EnumArgKind.StringValue:
+					nameExpr = arg.ExecuteExpression(parametersParam);
+					break;
+				default:
+					throw new LanguageException($"Argument cannot be bound to enum '{enumType.Name}'.");
+			}
+
+			var parseMethod = typeof(AstExpression).GetMethod(
+				nameof(ParseEnumOrThrow),
+				BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public,
+				null,
+				new[] { typeof(Type), typeof(string) },
+				null);
+			Expression parseCall = Expression.Call(
+				parseMethod,
+				Expression.Constant(enumType, typeof(Type)),
+				nameExpr);
+			return Expression.Convert(parseCall, enumType);
+		}
+
 		protected static object[] BindValuesToParameters(ParameterInfo[] methodSignature, object[] arguments)
 		{
 			object[] result = new object[arguments == null ? 0 : arguments.Length];
 			for (int i = 0; i < methodSignature.Length; i++)
 			{
 				ParameterInfo parameterInfo = methodSignature[i];
-				bool argIsEnumIdentifier = parameterInfo.ParameterType.IsEnum && arguments[i].GetType() == typeof(Id);
-				if (argIsEnumIdentifier)
+				// arguments[i] puede ser un valor ya evaluado (ruta de invocacion de metodo, que
+				// pre-resuelve enums) o un nodo AST crudo (ruta de property-get). Solo coercionamos
+				// cuando aun es un nodo enum-bindable (simbolo pelado o string con valor).
+				if (parameterInfo.ParameterType.IsEnum && arguments[i] is AstExpression enumArgNode
+					&& ClassifyEnumArg(enumArgNode) != EnumArgKind.NotEnumBindable)
 				{
-					Type enumType = parameterInfo.ParameterType;
-					string enumName = ((Id)arguments[i]).Name;
-					if (!Enum.TryParse(enumType, enumName, true, out result[i]))
-					{
-						throw new LanguageException($"Enum {enumName} is unknown");
-					}
+					result[i] = ParseEnumArgValue(parameterInfo.ParameterType, enumArgNode);
 				}
 				else
 				{
@@ -94,26 +206,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
 					else
 					{
-						Type argumentType = evaluatedArgument.GetType();
-
-						if (parameterType == typeof(double) && argumentType == typeof(int))
-						{
-							evaluatedArgument = Convert.ToDouble(evaluatedArgument);
-						}
-						else if (parameterType == typeof(double) && argumentType == typeof(decimal))
-						{
-							evaluatedArgument = Convert.ToDouble(evaluatedArgument);
-						}
-						else if (parameterType == typeof(decimal) && argumentType == typeof(int))
-						{
-							evaluatedArgument = Convert.ToDecimal(evaluatedArgument);
-						}
-						else if (parameterType == typeof(decimal) && argumentType == typeof(double))
-						{
-							evaluatedArgument = Convert.ToDecimal(evaluatedArgument);
-						}
-
-						result[i] = evaluatedArgument;
+						result[i] = CoerceScalarValue(evaluatedArgument, parameterType);
 					}
 				}
 			}
@@ -129,16 +222,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				var paramType = parameterInfo.ParameterType;
 				Expression argument = arguments[i];
 
-				// Enum handling: if the parameter is an enum and the argument is an Id expression.
+				// Enum handling: argumento que es un Constant envolviendo un Id simbolo pelado.
+				// (Los string-con-valor ya se resolvieron a Expression de tipo enum aguas arriba.)
 				if (paramType.IsEnum && argument is ConstantExpression constExpr && constExpr.Value is Id idArg)
 				{
-					string enumName = idArg.Name;
-					object enumValue;
-					if (!Enum.TryParse(paramType, enumName, true, out enumValue))
-					{
-						throw new LanguageException($"Enum {enumName} is unknown");
-					}
-					result[i] = Expression.Constant(enumValue, paramType);
+					result[i] = Expression.Constant(ParseEnumOrThrow(paramType, idArg.Name), paramType);
 				}
 				// Collection handling.
 				else if (NewInstance.TypeOfCollection(paramType) == typeof(List<>) ||
@@ -187,48 +275,113 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// Numeric conversions.
 				else
 				{
-					Type parameterType = paramType;
-					Type argumentType = argument.Type;
-
-					if (parameterType == typeof(double) && argumentType == typeof(int))
-					{
-						result[i] = Expression.Convert(argument, typeof(double));
-					}
-					else if (parameterType == typeof(double) && argumentType == typeof(decimal))
-					{
-						result[i] = Expression.Convert(argument, typeof(double));
-					}
-					else if (parameterType == typeof(decimal) && argumentType == typeof(int))
-					{
-						result[i] = Expression.Convert(argument, typeof(decimal));
-					}
-					else if (parameterType == typeof(decimal) && argumentType == typeof(double))
-					{
-						result[i] = Expression.Convert(argument, typeof(decimal));
-					}
-					else
-					{
-						// If types are not directly assignable, use ImplicitCast.
-						if (!AreCompatible(argumentType, parameterType))
-						{
-							result[i] = Expression.Convert(
-								Expression.Call(
-									typeof(TypeConversion).GetMethod(
-										nameof(TypeConversion.ImplicitCast), BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public),
-									argument,
-									Expression.Constant(paramType, typeof(Type))
-								),
-								paramType
-							);
-						}
-						else
-						{
-							result[i] = argument;
-						}
-					}
+					result[i] = CoerceScalarExpression(argument, paramType);
 				}
 			}
 			return result;
+		}
+
+		// Coercion escalar de UN argumento ya evaluado (modo interpretado). Es la misma escalera
+		// numerica que aplicaba BindValuesToParameters en su rama escalar; extraida para poder
+		// reusarla por-elemento al poblar un arreglo params. enum/coleccion se manejan aparte.
+		protected static object CoerceScalarValue(object evaluatedArgument, Type parameterType)
+		{
+			if (evaluatedArgument == null) return null;
+
+			Type argumentType = evaluatedArgument.GetType();
+
+			if (parameterType == typeof(long) && argumentType == typeof(int))
+			{
+				return Convert.ToInt64(evaluatedArgument);
+			}
+			else if (parameterType == typeof(double) && argumentType == typeof(int))
+			{
+				return Convert.ToDouble(evaluatedArgument);
+			}
+			else if (parameterType == typeof(double) && argumentType == typeof(decimal))
+			{
+				return Convert.ToDouble(evaluatedArgument);
+			}
+			else if (parameterType == typeof(decimal) && argumentType == typeof(int))
+			{
+				return Convert.ToDecimal(evaluatedArgument);
+			}
+			else if (parameterType == typeof(decimal) && argumentType == typeof(double))
+			{
+				return Convert.ToDecimal(evaluatedArgument);
+			}
+
+			return evaluatedArgument;
+		}
+
+		// Coercion escalar de UN argumento (modo compilado), produciendo la Expression con el
+		// tipo objetivo. Misma escalera numerica + fallback ImplicitCast/boxing que tenia la rama
+		// escalar de BindValueExpressionsToParameters; extraida para reusarla por-elemento al
+		// emitir Expression.NewArrayInit de un parametro params.
+		protected static Expression CoerceScalarExpression(Expression argument, Type parameterType)
+		{
+			if (argument == null) throw new ArgumentNullException(nameof(argument));
+			if (parameterType == null) throw new ArgumentNullException(nameof(parameterType));
+
+			Type argumentType = argument.Type;
+
+			if (parameterType == typeof(long) && argumentType == typeof(int))
+			{
+				return Expression.Convert(argument, typeof(long));
+			}
+			else if (parameterType == typeof(double) && argumentType == typeof(int))
+			{
+				return Expression.Convert(argument, typeof(double));
+			}
+			else if (parameterType == typeof(double) && argumentType == typeof(decimal))
+			{
+				return Expression.Convert(argument, typeof(double));
+			}
+			else if (parameterType == typeof(decimal) && argumentType == typeof(int))
+			{
+				return Expression.Convert(argument, typeof(decimal));
+			}
+			else if (parameterType == typeof(decimal) && argumentType == typeof(double))
+			{
+				return Expression.Convert(argument, typeof(decimal));
+			}
+
+			// If types are not directly assignable, use ImplicitCast.
+			if (!AreCompatible(argumentType, parameterType))
+			{
+				return Expression.Convert(
+					Expression.Call(
+						typeof(TypeConversion).GetMethod(
+							nameof(TypeConversion.ImplicitCast), BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public),
+						argument,
+						Expression.Constant(parameterType, typeof(Type))
+					),
+					parameterType
+				);
+			}
+			else if (parameterType != argumentType)
+			{
+				// Boxing / reference upcast. Expression.Call requires the argument
+				// expression type to be reference-assignable to the parameter type.
+				// A value type (decimal, bool, int, ...) is NOT reference-assignable
+				// to object/an interface without an explicit boxing conversion, so when
+				// a value-type argument lands on a parameter typed as object (e.g.
+				// AttributeOptions.Set(string, object)) we must emit it here; otherwise
+				// Expression.Call throws "Expression of type 'System.Decimal' cannot be
+				// used for parameter of type 'System.Object'". Interpreted mode never
+				// hits this because every runtime value is already boxed as object.
+				return Expression.Convert(argument, parameterType);
+			}
+
+			return argument;
+		}
+
+		// Un parametro es params (C# params T[]) si lleva ParamArrayAttribute. Siempre es el ultimo
+		// parametro y su tipo es un arreglo unidimensional.
+		internal static bool IsParamsParameter(ParameterInfo parameter)
+		{
+			if (parameter == null) throw new ArgumentNullException(nameof(parameter));
+			return parameter.IsDefined(typeof(ParamArrayAttribute), false) && parameter.ParameterType.IsArray;
 		}
 
 		internal static bool AreCompatible(Type argType, Type paramType)
@@ -242,6 +395,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (paramType == typeof(int))
 			{
 				compatible = argType == typeof(int);
+			}
+			else if (paramType == typeof(long))
+			{
+				compatible = argType == typeof(long) || argType == typeof(int);
 			}
 			else if (paramType == typeof(bool))
 			{

@@ -1,9 +1,11 @@
 using Puppeteer.EventSourcing.Interpreter;
 using Puppeteer.EventSourcing.Interpreter.Libraries;
+using Puppeteer.EventSourcing.Interpreter.Utils;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -15,19 +17,36 @@ namespace Puppeteer
 	public sealed class Parameters : IEnumerable<Parameter>
 	{
 		private readonly List<Parameter> parameters = new List<Parameter>();
-		private bool _hasUserParameter;
 		internal static readonly Parameters EMPTY = new Parameters();
+
+		// Lever 3 de la optimizacion de Now: referencia directa al slot del parametro de
+		// SISTEMA Now, cacheada en el primer SetNow. La forma de parametros es invariante
+		// por operacion (mismo script => mismos slots) y el pool por forma reusa la
+		// instancia sin purgar, asi que tras el primer SetNow la inyeccion de Now es O(1):
+		// sin la busqueda lineal por nombre ni el ImplicitCast del indexador object. El pool
+		// keyless (que SI purga toda la lista en Rent) resetea esta referencia en
+		// PurgeUserParameters para no dejarla colgando hacia un slot ya removido.
+		private Parameter nowSlot;
 
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif
 		public Parameters() { }
 
-		internal Parameters(string parameters)
+		// Resolver opcional de tipos no-primitivos (enums del dominio) al re-parsear la
+		// declaracion de parametros desde texto en el replay. Lo aporta ActorHandler
+		// (AddKnownActionFromDefine) que tiene las DomainLibraries del actor; cuando es
+		// null, ParameterType solo acepta primitivos (sin cambio de comportamiento).
+		private readonly EventSourcing.DomainLibraries typeResolver;
+
+		internal Parameters(string parameters) : this(parameters, null) { }
+
+		internal Parameters(string parameters, EventSourcing.DomainLibraries typeResolver)
 		{
 			ArgumentNullException.ThrowIfNull(parameters);
 			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
 
+			this.typeResolver = typeResolver;
 			int position = 0;
 			while (position < parameters.Length)
 			{
@@ -46,9 +65,8 @@ namespace Puppeteer
 					Blanks(parameters, ref position);
 
 					if (this.ContainsParameter(parameterName)) throw new LanguageException($"Parameter {parameterName} already exist");
-					Parameter parameter = new Parameter(parameterModifier, parameterName, parameterType, ParameterKind.User);
+					Parameter parameter = new Parameter(parameterModifier, parameterName, parameterType);
 					this.parameters.Add(parameter);
-					_hasUserParameter = true;
 					if (position >= parameters.Length || parameters[position] != ',') break;
 					position++;
 				}
@@ -65,10 +83,9 @@ namespace Puppeteer
 					var evalScript = EvalScript(parameters, ref position);
 					Blanks(parameters, ref position);
 					if (this.ContainsParameter(parameterName)) throw new LanguageException($"Parameter {parameterName} already exist");
-					Parameter parameter = new Parameter(parameterModifier, parameterName, parameterType, ParameterKind.User);
+					Parameter parameter = new Parameter(parameterModifier, parameterName, parameterType);
 					parameter.EvalScript = evalScript.ToString();
 					this.parameters.Add(parameter);
-					_hasUserParameter = true;
 					if (position >= parameters.Length || parameters[position] != ',') break;
 					position++;
 				}
@@ -162,14 +179,14 @@ namespace Puppeteer
 				ArgumentNullException.ThrowIfNullOrWhiteSpace(parameterName);
 				ArgumentNullException.ThrowIfNull(parameterType);
 
-				SetParameter(value, tipoDeParametro, parameterName, parameterType, ParameterKind.User);
+				SetParameter(value, tipoDeParametro, parameterName, parameterType);
 			}
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif
-		private void SetParameter(object value, int tipoDeParametro, string parameterName, Type parameterType, ParameterKind kind)
+		private void SetParameter(object value, int tipoDeParametro, string parameterName, Type parameterType)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(parameterName);
 			if (value == null && tipoDeParametro == Parameter.In)
@@ -184,7 +201,6 @@ namespace Puppeteer
 			}
 			if (tipoDeParametro < 0) throw new LanguageException("Parameter Type can not be negative");
 			ArgumentNullException.ThrowIfNull(parameterType);
-			if (kind < 0) throw new ArgumentOutOfRangeException(nameof(kind));
 			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
 
 			Parameter parameter = null;
@@ -198,13 +214,19 @@ namespace Puppeteer
 			}
 			if (parameter == null)
 			{
-				parameter = new Parameter(tipoDeParametro, parameterName, parameterType, kind);
+				parameter = new Parameter(tipoDeParametro, parameterName, parameterType);
 				parameters.Add(parameter);
-				if (kind == ParameterKind.User) _hasUserParameter = true;
 			}
 			else
 			{
-				if (parameter.ParameterType != parameterType)
+				// El slot ya existe (p.ej. una instancia Parameters reusada del pool por forma).
+				// parameter.ParameterType esta NORMALIZADO (array -> IEnumerable<elem>, Nullable<T> -> T)
+				// por el ctor de Parameter, pero el tipo entrante por el indexador es crudo. Hay que
+				// normalizarlo con el MISMO helper antes de comparar; de lo contrario un re-set de un
+				// @parametro de array (DateTime[], string[], ...) sobre el slot reusado dispararia el
+				// guard porque IEnumerable<DateTime> != DateTime[].
+				Type normalizedIncoming = Parameter.NormalizeParameterType(parameterType);
+				if (parameter.ParameterType != normalizedIncoming)
 				{
 					throw new LanguageException($"Parameter type can not be converted from {parameter.ParameterType.Name} to {parameterType.Name}");
 				}
@@ -234,14 +256,45 @@ namespace Puppeteer
 			}
 		}
 
+		// Playbill final refactor: tras eliminar la nocion de SystemParameter (Now/Ip/User),
+		// todo parametro es de usuario. Purga TODOS los parametros — el nombre se conserva
+		// para no romper los callsites en MatchTree / Pattern / Reaction / pool.Return.
 		internal void PurgeUserParameters()
 		{
-			for (int i = parameters.Count - 1; i >= 0; i--)
+			parameters.Clear();
+			nowSlot = null;
+		}
+
+		// Lever 3 de la optimizacion de Now: setter tipado para el parametro de SISTEMA Now.
+		// Now siempre es DateTime, por lo que se evita la ruta del indexador object
+		// (this[string,Type]) que hace busqueda lineal por nombre y luego ImplicitCast. El
+		// slot se localiza o crea una sola vez y se cachea en nowSlot; en operaciones que
+		// reusan la instancia del pool por forma, los SetNow siguientes son O(1). El unico
+		// box inevitable (DateTime -> el campo object de VariableSymbol, que tanto el
+		// interprete como el codegen leen) ocurre dentro de SetParsedScalar, igual que en el
+		// path del indexador original. Semanticamente equivale a `this["Now", typeof(DateTime)]
+		// = now` pero sin el overhead de busqueda + conversion.
+		internal void SetNow(DateTime now)
+		{
+			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
+
+			if (nowSlot == null)
 			{
-				if (parameters[i].Kind == ParameterKind.User)
-					parameters.RemoveAt(i);
+				foreach (Parameter parameter in parameters)
+				{
+					if (IsSystemNow(parameter))
+					{
+						nowSlot = parameter;
+						break;
+					}
+				}
+				if (nowSlot == null)
+				{
+					nowSlot = new Parameter(Parameter.In, SystemNowName, typeof(DateTime));
+					parameters.Add(nowSlot);
+				}
 			}
-			_hasUserParameter = false;
+			nowSlot.SetParsedScalar(now);
 		}
 
 		internal void Clear()
@@ -252,24 +305,13 @@ namespace Puppeteer
 			}
 		}
 
-		internal void ClearAndPurgeUserParameters()
-		{
-			for (int i = parameters.Count - 1; i >= 0; i--)
-			{
-				if (parameters[i].Kind == ParameterKind.User)
-					parameters.RemoveAt(i);
-				else
-					parameters[i].Clear();
-			}
-			_hasUserParameter = false;
-		}
-
 		// Phase 4 of the Action refactor: convert the canonical parameter declaration
-		// text (`name:type, name:type`) used in Define statements back to the legacy
-		// `In,name:type,In,name:type` format that the Parameters(string) constructor
-		// understands. Used by ActorHandler when populating the action cache from a
-		// Define journal entry during replay.
-		internal static string CanonicalDeclarationsToLegacyFormat(string canonicalText)
+		// text (`name:type, name:type`) used in Define statements into the
+		// modifier-prefixed `In,name:type,In,name:type` form that the Parameters(string)
+		// constructor parses (the same form ParametersAsString produces). Used by
+		// ActorHandler when populating the action cache from a Define journal entry
+		// during replay.
+		internal static string CanonicalDeclarationsToParametersString(string canonicalText)
 		{
 			if (string.IsNullOrEmpty(canonicalText)) return string.Empty;
 
@@ -295,13 +337,30 @@ namespace Puppeteer
 		// Define statement and are not emitted here. Type names are lowercase to match
 		// CanonicalTypeName in Parser.ParseDefineActionParameterList. Empty parameter
 		// set (no user parameters) returns the empty string.
+		// Now es un parametro de SISTEMA: el framework lo inyecta en cada Perform con el
+		// valor de OccurredAt (DateTime.Now en vivo, OccurredAt en replay). Se mantiene
+		// como parametro per-call — thread-safe y visible al pattern matching estatico como
+		// id.IsParameter == true — pero se EXCLUYE de la firma canonica del `define action`
+		// y del blob de argumentos del journal; en replay se re-inyecta desde OccurredAt. Es
+		// una distincion SystemParameter acotada a Now (Ip/User siguen fuera del journal via
+		// Playbill). Exclusion por nombre: el codebase ya reserva 'Now'/'User'/'Ip' por
+		// nombre (ReservedSeekNames, filtros de bindings en Reaction). La exclusion es
+		// SIMETRICA en ArgumentsAsString y LoadArguments para preservar la alineacion
+		// posicional de la serializacion.
+		internal const string SystemNowName = "Now";
+		internal static bool IsSystemNow(Parameter parameter)
+		{
+			return string.Equals(parameter.Name, SystemNowName, StringComparison.OrdinalIgnoreCase);
+		}
+
 		internal string UserParametersAsCanonicalText()
 		{
 			var sb = new StringBuilder();
 			bool first = true;
 			foreach (var parameter in parameters)
 			{
-				if (parameter.Kind != ParameterKind.User) continue;
+				if (IsSystemNow(parameter)) continue;
+
 				if (!first) sb.Append(", ");
 				first = false;
 
@@ -328,6 +387,10 @@ namespace Puppeteer
 			{
 				return CanonicalTypeName(type.GenericTypeArguments[0]) + "[]";
 			}
+			// Enum del dominio: se journaliza por NOMBRE del tipo (el replay lo resuelve via
+			// DomainLibraries en Parser.ParseTypeName / Parameters.ParameterType). El valor
+			// del miembro viaja por nombre en el blob de argumentos (legible, no ordinal).
+			if (type.IsEnum) return type.Name;
 			throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
 		}
 
@@ -337,30 +400,27 @@ namespace Puppeteer
 			bool esElprimero = true;
 			foreach (var parameter in parameters)
 			{
-				if (parameter.Kind == ParameterKind.User)
+				if (parameter.ParameterModifier != Parameter.Eval)
 				{
-					if (parameter.ParameterModifier != Parameter.Eval)
-					{
-						if (!esElprimero) sb.Append(',');
-						ParameterModifierAsString(parameter.ParameterModifier, sb);
-						sb.Append(',');
-						sb.Append(parameter.Name);
-						sb.Append(':');
-						WriteParameterType(parameter.ParameterType, sb);
-						esElprimero = false;
-					}
-					else
-					{
-						if (!esElprimero) sb.Append(',');
-						ParameterModifierAsString(parameter.ParameterModifier, sb);
-						sb.Append(',');
-						sb.Append(parameter.Name);
-						sb.Append(':');
-						WriteParameterType(parameter.ParameterType, sb);
-						sb.Append(':');
-						sb.Append(parameter.EvalScript);
-						esElprimero = false;
-					}
+					if (!esElprimero) sb.Append(',');
+					ParameterModifierAsString(parameter.ParameterModifier, sb);
+					sb.Append(',');
+					sb.Append(parameter.Name);
+					sb.Append(':');
+					WriteParameterType(parameter.ParameterType, sb);
+					esElprimero = false;
+				}
+				else
+				{
+					if (!esElprimero) sb.Append(',');
+					ParameterModifierAsString(parameter.ParameterModifier, sb);
+					sb.Append(',');
+					sb.Append(parameter.Name);
+					sb.Append(':');
+					WriteParameterType(parameter.ParameterType, sb);
+					sb.Append(':');
+					sb.Append(parameter.EvalScript);
+					esElprimero = false;
 				}
 			}
 			return sb.ToString();
@@ -423,6 +483,12 @@ namespace Puppeteer
 			else if (type == typeof(double))
 			{
 				sb.Append("double");
+			}
+			else if (type.IsEnum)
+			{
+				// Enum del dominio: por nombre de tipo (resuelto via DomainLibraries al
+				// re-parsear). Simetrico con CanonicalTypeName.
+				sb.Append(type.Name);
 			}
 			else
 			{
@@ -518,34 +584,92 @@ namespace Puppeteer
 
 		private Type ParameterType(string parameters, ref int position)
 		{
-			switch (parameters[position])
+			// Un identificador de tipo que coincide exactamente (case-insensitive) con un
+			// primitivo se procesa por la ruta primitiva (sin cambios). Si NO es primitivo,
+			// se intenta resolver como un enum del dominio via el typeResolver (DomainLibraries).
+			// Esto reconstruye un @parametro enum journalizado por nombre de tipo en el replay;
+			// si el resolver no esta disponible o el nombre no es un enum conocido, falla fuerte.
+			if (IsPrimitiveTypeKeyword(parameters, position))
 			{
-				case 's':
-				case 'S':
-					return StringType(parameters, ref position);
-				case 'i':
-				case 'I':
-					return IntType(parameters, ref position);
-				case 'b':
-				case 'B':
-					return BooleanType(parameters, ref position);
-				case 'd':
-				case 'D':
-					if (parameters[position + 1] == 'e' || parameters[position + 1] == 'E')
-					{
-						return DecimalType(parameters, ref position);
-					}
-					else if (parameters[position + 1] == 'a' || parameters[position + 1] == 'A')
-					{
-						return DateTimeType(parameters, ref position);
-					}
-					else if (parameters[position + 1] == 'o' || parameters[position + 1] == 'O')
-					{
-						return DoubleType(parameters, ref position);
-					}
-					break;
+				switch (parameters[position])
+				{
+					case 's':
+					case 'S':
+						return StringType(parameters, ref position);
+					case 'i':
+					case 'I':
+						return IntType(parameters, ref position);
+					case 'b':
+					case 'B':
+						return BooleanType(parameters, ref position);
+					case 'd':
+					case 'D':
+						if (parameters[position + 1] == 'e' || parameters[position + 1] == 'E')
+						{
+							return DecimalType(parameters, ref position);
+						}
+						else if (parameters[position + 1] == 'a' || parameters[position + 1] == 'A')
+						{
+							return DateTimeType(parameters, ref position);
+						}
+						else if (parameters[position + 1] == 'o' || parameters[position + 1] == 'O')
+						{
+							return DoubleType(parameters, ref position);
+						}
+						break;
+				}
 			}
-			throw new LanguageException($"Unexpected type {parameters.Substring(position)}");
+
+			return EnumParameterType(parameters, ref position);
+		}
+
+		// True si el token de tipo en `position` es exactamente uno de los 6 primitivos
+		// (int/string/bool/datetime/decimal/double), case-insensitive. El token se delimita
+		// por el primer caracter no alfanumerico (':' separa nombre:tipo; '[' inicia el sufijo
+		// de arreglo; ',' separa parametros). Solo en ese caso se usa la ruta primitiva.
+		private static bool IsPrimitiveTypeKeyword(string parameters, int position)
+		{
+			int end = position;
+			while (end < parameters.Length)
+			{
+				char c = parameters[end];
+				if (char.IsLetterOrDigit(c) || c == '_') end++;
+				else break;
+			}
+			ReadOnlySpan<char> token = parameters.AsSpan(position, end - position);
+			return token.Equals("int".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("string".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("bool".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("datetime".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("decimal".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("double".AsSpan(), StringComparison.OrdinalIgnoreCase);
+		}
+
+		// Resuelve un enum del dominio a partir de su nombre de tipo (lo journaliza
+		// CanonicalTypeName / WriteSingleParameterType). El valor del miembro se reconstruye
+		// en ArgumentsValue via Enum.Parse. Soporta el sufijo de arreglo `[]` por simetria.
+		private Type EnumParameterType(string parameters, ref int position)
+		{
+			int start = position;
+			while (position < parameters.Length)
+			{
+				char c = parameters[position];
+				if (char.IsLetterOrDigit(c) || c == '_') position++;
+				else break;
+			}
+			if (start == position) throw new LanguageException($"Unexpected type {parameters.Substring(start)}");
+			string typeName = parameters.Substring(start, position - start);
+
+			if (typeResolver == null || !typeResolver.TryGetType(typeName, out Type resolved) || !resolved.IsEnum)
+			{
+				throw new LanguageException($"Type '{typeName}' is not a valid primitive or known domain enum.");
+			}
+
+			if (IsArray(parameters, ref position))
+			{
+				return resolved.MakeArrayType();
+			}
+			return resolved;
 		}
 
 		private bool IsArray(string parameters, ref int position)
@@ -743,25 +867,26 @@ namespace Puppeteer
 			bool esElprimero = true;
 			foreach (var parameter in parameters)
 			{
-				if (parameter.Kind == ParameterKind.User)
-				{
-					if (!esElprimero) sb.Append(',');
-					Type parameterType = parameter.ParameterType;
-					if (parameterType.IsGenericType || parameterType.IsArray)
-					{
+				// System Now: excluido del blob de argumentos del journal (simetrico con
+				// LoadArguments). En replay Now se re-inyecta desde OccurredAt.
+				if (IsSystemNow(parameter)) continue;
 
-						WriteSingleValueCollection(parameter, sb, databaseType);
-					}
-					else if (parameter.ParameterModifier == Parameter.Out)
-					{
-						sb.Append('?');
-					}
-					else
-					{
-						WriteSingleValuePrimitive(parameter, sb, databaseType);
-					}
-					esElprimero = false;
+				if (!esElprimero) sb.Append(',');
+				Type parameterType = parameter.ParameterType;
+				if (parameterType.IsGenericType || parameterType.IsArray)
+				{
+
+					WriteSingleValueCollection(parameter, sb, databaseType);
 				}
+				else if (parameter.ParameterModifier == Parameter.Out)
+				{
+					sb.Append('?');
+				}
+				else
+				{
+					WriteSingleValuePrimitive(parameter, sb, databaseType);
+				}
+				esElprimero = false;
 			}
 			return sb.ToString();
 		}
@@ -774,36 +899,36 @@ namespace Puppeteer
 			for (int p = 0; p < parameters.Count; p++)
 			{
 				var parameter = parameters[p];
-				if (parameter.Kind == ParameterKind.User)
+				// System Now: excluido del blob (simetrico con ArgumentsAsString). No
+				// consume del string; su valor se re-inyecta desde OccurredAt en replay.
+				if (IsSystemNow(parameter)) continue;
+				Blanks(agumentsAsString, ref position);
+				if (parameter.ParameterModifier == Parameter.Out)
 				{
-					Blanks(agumentsAsString, ref position);
-					if (parameter.ParameterModifier == Parameter.Out)
-					{
-						if (agumentsAsString[position] != '?') throw new LanguageException("Parameter definition is not valid");
-						position++;
+					if (agumentsAsString[position] != '?') throw new LanguageException("Parameter definition is not valid");
+					position++;
 
-						object dummyValue = DefaultValueForType(parameter.ParameterType);
-						if (dummyValue != null)
-						{
-							this[parameter.ParameterModifier, parameter.Name, parameter.ParameterType] = dummyValue;
-						}
-					}
-					else if (parameter.ParameterType.IsGenericType || parameter.ParameterType.IsArray)
+					object dummyValue = DefaultValueForType(parameter.ParameterType);
+					if (dummyValue != null)
 					{
-						ArgumentsValueCollection(parameter, agumentsAsString, ref position);
+						this[parameter.ParameterModifier, parameter.Name, parameter.ParameterType] = dummyValue;
 					}
+				}
+				else if (parameter.ParameterType.IsGenericType || parameter.ParameterType.IsArray)
+				{
+					ArgumentsValueCollection(parameter, agumentsAsString, ref position);
+				}
+				else
+				{
+					ArgumentsValue(parameter, agumentsAsString, ref position);
+				}
+				Blanks(agumentsAsString, ref position);
+				if (position < agumentsAsString.Length && p != (parameters.Count - 1))
+				{
+					if (agumentsAsString[position] == ',')
+						position++;
 					else
-					{
-						ArgumentsValue(parameter, agumentsAsString, ref position);
-					}
-					Blanks(agumentsAsString, ref position);
-					if (position < agumentsAsString.Length && p != (parameters.Count - 1))
-					{
-						if (agumentsAsString[position] == ',')
-							position++;
-						else
-							throw new LanguageException("Parameter definition is not valid");
-					}
+						throw new LanguageException("Parameter definition is not valid");
 				}
 			}
 			if (position != agumentsAsString.Length) throw new LanguageException("Parameter definition is not valid");
@@ -811,11 +936,13 @@ namespace Puppeteer
 
 		private static object DefaultValueForType(Type type)
 		{
-			if (type == typeof(int)) return default(int);
-			if (type == typeof(bool)) return default(bool);
-			if (type == typeof(DateTime)) return default(DateTime);
-			if (type == typeof(decimal)) return default(decimal);
-			if (type == typeof(double)) return default(double);
+			// Mejora A: defaults de parametros Out servidos desde BoxCache (singletons),
+			// en vez de boxear un default(T) nuevo en cada LoadArguments.
+			if (type == typeof(int)) return BoxCache.IntZero;
+			if (type == typeof(bool)) return BoxCache.False;
+			if (type == typeof(DateTime)) return BoxCache.DateTimeDefault;
+			if (type == typeof(decimal)) return BoxCache.DecimalDefault;
+			if (type == typeof(double)) return BoxCache.DoubleDefault;
 			if (type == typeof(string)) return "";
 			return null;
 		}
@@ -870,12 +997,12 @@ namespace Puppeteer
 			{
 				if (agumentsAsString[position] == ',')
 				{
-					list.Add(int.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(int.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					startPosition = position + 1;
 				}
 				else if (agumentsAsString[position] == '}')
 				{
-					list.Add(int.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(int.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					position++;
 					break;
 				}
@@ -981,12 +1108,12 @@ namespace Puppeteer
 			{
 				if (agumentsAsString[position] == ',')
 				{
-					list.Add(decimal.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(decimal.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					startPosition = position + 1;
 				}
 				else if (agumentsAsString[position] == '}')
 				{
-					list.Add(decimal.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(decimal.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					position++;
 					break;
 				}
@@ -1016,12 +1143,12 @@ namespace Puppeteer
 			{
 				if (agumentsAsString[position] == ',')
 				{
-					list.Add(double.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(double.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					startPosition = position + 1;
 				}
 				else if (agumentsAsString[position] == '}')
 				{
-					list.Add(double.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(double.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					position++;
 					break;
 				}
@@ -1051,12 +1178,12 @@ namespace Puppeteer
 			{
 				if (agumentsAsString[position] == ',')
 				{
-					list.Add(DateTime.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(DateTime.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					startPosition = position + 1;
 				}
 				else if (agumentsAsString[position] == '}')
 				{
-					list.Add(DateTime.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition)));
+					list.Add(DateTime.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
 					position++;
 					break;
 				}
@@ -1075,29 +1202,38 @@ namespace Puppeteer
 
 			int startPosition = position;
 
+			// Mejora B: SetParsedScalar evita ImplicitCast (el valor ya viene con el tipo
+			// exacto). Mejora A: int/bool toman el box de BoxCache cuando es cacheable.
 			if (parameterType == typeof(string))
 			{
-				parameter.Value = ValueString(agumentsAsString, ref position).ToString();
+				parameter.SetParsedScalar(ValueString(agumentsAsString, ref position).ToString());
 			}
 			else if (parameterType == typeof(int))
 			{
-				parameter.Value = int.Parse(Value(agumentsAsString, ref position));
+				parameter.SetParsedScalar(BoxCache.Box(int.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture)));
 			}
 			else if (parameterType == typeof(bool))
 			{
-				parameter.Value = bool.Parse(Value(agumentsAsString, ref position));
+				parameter.SetParsedScalar(BoxCache.Box(bool.Parse(Value(agumentsAsString, ref position))));
 			}
 			else if (parameterType == typeof(DateTime))
 			{
-				parameter.Value = DateTime.Parse(Value(agumentsAsString, ref position));
+				parameter.SetParsedScalar(DateTime.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture));
 			}
 			else if (parameterType == typeof(decimal))
 			{
-				parameter.Value = Decimal.Parse(Value(agumentsAsString, ref position));
+				parameter.SetParsedScalar(Decimal.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture));
 			}
 			else if (parameterType == typeof(double))
 			{
-				parameter.Value = Double.Parse(Value(agumentsAsString, ref position));
+				parameter.SetParsedScalar(Double.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture));
+			}
+			else if (parameterType.IsEnum)
+			{
+				// El valor del enum se journaliza por NOMBRE de miembro (WriteSingleValuePrimitive);
+				// se reconstruye con Enum.Parse. ignoreCase para ser tolerante igual que el binding
+				// de enums en el resto del motor.
+				parameter.SetParsedScalar(Enum.Parse(parameterType, Value(agumentsAsString, ref position).ToString(), ignoreCase: true));
 			}
 			else
 			{
@@ -1259,10 +1395,23 @@ namespace Puppeteer
 			{
 				Append((double)parameter.GetValue(), sb);
 			}
+			else if (parameterType.IsEnum)
+			{
+				AppendEnum(parameterType, parameter.GetValue(), sb);
+			}
 			else
 			{
 				throw new LanguageException("type no valido");
 			}
+		}
+
+		// Journaliza un valor de enum por su NOMBRE de miembro (simbolico y legible: 'FL', no
+		// su ordinal), comma-free para no romper el blob separado por comas. Un valor sin
+		// miembro nombrado (combinacion no definida) cae al ordinal en formato "D", que sigue
+		// siendo comma-free y round-trip via Enum.Parse.
+		private void AppendEnum(Type enumType, object value, StringBuilder sb)
+		{
+			sb.Append(Enum.GetName(enumType, value) ?? Enum.Format(enumType, value, "D"));
 		}
 
 		private void Append(double[] values, StringBuilder sb)
@@ -1272,7 +1421,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value);
+				sb.Append(value.ToString(CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1286,9 +1435,9 @@ namespace Puppeteer
 			{
 				if (!esElPrimero) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
-					sb.Append(value.ToString("MM/dd/yyyy"));
+					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
-					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
+					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1301,7 +1450,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value.ToString("0.######################"));
+				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1353,7 +1502,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value);
+				sb.Append(value.ToString(CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1367,9 +1516,9 @@ namespace Puppeteer
 			{
 				if (!esElPrimero) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
-					sb.Append(value.ToString("MM/dd/yyyy"));
+					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
-					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
+					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1382,7 +1531,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value.ToString("0.######################"));
+				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1434,7 +1583,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value);
+				sb.Append(value.ToString(CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1448,9 +1597,9 @@ namespace Puppeteer
 			{
 				if (!esElPrimero) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
-					sb.Append(value.ToString("MM/dd/yyyy"));
+					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
-					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
+					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1463,7 +1612,7 @@ namespace Puppeteer
 			foreach (var value in values)
 			{
 				if (!esElPrimero) sb.Append(',');
-				sb.Append(value.ToString("0.######################"));
+				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
 				esElPrimero = false;
 			}
 			sb.Append('}');
@@ -1510,20 +1659,20 @@ namespace Puppeteer
 
 		private void Append(double value, StringBuilder sb)
 		{
-			sb.Append(value);
+			sb.Append(value.ToString(CultureInfo.InvariantCulture));
 		}
 
 		private void Append(decimal value, StringBuilder sb)
 		{
-			sb.Append(value.ToString("0.######################"));
+			sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
 		}
 
 		private void Append(DateTime value, StringBuilder sb)
 		{
 			if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
-				sb.Append(value.ToString("MM/dd/yyyy"));
+				sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 			else
-				sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
+				sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
 		}
 
 		private void Append(bool value, StringBuilder sb)
@@ -1541,25 +1690,11 @@ namespace Puppeteer
 			LiteralString.Write(sb, value, databaseType);
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
-		public void SystemParameter<T>(string parameterName, T value)
-		{
-			ArgumentNullException.ThrowIfNull(parameters);
-			ArgumentNullException.ThrowIfNull(parameterName);
-			if (value != null && !(value is T))
-				throw new ArgumentException($"Value is not of type {typeof(T).FullName}");
-
-			SetParameter(value, Parameter.In, parameterName, typeof(T), ParameterKind.System);
-		}
-
-		// Paper 5 Lab 1: public counterpart to SystemParameter so the V2 fluent API
-		// can declare USER parameters. Triggers the JournalEntry.IsNewAction /
-		// IsExistingAction persistence path (compact ActionEventData entries), as
-		// opposed to System parameters which always route to IsScript (literal
-		// script with substituted canonical body). Lab-policy visibility bump —
-		// the live indexer that took this role was internal-only.
+		// Paper 5 Lab 1: public entrypoint so the V2 fluent API can declare USER
+		// parameters from C#. Triggers the JournalEntry.IsNewAction /
+		// IsExistingAction persistence path (compact ActionEventData entries).
+		// Lab-policy visibility bump — the live indexer that took this role was
+		// internal-only.
 		public void UserParameter<T>(string parameterName, T value)
 		{
 			ArgumentNullException.ThrowIfNull(parameters);
@@ -1567,18 +1702,40 @@ namespace Puppeteer
 			if (value != null && !(value is T))
 				throw new ArgumentException($"Value is not of type {typeof(T).FullName}");
 
-			SetParameter(value, Parameter.In, parameterName, typeof(T), ParameterKind.User);
+			// Mejora (d): de-box int/bool via BoxCache antes de cruzar a object, evitando
+			// un box nuevo por llamada en el path de preparacion. Otros T boxean normal.
+			SetParameter(BoxCache.Box(value), Parameter.In, parameterName, typeof(T));
 		}
 
-		internal bool HasUserParameter()
+		// Playbill final refactor: tras eliminar SystemParameter (Ip/User fuera del
+		// journal en Fase 1; Now convertido en parametro de usuario explicito en
+		// Fase 4.5+), todo parametro presente cuenta como "usuario". Antes se
+		// excluia "Now" de este conteo via _hasUserParameter; ya no aplica.
+		internal bool HasAnyParameter()
 		{
-			return _hasUserParameter;
+			return parameters.Count > 0;
+		}
+
+		// Cuenta solo parametros de USUARIO (excluye el Now de sistema). La clasificacion
+		// IsScript/IsNewAction debe basarse en esto: el framework inyecta Now en cada
+		// Perform, y en el flujo check-then-command la Fase 1 (PerformChk) ya pudo haberlo
+		// inyectado en el mismo Parameters antes de que la Fase 2 decida; sin esta
+		// exclusion un comando sin parametros de usuario se clasificaria erroneamente como
+		// Action por la sola presencia de Now.
+		internal bool HasAnyUserParameter()
+		{
+			foreach (var parameter in parameters)
+			{
+				if (IsSystemNow(parameter)) continue;
+				return true;
+			}
+			return false;
 		}
 
 		public string SerializeForTransport(DatabaseType databaseType)
 		{
 			if (databaseType < 0) throw new ArgumentOutOfRangeException(nameof(databaseType));
-			if (!HasUserParameter()) return string.Empty;
+			if (!HasAnyParameter()) return string.Empty;
 
 			var declarations = ParametersAsString();
 			var arguments = ArgumentsAsString(databaseType);
@@ -1612,52 +1769,22 @@ namespace Puppeteer
 		{
 			if (other == null) return false;
 
-			int thisUserParamCount = 0;
-			int otherUserParamCount = 0;
-
-			foreach (var p in this.parameters)
-				if (p.Kind == ParameterKind.User) thisUserParamCount++;
-
-			foreach (var p in other.parameters)
-				if (p.Kind == ParameterKind.User) otherUserParamCount++;
-
-			if (thisUserParamCount != otherUserParamCount)
+			if (this.parameters.Count != other.parameters.Count)
 				return false;
 
-			int index = 0;
-			foreach (var thisParam in this.parameters)
+			for (int i = 0; i < this.parameters.Count; i++)
 			{
-				if (thisParam.Kind == ParameterKind.User)
-				{
-					Parameter otherParam = null;
-					int otherIndex = 0;
-					foreach (var p in other.parameters)
-					{
-						if (p.Kind == ParameterKind.User)
-						{
-							if (otherIndex == index)
-							{
-								otherParam = p;
-								break;
-							}
-							otherIndex++;
-						}
-					}
+				var thisParam = this.parameters[i];
+				var otherParam = other.parameters[i];
 
-					if (otherParam == null)
-						return false;
+				if (!string.Equals(thisParam.Name, otherParam.Name, StringComparison.OrdinalIgnoreCase))
+					return false;
 
-					if (!string.Equals(thisParam.Name, otherParam.Name, StringComparison.OrdinalIgnoreCase))
-						return false;
+				if (thisParam.ParameterType != otherParam.ParameterType)
+					return false;
 
-					if (thisParam.ParameterType != otherParam.ParameterType)
-						return false;
-
-					if (thisParam.ParameterModifier != otherParam.ParameterModifier)
-						return false;
-
-					index++;
-				}
+				if (thisParam.ParameterModifier != otherParam.ParameterModifier)
+					return false;
 			}
 
 			return true;

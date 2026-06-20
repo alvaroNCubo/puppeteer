@@ -675,6 +675,24 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
+	// Argumento que es a su vez una llamada-con-receiver: foo([_:Clase2].goo($x)).
+	// Envuelve el ExpressionNode de la llamada (InstanceAccessNode / TypeAccessNode).
+	// El matcher lo casa contra las ScriptMethodCalls registradas (no contra el valor
+	// placeholder del argumento, que es desconocido por ser estatico): "existe esa
+	// llamada-con-receiver", capturando sus $vars internos. No verifica el enlace
+	// exacto resultado->argumento (azucar sobre obligacion plana).
+	internal class NestedCallParameterNode : ParameterNode
+	{
+		internal ExpressionNode Call { get; }
+
+		internal NestedCallParameterNode(ExpressionNode call)
+		{
+			ArgumentNullException.ThrowIfNull(call);
+
+			Call = call;
+		}
+	}
+
 	// Operators supported by guard clauses.
 	internal enum GuardOperator
 	{

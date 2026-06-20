@@ -126,7 +126,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				}
 				catch (Exception ex)
 				{
-					Loggers.GetIntance().Db.Error($"ReplicationAgent error: {ex.Message}", ex);
+					remoteStore.Logger.Error($"ReplicationAgent error: {ex.Message}", ex);
 					System.Threading.Interlocked.Increment(ref _replicationFailureCount);
 					_lastReplicationError = ex.Message;
 					Thread.Sleep(RETRY_DELAY_MS);
@@ -171,20 +171,20 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			if (peekedType == EventRecordType.Define)
 			{
 				bool okDef = BinaryEventCodec.TryDecodeDefine(body, bodyLength,
-					out _, out DateTime defineOccurredAt, out string defineIp, out string defineUser,
+					out _, out DateTime defineOccurredAt,
 					out int defineActionId, out string defineStatementText, out _,
 					PayloadCompression.None, EncryptionMode.None, null);
 
 				if (okDef)
 				{
-					remoteStore.WriteDefineEntry(defineActionId, defineStatementText, entryId, defineIp, defineUser, defineOccurredAt);
+					remoteStore.WriteDefineEntry(defineActionId, defineStatementText, entryId, defineOccurredAt);
 				}
 				return;
 			}
 
 			bool decoded = BinaryEventCodec.TryDecode(body, bodyLength,
 				out EventRecordType eventType, out long decodedEntryId,
-				out DateTime occurredAt, out string ip, out string user,
+				out DateTime occurredAt,
 				out string scriptOrArguments, out int actionId,
 				PayloadCompression.None, EncryptionMode.None, null);
 
@@ -192,11 +192,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 			if (eventType == EventRecordType.Script)
 			{
-				remoteStore.WriteScriptEntry(entryId, scriptOrArguments, ip, user, occurredAt);
+				remoteStore.WriteScriptEntry(entryId, scriptOrArguments, occurredAt);
 			}
 			else
 			{
-				remoteStore.WriteInvocationEntry(actionId, entryId, ip, user, occurredAt, scriptOrArguments);
+				remoteStore.WriteInvocationEntry(actionId, entryId, occurredAt, scriptOrArguments);
 			}
 		}
 
@@ -217,7 +217,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 			catch (Exception ex)
 			{
-				Loggers.GetIntance().Db.Error($"ReplicationAgent flush error: {ex.Message}", ex);
+				remoteStore.Logger.Error($"ReplicationAgent flush error: {ex.Message}", ex);
 			}
 		}
 

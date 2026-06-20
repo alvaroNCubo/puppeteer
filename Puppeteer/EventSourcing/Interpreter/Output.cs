@@ -1,27 +1,38 @@
+using Puppeteer.EventSourcing.Interpreter.Formatters;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Threading;
 
 namespace Puppeteer.EventSourcing.Interpreter
 {
-
+	/// <summary>
+	/// Shim around an <see cref="IOutputFormatter"/> that preserves the legacy
+	/// Output API the interpreter and reflection-Expression code paths bind
+	/// to. All byte-emission lives in the formatter; this class only:
+	/// holds the sink, EWI accumulator, and the active formatter instance;
+	/// delegates each method to the formatter; preserves the legacy
+	/// "{}" → "" collapse in <see cref="ToString"/>; and gates everything on
+	/// <see cref="escribirSalida"/> (the no-output / rehydrating mode).
+	///
+	/// <para>
+	/// The 25+ typed <c>Append(ReadOnlySpan&lt;char&gt;, T)</c> overloads MUST
+	/// keep their exact signatures: <c>OutputStatementBase</c> caches them by
+	/// reflection at type-load time and the compiled Expression tree binds
+	/// directly to them.
+	/// </para>
+	/// </summary>
 	internal class Output
 	{
 		private readonly bool escribirSalida = true;
-		private bool enUnFor = false;
-		private bool necesitaComa = false;
-		private StringBuilder output;
-		private Stack<StringBuilder> outputLevels;
-		private Stack<bool> nivelesEnUnFor;
-		private Stack<bool> nivelesNecesitaComa;
+		private StringBuilder sink;
+		private IOutputFormatter formatter;
 		private List<Tuple<string, string>> ewis;
 
 		private static readonly CultureInfo USculture = new CultureInfo("en-US");
+
+		private static readonly IOutputFormatter DefaultPrototype = new JsonFormatter();
 
 		private Output(bool conSalida)
 		{
@@ -32,11 +43,35 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 			if (escribirSalida)
 			{
-				output = new StringBuilder().Append('{');
+				sink = new StringBuilder();
 				ewis = new List<Tuple<string, string>>();
+				formatter = new JsonFormatter();
+				formatter.BeginDocument(sink);
 			}
-			enUnFor = false;
-			necesitaComa = false;
+		}
+
+		/// <summary>
+		/// Install the matching formatter for the given prototype, reusing
+		/// the existing instance if the type already matches (Reset) or
+		/// swapping to a fresh instance via prototype.CreateNew(). Always
+		/// re-initializes the sink with formatter.BeginDocument. Called by
+		/// the ExecutionOutput pool on Rent.
+		/// </summary>
+		internal void InstallFormatter(IOutputFormatter prototype)
+		{
+			if (!escribirSalida) return;
+			var actualPrototype = prototype ?? DefaultPrototype;
+			if (formatter == null || formatter.GetType() != actualPrototype.GetType())
+			{
+				formatter = actualPrototype.CreateNew();
+			}
+			else
+			{
+				formatter.Reset();
+			}
+			sink.Clear();
+			formatter.BeginDocument(sink);
+			ewis.Clear();
 		}
 
 		// Per-thread pool. The previous shared ConcurrentStack<Output> design
@@ -88,12 +123,19 @@ namespace Puppeteer.EventSourcing.Interpreter
 		internal static Output RentWithOutput()
 		{
 			var result = _conSalidaPool.Rent();
+			// Install the active formatter (if any) — mirrors ExecutionOutputPool.Rent.
+			// The compiled-mode path (Program.ExecuteExpression) rents an Output
+			// directly (no ExecutionOutput wrapper), so without this call the
+			// FormatterContext push from StageV2.PerformQry / PerformCmd would not
+			// reach the renderer and output would always fall back to default JSON.
+			result.InstallFormatter(Formatters.FormatterContext.Active);
 			return result;
 		}
 
 		internal static Output RentWithoutOutput()
 		{
 			var result = _sinSalidaPool.Rent();
+			result.InstallFormatter(Formatters.FormatterContext.Active);
 			return result;
 		}
 
@@ -109,391 +151,68 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		private void InitializeFreshState()
-		{
-			output.Clear();
-			output.Append('{');
-			enUnFor = false;
-			necesitaComa = false;
-		}
+		// ── Document lifecycle ─────────────────────────────────────────────
 
 		internal void Clear()
 		{
-			output?.Clear();
-			output?.Append('{');
-			enUnFor = false;
-			necesitaComa = false;
-			outputLevels?.Clear();
-			nivelesEnUnFor?.Clear();
-			nivelesNecesitaComa?.Clear();
-			ewis?.Clear();
+			if (escribirSalida)
+			{
+				formatter.Reset();
+				sink.Clear();
+				formatter.BeginDocument(sink);
+				ewis.Clear();
+			}
 		}
 
 		internal void Finish()
 		{
 			if (escribirSalida)
 			{
-				AppendEWIs();
-				output.Append('}');
+				// EWIs go inside the document, before EndDocument.
+				if (ewis.Count > 0)
+				{
+					formatter.BeginEwis();
+					foreach (var ewi in ewis)
+					{
+						formatter.Ewi(ewi.Item1, ewi.Item2);
+					}
+					formatter.EndEwis();
+				}
+				formatter.EndDocument();
 			}
 		}
 
-		private void PushState()
-		{
-			if (outputLevels == null)
-			{
-				outputLevels = new Stack<StringBuilder>();
-				nivelesEnUnFor = new Stack<bool>();
-				nivelesNecesitaComa = new Stack<bool>();
-			}
-			var newSalida = new StringBuilder();
-			newSalida.Append(output);
-
-			outputLevels.Push(newSalida);
-			nivelesEnUnFor.Push(enUnFor);
-			nivelesNecesitaComa.Push(necesitaComa);
-		}
-
-		private void PopState()
-		{
-			output = outputLevels.Pop();
-			enUnFor = nivelesEnUnFor.Pop();
-			necesitaComa = nivelesNecesitaComa.Pop();
-		}
+		// ── Collection (for-block) ─────────────────────────────────────────
 
 		internal void OpenFor()
 		{
-			if (escribirSalida)
-			{
-				PushState();
-				InitializeFreshState();
-			}
+			if (escribirSalida) formatter.BeginCollection();
 		}
 
 		internal void CloseFor(string alias)
 		{
-			if (escribirSalida)
-			{
-				if (!Vacio())
-				{
-					StringBuilder salidaAnterior = output;
-					PopState();
-					if (escribirSalida) WritePair(alias, salidaAnterior);
-				}
-				else
-				{
-					PopState();
-				}
-			}
+			if (escribirSalida) formatter.EndCollection(alias.AsSpan());
 		}
 
 		internal void BeginForMoveNext()
 		{
-			enUnFor = true;
-			if (escribirSalida)
-			{
-				if (!Vacio())
-				{
-					output.Append(',').Append('{');
-				}
-				necesitaComa = false;
-			}
+			if (escribirSalida) formatter.BeginCollectionItem();
 		}
 
 		internal void EndForMoveNext()
 		{
-			if (escribirSalida)
-			{
-				if (!Vacio())
-				{
-					bool elCuerpoDelFORNoHizoSalidaEnEstaIteracion = output[output.Length - 2] == ',' && output[output.Length - 1] == '{';
-					if (elCuerpoDelFORNoHizoSalidaEnEstaIteracion)
-					{
-						output.Remove(output.Length - 2, 2);
-					}
-					else
-					{
-						output.Append('}');
-					}
-				}
-			}
-			enUnFor = false;
+			if (escribirSalida) formatter.EndCollectionItem();
 		}
 
-		internal bool IsWriting
-		{
-			get
-			{
-				return escribirSalida;
-			}
-		}
+		// ── Document introspection ─────────────────────────────────────────
 
-		internal StringBuilder Salidas
-		{
-			get
-			{
-				return output;
-			}
-		}
+		internal bool IsWriting => escribirSalida;
 
-		internal bool Vacio()
-		{
-			bool result = output.Length == 1;
-			return result;
-		}
+		internal StringBuilder Salidas => sink;
 
-		internal void Append(ReadOnlySpan<char> alias, bool value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append(value ? "true" : "false");
-			}
-			necesitaComa = true;
-		}
+		internal bool Vacio() => escribirSalida && formatter.IsDocumentEmpty;
 
-		internal void Append(ReadOnlySpan<char> alias, string value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				if (value == null)
-				{
-					output.Append("null");
-				}
-				else
-				{
-					output.Append('"');
-					EscapeString(value == null ? "null" : value);
-					output.Append('"');
-				}
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, int value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append(value);
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, double value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-
-				var valorStr = value.ToString("0.######################");
-				output.Append(valorStr);
-				if (valorStr.IndexOf('.') == -1) output.Append(".0");
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, long value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append(value);
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, DateTime value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('"');
-				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
-					output.Append(value.ToString("MM/dd/yyyy"));
-				else
-					output.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
-
-				output.Append('"');
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, decimal value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				var valorStr = value.ToString("0.######################");// value.ToString();
-				output.Append(valorStr);
-				if (valorStr.IndexOf('.') == -1) output.Append(".0");
-			}
-			necesitaComa = true;
-		}
-
-		internal void Append(ReadOnlySpan<char> alias, object values)
-		{
-			if (!escribirSalida) return;
-
-			if (values == null)
-			{
-				this.Append(alias, (string)values);
-				return;
-			}
-
-			var type = values.GetType();
-			if (type == typeof(int))
-			{
-				this.Append(alias, (int)values);
-			}
-			else if (type == typeof(string))
-			{
-				this.Append(alias, (string)values);
-			}
-			else if (type == typeof(double))
-			{
-				this.Append(alias, (double)values);
-			}
-			else if (type == typeof(decimal))
-			{
-				this.Append(alias, (decimal)values);
-			}
-			else if (type == typeof(DateTime))
-			{
-				this.Append(alias, (DateTime)values);
-			}
-			else if (type == typeof(bool))
-			{
-				this.Append(alias, (bool)values);
-			}
-			else if (type.IsEnum)
-			{
-				this.Append(alias, values.ToString());
-			}
-			else if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
-			{
-				Type elementType = type.GetGenericArguments()[0];
-				if (elementType == typeof(int))
-				{
-					this.AppendPrivate(alias, (IEnumerable<int>)values);
-				}
-				else if (elementType == typeof(string))
-				{
-					this.AppendPrivate(alias, (IEnumerable<string>)values);
-				}
-				else if (elementType == typeof(double))
-				{
-					this.AppendPrivate(alias, (IEnumerable<double>)values);
-				}
-				else if (elementType == typeof(DateTime))
-				{
-					this.AppendPrivate(alias, (IEnumerable<DateTime>)values);
-				}
-				else if (elementType == typeof(bool))
-				{
-					this.AppendPrivate(alias, (IEnumerable<bool>)values);
-				}
-				else
-				{
-					this.AppendPrivate(alias, (IEnumerable<object>)values);
-				}
-			}
-			else if (type.IsArray)
-			{
-				Type elementType = type.GetElementType();
-				if (elementType == typeof(int))
-				{
-					this.AppendPrivate(alias, (IEnumerable<int>)values);
-				}
-				else if (elementType == typeof(string))
-				{
-					this.AppendPrivate(alias, (IEnumerable<string>)values);
-				}
-				else if (elementType == typeof(double))
-				{
-					this.AppendPrivate(alias, (IEnumerable<double>)values);
-				}
-				else if (elementType == typeof(DateTime))
-				{
-					this.AppendPrivate(alias, (IEnumerable<DateTime>)values);
-				}
-				else if (elementType == typeof(bool))
-				{
-					this.AppendPrivate(alias, (IEnumerable<bool>)values);
-				}
-				else
-				{
-					this.AppendPrivate(alias, (IEnumerable<object>)values);
-				}
-			}
-			else
-			{
-				if (escribirSalida)
-				{
-					MethodInfo posiblePrint = values.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-					if (posiblePrint != null)
-					{
-						StringBuilder outputTemp = new StringBuilder();
-						posiblePrint.Invoke(values, new object[] { outputTemp });
-						WritePairExp(alias, outputTemp.ToString());
-					}
-					else
-					{
-						WritePairExp(alias, values);
-					}
-				}
-			}
-		}
+		// ── EWIs (held in Output; formatter renders them) ──────────────────
 
 		internal bool HasEWIS()
 		{
@@ -505,528 +224,169 @@ namespace Puppeteer.EventSourcing.Interpreter
 			if (escribirSalida) ewis.Add(new Tuple<string, string>(type, value));
 		}
 
-		internal void AppendEWI(string alias, string value)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(",");
-				}
-				output.Append('{');
-				output.Append('"');
-				WriteAlias(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('"');
-				EscapeString(value);
-				output.Append('"');
-			}
-			necesitaComa = true;
-		}
-		internal void Append(ReadOnlySpan<char> alias, object[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<object> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<object> values) => this.AppendPrivate(alias, values);
+		// ── Typed Append overloads (preserve EXACT signatures for the ──────
+		// ── reflection cache in OutputStatementBase). ──────────────────────
 
-		internal void Append(string alias, object[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<object> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<object> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, bool value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, string value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, int value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, double value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, long value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, DateTime value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, decimal value)
+		{
+			if (escribirSalida) formatter.Field(alias, value);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, object values)
+		{
+			if (escribirSalida) formatter.Field(alias, values);
+		}
+
+		internal void Append(ReadOnlySpan<char> alias, object[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<object> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<object> values) => AppendPrivate(alias, values);
+
+		internal void Append(string alias, object[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<object> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<object> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<object> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					if (value is int intValue)
-					{
-						output.Append(value);
-					}
-					else if (value is double doubleValue)
-					{
-						output.Append(doubleValue);
-					}
-					else if (value is decimal decimaValue)
-					{
-						output.Append(decimaValue);
-					}
-					else if (value is string stringValue)
-					{
-						output.Append('"');
-						EscapeString(stringValue);
-						output.Append('"');
-					}
-					else if (value is DateTime dateTimeValue)
-					{
-						if (dateTimeValue.Hour == 0 && dateTimeValue.Minute == 0 && dateTimeValue.Second == 0)
-						{
-							output.Append(dateTimeValue.ToString("MM/dd/yyyy"));
-						}
-						else
-						{
-							output.Append(dateTimeValue.ToString("MM/dd/yyyy HH:mm:ss"));
-						}
-					}
-					else if (value is bool boolValue)
-					{
-						output.Append(boolValue ? "true" : "false");
-					}
-					else
-					{
-						MethodInfo posiblePrint = value.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-						if (posiblePrint != null)
-						{
-							StringBuilder outputTemp = new StringBuilder();
-							posiblePrint.Invoke(value, new object[] { outputTemp });
-							output.Append(outputTemp.ToString());
-						}
-						else
-						{
-							output.Append(value.ToString());
-						}
-					}
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(ReadOnlySpan<char> alias, int[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<int> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<int> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, int[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<int> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<int> values) => AppendPrivate(alias, values);
 
-		internal void Append(string alias, int[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<int> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<int> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, int[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<int> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<int> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<int> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append(value);
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(ReadOnlySpan<char> alias, double[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<double> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<double> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, double[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<double> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<double> values) => AppendPrivate(alias, values);
 
-		internal void Append(string alias, double[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<double> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<double> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, double[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<double> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<double> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<double> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append(value);
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(ReadOnlySpan<char> alias, decimal[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<decimal> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<decimal> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, decimal[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<decimal> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<decimal> values) => AppendPrivate(alias, values);
 
-		internal void Append(string alias, decimal[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<decimal> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<decimal> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, decimal[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<decimal> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<decimal> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<decimal> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append(value);
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
+		internal void Append(ReadOnlySpan<char> alias, bool[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<bool> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<bool> values) => AppendPrivate(alias, values);
 
-		internal void Append(ReadOnlySpan<char> alias, bool[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<bool> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<bool> values) => this.AppendPrivate(alias, values);
-
-		internal void Append(string alias, bool[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<bool> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<bool> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, bool[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<bool> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<bool> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<bool> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append(value ? "true" : "false");
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(ReadOnlySpan<char> alias, string[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<string> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<string> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, string[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<string> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<string> values) => AppendPrivate(alias, values);
 
-		internal void Append(string alias, string[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<string> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<string> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, string[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<string> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<string> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<string> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append('"');
-					EscapeString(value);
-					output.Append('"');
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(ReadOnlySpan<char> alias, DateTime[] values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, List<DateTime> values) => this.AppendPrivate(alias, values);
-		internal void Append(ReadOnlySpan<char> alias, IEnumerable<DateTime> values) => this.AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, DateTime[] values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, List<DateTime> values) => AppendPrivate(alias, values);
+		internal void Append(ReadOnlySpan<char> alias, IEnumerable<DateTime> values) => AppendPrivate(alias, values);
 
-
-		internal void Append(string alias, DateTime[] values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, List<DateTime> values) => this.AppendPrivate(alias, values);
-		internal void Append(string alias, IEnumerable<DateTime> values) => this.AppendPrivate(alias, values);
+		internal void Append(string alias, DateTime[] values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, List<DateTime> values) => AppendPrivate(alias.AsSpan(), values);
+		internal void Append(string alias, IEnumerable<DateTime> values) => AppendPrivate(alias.AsSpan(), values);
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<DateTime> values)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				EscapeString(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-				bool necesitaComaArr = false;
-				foreach (var value in values)
-				{
-					if (necesitaComaArr) output.Append(',');
-					output.Append('"');
-					if (value.Hour == 0 && value.Minute == 0 && value.Second == 0)
-					{
-						output.Append(value.ToString("MM/dd/yyyy"));
-					}
-					else
-					{
-						output.Append(value.ToString("MM/dd/yyyy HH:mm:ss"));
-					}
-					output.Append(value);
-					output.Append('"');
-					necesitaComaArr = true;
-				}
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.Field(alias, values);
 		}
 
-		internal void Append(string stream, int startIndex, int count)
-		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append(stream, startIndex, count);
-				necesitaComa = true;
-			}
-		}
-
-		private void WritePair(ReadOnlySpan<char> alias, StringBuilder text)
-		{
-			if (necesitaComa)
-			{
-				output.Append(',');
-			}
-			output.Append('"');
-			WriteAlias(alias);
-			output.Append('"');
-			output.Append(':');
-			output.Append('[');
-			output.Append(text);
-			output.Append(']');
-			necesitaComa = true;
-		}
-
-		private void EscapeString(ReadOnlySpan<char> value)
-		{
-			foreach (char c in value)
-			{
-				switch (c)
-				{
-					case '\\':
-						output.Append('\\');
-						output.Append('\\');
-						break;
-					case '"':
-						output.Append('\\');
-						output.Append('"');
-						break;
-					case '\b':
-						output.Append("\\b");
-						break;
-					case '\f':
-						output.Append("\\f");
-						break;
-					case '\n':
-						output.Append("\\n");
-						break;
-					case '\r':
-						output.Append("\\r");
-						break;
-					case '\t':
-						output.Append("\\t");
-						break;
-					default:
-						if (char.IsControl(c))
-						{
-							output.Append("\\u");
-							output.Append(((int)c).ToString("x4"));
-						}
-						else
-						{
-							output.Append(c);
-						}
-						break;
-				}
-			}
-		}
-
-		private void WritePairExp(ReadOnlySpan<char> alias, object value)
-		{
-			if (necesitaComa)
-			{
-				output.Append(',');
-			}
-			output.Append('"');
-			EscapeString(alias);
-			output.Append('"');
-			output.Append(':');
-			output.Append(value.ToString());
-			necesitaComa = true;
-		}
-
-		private void WriteAlias(ReadOnlySpan<char> alias)
-		{
-			foreach (char c in alias)
-			{
-				switch (c)
-				{
-					case '\\':
-						output.Append('\\');
-						output.Append('\\');
-						break;
-					case '"':
-						output.Append('\\');
-						output.Append('"');
-						break;
-					default:
-						output.Append(c);
-						break;
-				}
-			}
-		}
-
-		private void WritePair(ReadOnlySpan<char> alias, object value)
-		{
-			if (necesitaComa)
-			{
-				output.Append(',');
-			}
-			output.Append('"');
-			EscapeString(alias);
-			output.Append('"');
-			output.Append(':');
-
-			if (value is int intValue)
-			{
-				output.Append(value);
-			}
-			else if (value is double doubleValue)
-			{
-				output.Append(doubleValue);
-			}
-			else if (value is string stringValue)
-			{
-				EscapeString(stringValue);
-			}
-			else if (value is DateTime dateTimeValue)
-			{
-				if (dateTimeValue.Hour == 0 && dateTimeValue.Minute == 0 && dateTimeValue.Second == 0)
-				{
-					output.Append(dateTimeValue.ToString("MM/dd/yyyy"));
-				}
-				else
-				{
-					output.Append(dateTimeValue.ToString("MM/dd/yyyy HH:mm:ss"));
-				}
-			}
-			else if (value is bool boolValue)
-			{
-				output.Append(boolValue);
-			}
-			/*else if (AstExpression.TypeOfCollection(value.GetType()) !=  null)
-			{
-				var listaValue = value;
-				output.Append(boolValue);
-			}*/
-			else
-			{
-				output.Append(value.ToString());
-			}
-			necesitaComa = true;
-		}
+		// ── Single-char Append (legacy public API) ─────────────────────────
 
 		internal void Append(string alias, char text)
 		{
-			if (escribirSalida)
-			{
-				if (necesitaComa)
-				{
-					output.Append(',');
-				}
-				output.Append('"');
-				WriteAlias(alias);
-				output.Append('"');
-				output.Append(':');
-				output.Append('"');
-				output.Append(text);
-				output.Append('"');
-				necesitaComa = true;
-			}
+			if (escribirSalida) formatter.Field(alias.AsSpan(), text);
 		}
 
-		private void AppendEWIs()
+		// ── Raw splice (JSON-only escape hatch used by EvalStatement V1) ───
+		//
+		// Slice of a string into the sink. Used by EvalStatement.cs:46 to
+		// strip the wrapping "{}" of a JSON sub-document and embed its
+		// fields at the parent's cursor. Phase 4 will gate this off for
+		// non-JSON formatters (V2 grammar already rejects eval-as-statement,
+		// so by construction this is never reached under V2 + non-JSON
+		// formatter pairing).
+
+		internal void Append(string stream, int startIndex, int count)
 		{
-			if (escribirSalida && ewis.Count > 0)
-			{
-				if (necesitaComa)
-				{
-					output.Append(",");
-				}
-				output.Append('"');
-				WriteAlias("EWI");
-				output.Append('"');
-				output.Append(':');
-				output.Append('[');
-
-				necesitaComa = false;
-				foreach (Tuple<string, string> ewi in ewis)
-				{
-					AppendEWI(ewi.Item1, ewi.Item2);
-					output.Append('}');
-				}
-
-				output.Append(']');
-			}
-			necesitaComa = true;
+			if (escribirSalida) formatter.RawSplice(stream, startIndex, count);
 		}
+
+		// ── ToString — preserve legacy "{}" → "" collapse ──────────────────
 
 		public override string ToString()
 		{
-			string resultado = "";
-			if (escribirSalida)
-			{
-				resultado = output.ToString();
-				if (resultado == "{}") resultado = "";
-			}
-			return resultado;
+			if (!escribirSalida) return "";
+			var result = sink.ToString();
+			if (formatter.CollapseEmptyToString && result == "{}") return "";
+			return result;
 		}
 	}
 }

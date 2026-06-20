@@ -103,6 +103,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal TokenType Type => type;
 
+		// B.3.2: position accessors. LiteralExtractor uses these to substitute
+		// literal token regions in a canonical script with parameter
+		// references. start/end are inclusive character offsets in the
+		// source the token was lexed from (Int32.MinValue if HasPosition()
+		// is false, i.e. for eof/eol).
+		internal int Start => start;
+		internal int End => end;
+
 		internal ReadOnlySpan<char> GetValor(ReadOnlySpan<char> input)
 		{
 			if (!HasPosition())

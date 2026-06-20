@@ -1,6 +1,8 @@
 using Puppeteer.EventSourcing;
 using Puppeteer.EventSourcing.DB;
 using Puppeteer.EventSourcing.DB.FileSystem;
+using Puppeteer.EventSourcing.Follower;
+using Puppeteer.EventSourcing.Playbill;
 using System;
 
 namespace Puppeteer
@@ -16,16 +18,43 @@ namespace Puppeteer
             this.handler = actor.GetHandler();
         }
 
+        // Wrapper para que Choreography (Stage / Performance / Ensemble) propague
+        // el logger inyectado por el host hasta el Actor que vive bajo el hook.
+        // El sink es per-handler (no singleton); F6 del refactor de logger.
+        public void UseLogger(IPuppeteerLogger logger)
+        {
+            ArgumentNullException.ThrowIfNull(logger);
+            handler.UseLogger(logger);
+        }
+
+        public IPuppeteerLogger Logger => handler.Logger;
+
         public long CurrentEntryId => handler.CurrentEntryId;
 
         public DateTime DateOfLastActivity => handler.DateOfLastActivity;
 
         public bool IsNew => handler.ItsANewOne;
 
+        public Reactions Reactions => handler.Reactions;
+
         public Action<long, byte[]> OnRecordWritten
         {
             set { handler.OnRecordWritten = value; }
         }
+
+        // === Playbill (Fase 5) ===
+        //
+        // Optional facade — null si el Stage no tiene Playbill configurado
+        // (audit-off). Cuando se asigna, Choreography (Stage) lo usa para
+        // (a) suscribirse a OnSchemaRegistered/OnRecordWritten y broadcastear
+        // PlaybillSchemaCue/PlaybillCue como Director, y (b) aplicar cues
+        // entrantes como Cast via WriteRecordRaw / RegisterSchemaRaw.
+        //
+        // El Playbill instance es per-Stage (cada Stage en el cluster tiene
+        // su propio backend local — InMemory dict / FS subdir / SQL DB).
+        // El setter solo configura la referencia; la suscripcion del Stage
+        // a los callbacks ocurre en Stage.AttachPlaybill.
+        public Playbill Playbill { get; set; }
 
         // Wrapper para que Performance.Start(asFollower:true) pueda activar
         // el flag desde Choreography (que no tiene InternalsVisibleTo de
@@ -36,6 +65,15 @@ namespace Puppeteer
         {
             get { return handler.SuppressReactionJournaling; }
             set { handler.SuppressReactionJournaling = value; }
+        }
+
+        // Wrapper para que Choreography (sin InternalsVisibleTo de Puppeteer)
+        // configure el provider del rol vivo que usa el gate de
+        // ReactionActivation. El Stage P2P pasa () => IsDirector; la Performance
+        // Theater () => !isFollower. Ver ActorHandler.SetActingAsDirectorProvider.
+        public void SetActingAsDirectorProvider(Func<bool> provider)
+        {
+            handler.SetActingAsDirectorProvider(provider);
         }
 
         // Phase 5 of the Action refactor: dropped OnNewActionDefined +
@@ -68,7 +106,7 @@ namespace Puppeteer
             if (peekedType == EventRecordType.Define)
             {
                 bool defOk = BinaryEventCodec.TryDecodeDefine(body, bodyLength,
-                    out _, out _, out _, out _,
+                    out _, out _,
                     out int defineActionId, out string defineStatementText, out _);
                 if (!defOk) throw new InvalidOperationException("Failed to decode Define journal record");
                 ((EventSourcing.DB.IActorEventJournalClient)handler).AddKnownActionFromDefine(defineActionId, defineStatementText);
@@ -77,7 +115,7 @@ namespace Puppeteer
 
             bool success = BinaryEventCodec.TryDecode(body, bodyLength,
                 out EventRecordType eventType, out long entryId, out DateTime occurredAt,
-                out string ip, out string user, out string scriptOrArguments, out int actionId);
+                out string scriptOrArguments, out int actionId);
 
             if (!success) throw new InvalidOperationException("Failed to decode journal record");
 
@@ -87,8 +125,6 @@ namespace Puppeteer
                 var scriptEvent = eventDataPool.RentScript();
                 scriptEvent.EntryId = entryId;
                 scriptEvent.OccurredAt = occurredAt;
-                scriptEvent.Ip = ip;
-                scriptEvent.User = user;
                 scriptEvent.Script = scriptOrArguments;
                 eventData = scriptEvent;
             }
@@ -97,8 +133,6 @@ namespace Puppeteer
                 var actionEvent = eventDataPool.RentAction();
                 actionEvent.EntryId = entryId;
                 actionEvent.OccurredAt = occurredAt;
-                actionEvent.Ip = ip;
-                actionEvent.User = user;
                 actionEvent.ActionId = actionId;
                 actionEvent.Arguments = scriptOrArguments;
                 eventData = actionEvent;
@@ -114,7 +148,7 @@ namespace Puppeteer
 
         public string PerformCmd(string script)
         {
-            return handler.PerformCmd(script, IpAddress.DEFAULT, UserInLog.ANONYMOUS);
+            return handler.PerformCmd(script, "", "");
         }
 
         public string PerformCmd(string script, Parameters parameters)
@@ -123,13 +157,15 @@ namespace Puppeteer
             return handler.PerformCmd(script, parameters);
         }
 
+        // Fase 4.5 refactor Playbill: ip/user dejan de auto-inyectarse como parametros
+        // del script. Quedan en la firma del API (compat binaria con callers existentes)
+        // pero el handler ya defaultea Ip/User internamente. Scripts que necesiten estos
+        // valores deben declararlos como parametros de usuario y pasarlos en userParameters.
         public string PerformCmd(string script, DateTime now, string ip, string user)
         {
             Parameters parameters = handler.ParametersPool.Rent();
             try
             {
-                parameters.SystemParameter<IpAddress>("Ip", string.IsNullOrEmpty(ip) ? IpAddress.DEFAULT : new IpAddress(ip));
-                parameters.SystemParameter<UserInLog>("User", UserInLog.GenerateUserBasedOn(user));
                 return handler.PerformCmd(script, parameters, now);
             }
             finally
@@ -142,8 +178,6 @@ namespace Puppeteer
         {
             if (userParameters == null) throw new ArgumentNullException(nameof(userParameters));
 
-            userParameters.SystemParameter<IpAddress>("Ip", string.IsNullOrEmpty(ip) ? IpAddress.DEFAULT : new IpAddress(ip));
-            userParameters.SystemParameter<UserInLog>("User", UserInLog.GenerateUserBasedOn(user));
             return handler.PerformCmd(script, userParameters, now);
         }
 
@@ -155,8 +189,6 @@ namespace Puppeteer
             Parameters parameters = handler.ParametersPool.Rent();
             try
             {
-                parameters.SystemParameter<IpAddress>("Ip", string.IsNullOrEmpty(ip) ? IpAddress.DEFAULT : new IpAddress(ip));
-                parameters.SystemParameter<UserInLog>("User", UserInLog.GenerateUserBasedOn(user));
                 return handler.PerformCheckThenCmd(scriptForChk, scriptForCmd, parameters, now);
             }
             finally
@@ -171,8 +203,6 @@ namespace Puppeteer
             if (scriptForCmd == null) throw new ArgumentNullException(nameof(scriptForCmd));
             if (userParameters == null) throw new ArgumentNullException(nameof(userParameters));
 
-            userParameters.SystemParameter<IpAddress>("Ip", string.IsNullOrEmpty(ip) ? IpAddress.DEFAULT : new IpAddress(ip));
-            userParameters.SystemParameter<UserInLog>("User", UserInLog.GenerateUserBasedOn(user));
             return handler.PerformCheckThenCmd(scriptForChk, scriptForCmd, userParameters, now);
         }
 

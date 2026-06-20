@@ -70,6 +70,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				throw new LanguageException("Tell statement attempted to execute without an ActorHandler reachable from the SymbolTable. This is a framework wiring error — file an issue.");
 			}
 
+			// Shadow isolation (S1): a shadow produces zero external effect, so it
+			// does not require a configured Transport. The tell still runs its match
+			// and builds the envelope (journaled in the shadow's own storage), but
+			// the envelope is dropped at the drain step (ActorHandler PerformCmd) and
+			// never delivered to the real target actor.
+			if (symbolTable.ActorHandler.IsShadow) return;
+
 			if (symbolTable.ActorHandler.Transport == null)
 			{
 				throw new LanguageException("Tell statement attempted to execute on an actor without a configured Transport. Set actor.Handler.Transport before issuing 'tell' statements (or remove the statement from the script).");
@@ -342,7 +349,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					CommandText: commandTextExplicit,
 					Transport: ThroughLiteral,
 					CausalEventId: null,
-					ReactionName: null);
+					ReactionName: null,
+					Check: SymbolTable.CurrentCausationCheck);
 
 				SymbolTable.MarkExplicitTellApplied(IdLiteral);
 				SymbolTable.EnqueuePendingTell(envelopeExplicit);
@@ -519,7 +527,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					CommandText: commandText,
 					Transport: ThroughLiteral,
 					CausalEventId: null,
-					ReactionName: null);
+					ReactionName: null,
+					Check: SymbolTable.CurrentCausationCheck);
 
 				SymbolTable.MarkExplicitTellApplied(IdLiteral);
 				SymbolTable.EnqueuePendingTell(envelopeExplicit);

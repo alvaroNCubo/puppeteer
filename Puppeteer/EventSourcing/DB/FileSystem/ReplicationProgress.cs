@@ -27,20 +27,23 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
+			// Mismo contrato: file-missing es valido (replicacion nueva), pero
+			// corrupcion debe lanzar. Si silenciaramos, el agent reescribiria
+			// progreso a 0 y re-enviaria records ya replicados al storage remoto.
 			if (!File.Exists(filePath))
 				return false;
 
 			byte[] data = File.ReadAllBytes(filePath);
 			if (data.Length < FILE_SIZE)
-				return false;
+				throw new LanguageException($"Replication progress file '{filePath}' exists but is truncated ({data.Length} bytes, expected at least {FILE_SIZE}). Back up the file; deleting it forces re-replication of all records from the local buffer (no data loss but may duplicate writes on the remote).");
 
 			if (data[0] != MAGIC[0] || data[1] != MAGIC[1] || data[2] != MAGIC[2] || data[3] != MAGIC[3])
-				return false;
+				throw new LanguageException($"Replication progress file '{filePath}' has an invalid magic header (expected 'PPRP'). Corrupted or from an incompatible format.");
 
 			int offset = 4;
 			ushort version = BitConverter.ToUInt16(data, offset); offset += 2;
 			if (version != FORMAT_VERSION)
-				return false;
+				throw new LanguageException($"Replication progress file '{filePath}' has format version {version}, but this Puppeteer expects version {FORMAT_VERSION}. No automatic migration; contact maintainers.");
 
 			LastReplicatedEntryId = BitConverter.ToInt64(data, offset); offset += 8;
 			// 8 bytes reserved

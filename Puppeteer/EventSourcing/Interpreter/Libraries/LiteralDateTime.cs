@@ -1,5 +1,6 @@
 using Puppeteer.EventSourcing.Follower;
 using System;
+using System.Globalization;
 using System.Linq.Expressions;
 using System.Text;
 
@@ -36,7 +37,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void write(StringBuilder resultado, DatabaseType databaseType)
 		{
 			bool esFecha = value.Hour == 0 && value.Minute == 0 && value.Second == 0;
-			string text = esFecha ? value.ToString("MM/dd/yyyy") : value.ToString("MM/dd/yyyy HH:mm:ss");
+			string text = esFecha ? value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture) : value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
 			resultado.Append(text);
 		}
 

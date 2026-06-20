@@ -5,6 +5,11 @@ namespace Puppeteer.EventSourcing.DB
 		string ActorName { get; }
 		bool IsNew { set; }
 
+		// Logger per-actor expuesto al Diary/storage/JournalReader/ReplicationAgent.
+		// Cada uno ya recibe IActorEventJournalClient por ctor, asi que con esta
+		// extension no hay que tocar firmas ni plumbing adicional.
+		IPuppeteerLogger Logger { get; }
+
 
 		bool IsActionKnown(int actionId);
 		void AddKnownAction(int actionId, string actionScript, string parameters);
@@ -22,8 +27,6 @@ namespace Puppeteer.EventSourcing.DB
 
 
 		long GetLastProcessedEntryId(int followerId);
-
-		//string EscapeLiteralString(string input);
 	}
 
 }

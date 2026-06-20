@@ -173,6 +173,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (nonNullableSource == typeof(bool) || nonNullableTarget == typeof(bool))
 				return nonNullableSource == nonNullableTarget;
 
+			// Enum: permite string<->enum (parse por nombre / ToString) y enum<->enum identico.
+			if (nonNullableTarget.IsEnum)
+				return nonNullableSource == typeof(string) || nonNullableSource == nonNullableTarget;
+
+			if (nonNullableSource.IsEnum)
+				return nonNullableTarget == typeof(string) || nonNullableSource == nonNullableTarget;
+
 			if (nonNullableSource == typeof(string) || nonNullableTarget == typeof(string))
 				return nonNullableSource == nonNullableTarget;
 
@@ -197,6 +204,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             object value = e.Execute();
             Type cast = ComputeType();
             Type tipoDelValor = e.ComputeType();
+            if (cast.IsEnum)
+            {
+                if (tipoDelValor == typeof(string))
+                    return ParseEnumOrThrow(cast, (string)value);
+                else if (tipoDelValor == cast)
+                    return value;
+                else
+                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+            }
             if (cast == typeof(String))
             {
                 if (tipoDelValor == typeof(string))
@@ -216,6 +232,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                     }
                     return dateValor.ToString("MM/dd/yyyy HH:mm:ss");
                 }
+                else if (tipoDelValor.IsEnum)
+                    return value.ToString();
                 else
                     throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
             }
@@ -366,6 +384,30 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				);
 			}
 
+			if (targetType.IsEnum)
+			{
+				if (sourceType == typeof(string))
+				{
+					var parseMethod = typeof(AstExpression).GetMethod(
+						nameof(AstExpression.ParseEnumOrThrow),
+						System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
+						null,
+						new[] { typeof(Type), typeof(string) },
+						null);
+					return Expression.Convert(
+						Expression.Call(parseMethod, Expression.Constant(targetType, typeof(Type)), expr),
+						targetType);
+				}
+				else if (sourceType == targetType)
+				{
+					return expr;
+				}
+				else
+				{
+					throw new LanguageException($"Invalid cast from {sourceType} to {targetType} in Expression.");
+				}
+			}
+
 			if (targetType == typeof(string))
 			{
 				if (sourceType == typeof(string))
@@ -380,6 +422,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				else if (sourceType == typeof(DateTime))
 				{
 					return FormatDateTime(expr);
+				}
+				else if (sourceType.IsEnum)
+				{
+					var toStringMethod = typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes);
+					return Expression.Call(Expression.Convert(expr, typeof(object)), toStringMethod);
 				}
 				else if (sourceType == typeof(object))
 				{

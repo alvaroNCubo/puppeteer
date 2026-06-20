@@ -46,6 +46,12 @@ namespace Puppeteer.EventSourcing.Follower
 		internal string CheckScript { get; set; }
 		internal List<long> EventIdsToSkip { get; set; }
 
+		// F4 Elide(seek:/seeks:): nombres de los Seek cuyos entryIds se eliden. null =
+		// la cadena completa del match (comportamiento por defecto de Elide()). Cuando
+		// esta seteado, CollectEventIdsFromChain solo recolecta los ids de los nodos cuyo
+		// Seek (Engine.PatternDescription) esta en este conjunto.
+		internal string[] ElideTargetSeeks { get; set; }
+
 		// True when ActionType == Program and a `when:` check script is
 		// configured. The executor runs CheckScript via PerformChk before
 		// running Script via PerformEmit; if the check fails, the emit is
@@ -66,6 +72,7 @@ namespace Puppeteer.EventSourcing.Follower
 			MetadataKind = MetadataKind.None;
 			Script = null;
 			CheckScript = null;
+			ElideTargetSeeks = null;
 			EventIdsToSkip.Clear();
 		}
 	}

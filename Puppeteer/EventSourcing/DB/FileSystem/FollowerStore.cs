@@ -29,13 +29,21 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 			followers.Clear();
 
+			// Mismo contrato: file-missing es valido (sin followers registrados),
+			// pero corrupcion debe lanzar para no resetear silenciosamente los
+			// checkpoints (esto desincronizaria a los followers en runtime).
 			if (!File.Exists(filePath)) return;
 
 			byte[] data = File.ReadAllBytes(filePath);
-			if (data.Length < HEADER_SIZE) return;
+			if (data.Length < HEADER_SIZE)
+				throw new LanguageException($"Follower store file '{filePath}' exists but is truncated ({data.Length} bytes, expected at least {HEADER_SIZE}). Back up the file before recovery.");
 
 			if (data[0] != MAGIC[0] || data[1] != MAGIC[1] || data[2] != MAGIC[2] || data[3] != MAGIC[3])
-				return;
+				throw new LanguageException($"Follower store file '{filePath}' has an invalid magic header (expected 'PPFL'). Corrupted or from an incompatible format.");
+
+			ushort version = BitConverter.ToUInt16(data, 4);
+			if (version != FORMAT_VERSION)
+				throw new LanguageException($"Follower store file '{filePath}' has format version {version}, but this Puppeteer expects version {FORMAT_VERSION}. No automatic migration path.");
 
 			int count = BitConverter.ToInt32(data, 6);
 			int offset = HEADER_SIZE;

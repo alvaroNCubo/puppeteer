@@ -20,6 +20,10 @@ namespace Puppeteer.EventSourcing.DB
 			public Dictionary<int, long> FollowerCheckpoints = new Dictionary<int, long>();
 			public Dictionary<string, long> ReactionRegistry = new Dictionary<string, long>();
 			public Dictionary<(long, int), (long detected, long confirmed)> ReactionCheckpoints = new Dictionary<(long, int), (long, long)>();
+			// Resume optimization (rediseño de checkpoint): dos cursores globales por reaction
+			// (high-water + frontera-cerrada) y snapshot de matches de cobertura abiertos.
+			public Dictionary<long, (long highWater, long closedFrontier)> ReactionFrontiers = new Dictionary<long, (long, long)>();
+			public Dictionary<long, string> ReactionMatchSnapshots = new Dictionary<long, string>();
 			public long NextEntryId = 1;
 			public long NextReactionId = 1;
 			public EventElisionStorageInMemory EventElisionStorage;
@@ -32,6 +36,8 @@ namespace Puppeteer.EventSourcing.DB
 		private readonly Dictionary<int, long> followerCheckpoints;
 		private readonly Dictionary<string, long> reactionRegistry;
 		private readonly Dictionary<(long, int), (long detected, long confirmed)> reactionCheckpoints;
+		private readonly Dictionary<long, (long highWater, long closedFrontier)> reactionFrontiers;
+		private readonly Dictionary<long, string> reactionMatchSnapshots;
 		private ref long nextEntryId => ref storage.NextEntryId;
 		private ref long nextReactionId => ref storage.NextReactionId;
 
@@ -56,25 +62,39 @@ namespace Puppeteer.EventSourcing.DB
 			followerCheckpoints = storage.FollowerCheckpoints;
 			reactionRegistry = storage.ReactionRegistry;
 			reactionCheckpoints = storage.ReactionCheckpoints;
+			reactionFrontiers = storage.ReactionFrontiers;
+			reactionMatchSnapshots = storage.ReactionMatchSnapshots;
 			eventElisionStorage = storage.EventElisionStorage;
 			eventMaterializationStorage = storage.EventMaterializationStorage;
 			materializationCheckpointStorage = storage.MaterializationCheckpointStorage;
 		}
-		internal void AddScriptEvent(string script, string ip = "127.0.0.1", string user = "TestUser", DateTime? occurredAt = null, string exposeData = null)
+
+		// Peek de solo lectura para PlaybillStoreInMemory.Distill (cross-storage
+		// coupling pragmatico: ambos viven en el mismo proceso/sharedStorages
+		// estatico para tests). Retorna un snapshot inmutable de los EventData
+		// del actor; null si el actor no esta inicializado en este storage.
+		internal static IReadOnlyList<EventData> PeekEventsForActor(string actorName)
+		{
+			ArgumentNullException.ThrowIfNullOrWhiteSpace(actorName);
+			lock (sharedStoragesLock)
+			{
+				if (!sharedStorages.TryGetValue(actorName, out var s)) return null;
+				return s.Events.ToArray();
+			}
+		}
+		internal void AddScriptEvent(string script, DateTime? occurredAt = null, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(script);
 
 			var scriptData = EventDataPool.RentScript();
 			scriptData.EntryId = nextEntryId++;
 			scriptData.Script = script;
-			scriptData.Ip = ip;
-			scriptData.User = user;
 			scriptData.OccurredAt = occurredAt ?? DateTime.Now;
 			scriptData.ExposeData = exposeData;
 
 			events.Add(scriptData);
 		}
-		internal void AddActionEvent(int actionId, string arguments, string ip = "127.0.0.1", string user = "TestUser", DateTime? occurredAt = null, string exposeData = null)
+		internal void AddActionEvent(int actionId, string arguments, DateTime? occurredAt = null, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(arguments);
 
@@ -82,8 +102,6 @@ namespace Puppeteer.EventSourcing.DB
 			actionData.EntryId = nextEntryId++;
 			actionData.ActionId = actionId;
 			actionData.Arguments = arguments;
-			actionData.Ip = ip;
-			actionData.User = user;
 			actionData.OccurredAt = occurredAt ?? DateTime.Now;
 			actionData.ExposeData = exposeData;
 
@@ -100,7 +118,7 @@ namespace Puppeteer.EventSourcing.DB
 		// directly. Using the legacy AddKnownAction (not AddKnownActionFromDefine)
 		// keeps the test seam usable for parameter shapes the Phase 1 Define
 		// parser doesn't yet accept (e.g. array types like `int[]`).
-		internal void AddActionEventWithRegistration(int actionId, string script, string parametersDeclaration, string arguments, string ip = "127.0.0.1", string user = "TestUser", DateTime? occurredAt = null)
+		internal void AddActionEventWithRegistration(int actionId, string script, string parametersDeclaration, string arguments, DateTime? occurredAt = null)
 		{
 			ArgumentNullException.ThrowIfNull(script);
 			ArgumentNullException.ThrowIfNull(parametersDeclaration);
@@ -111,7 +129,7 @@ namespace Puppeteer.EventSourcing.DB
 				EventJournalClient.AddKnownAction(actionId, script, parametersDeclaration);
 			}
 
-			AddActionEvent(actionId, arguments, ip, user, occurredAt);
+			AddActionEvent(actionId, arguments, occurredAt);
 		}
 
 		internal void Clear()
@@ -124,6 +142,8 @@ namespace Puppeteer.EventSourcing.DB
 			followerCheckpoints.Clear();
 			reactionRegistry.Clear();
 			reactionCheckpoints.Clear();
+			reactionFrontiers.Clear();
+			reactionMatchSnapshots.Clear();
 			nextEntryId = 1;
 			nextReactionId = 1;
 
@@ -152,16 +172,6 @@ namespace Puppeteer.EventSourcing.DB
 			return events[events.Count - 1];
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
-		{
-			return RehydrateFromEvent(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
-		{
-			return RehydrateFromEventAsync(afterEntryId, RehydrateDirection.Forward, includeExposeData);
-		}
-
 		internal string GetLastExposeData()
 		{
 			if (events.Count == 0)
@@ -185,14 +195,20 @@ namespace Puppeteer.EventSourcing.DB
 		// WriteNewActionEntry overrides. Use WriteInvocationEntry / WriteDefineEntry /
 		// WriteDefineWithFirstInvocation.
 
-		protected internal override void WriteScriptEntry(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteScriptEntry(long entryId, string script, DateTime now, string exposeData = null)
 		{
-			AddScriptEvent(script, ip, user, now, exposeData);
+			AddScriptEvent(script, now, exposeData);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeScriptRecord(entryId, script, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override Task WriteScriptEntryAsync(long entryId, string script, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override Task WriteScriptEntryAsync(long entryId, string script, DateTime now, string exposeData = null)
 		{
-			WriteScriptEntry(entryId, script, ip, user, now, exposeData);
+			WriteScriptEntry(entryId, script, now, exposeData);
 			return Task.CompletedTask;
 		}
 
@@ -203,7 +219,7 @@ namespace Puppeteer.EventSourcing.DB
 		// model firmado: Define entries carry no arguments — first invocation lives
 		// in a separate Invocation entry written immediately after, so MarkAsSkip
 		// on a first invocation cannot collaterally erase the Define.
-		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 
@@ -211,28 +227,38 @@ namespace Puppeteer.EventSourcing.DB
 			defineData.EntryId = nextEntryId++;
 			defineData.ActionId = actionId;
 			defineData.DefineStatementText = defineStatementText;
-			defineData.Ip = ip;
-			defineData.User = user;
 			defineData.OccurredAt = now;
 			defineData.ExposeData = exposeData;
 
 			events.Add(defineData);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeDefineRecord(actionId, defineStatementText, entryId, now, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal override Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
-			WriteDefineEntry(actionId, defineStatementText, entryId, ip, user, now, exposeData);
+			WriteDefineEntry(actionId, defineStatementText, entryId, now, exposeData);
 			return Task.CompletedTask;
 		}
 
-		protected internal override void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
-			AddActionEvent(actionId, arguments, ip, user, now, exposeData);
+			AddActionEvent(actionId, arguments, now, exposeData);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] record = EncodeInvocationRecord(actionId, entryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(entryId, record);
+			}
 		}
 
-		protected internal override Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
-			WriteInvocationEntry(actionId, entryId, ip, user, now, arguments, exposeData);
+			WriteInvocationEntry(actionId, entryId, now, arguments, exposeData);
 			return Task.CompletedTask;
 		}
 
@@ -241,7 +267,7 @@ namespace Puppeteer.EventSourcing.DB
 		// no intermediate observers (the events list is mutated under the
 		// SharedStorageData instance lock implicit in AppendAction usage; tests
 		// rely on single-threaded semantics within a test method).
-		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(defineStatementText);
 			ArgumentNullException.ThrowIfNull(arguments);
@@ -250,8 +276,6 @@ namespace Puppeteer.EventSourcing.DB
 			defineData.EntryId = nextEntryId++;
 			defineData.ActionId = actionId;
 			defineData.DefineStatementText = defineStatementText;
-			defineData.Ip = ip;
-			defineData.User = user;
 			defineData.OccurredAt = now;
 			defineData.ExposeData = null; // expose data lives on the Invocation (it's the result of running the action body, not of declaring it).
 			events.Add(defineData);
@@ -260,16 +284,22 @@ namespace Puppeteer.EventSourcing.DB
 			actionData.EntryId = nextEntryId++;
 			actionData.ActionId = actionId;
 			actionData.Arguments = arguments;
-			actionData.Ip = ip;
-			actionData.User = user;
 			actionData.OccurredAt = now;
 			actionData.ExposeData = exposeData;
 			events.Add(actionData);
+
+			if (OnRecordWritten != null)
+			{
+				byte[] defineRecord = EncodeDefineRecord(actionId, defineStatementText, defineEntryId, now, null);
+				byte[] invocationRecord = EncodeInvocationRecord(actionId, invocationEntryId, now, arguments, exposeData);
+				OnRecordWritten.Invoke(defineEntryId, defineRecord);
+				OnRecordWritten.Invoke(invocationEntryId, invocationRecord);
+			}
 		}
 
-		protected internal override Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal override Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
-			WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, ip, user, now, arguments, exposeData);
+			WriteDefineWithFirstInvocation(actionId, defineStatementText, defineEntryId, invocationEntryId, now, arguments, exposeData);
 			return Task.CompletedTask;
 		}
 
@@ -366,8 +396,6 @@ namespace Puppeteer.EventSourcing.DB
 					entryId: evt.EntryId,
 					kind: MaterializationRecordKind.Script,
 					occurredAt: evt.OccurredAt,
-					ip: evt.Ip,
-					user: evt.User,
 					script: scriptEvt.Script,
 					actionId: 0,
 					arguments: null,
@@ -380,8 +408,6 @@ namespace Puppeteer.EventSourcing.DB
 					entryId: evt.EntryId,
 					kind: MaterializationRecordKind.Invocation,
 					occurredAt: evt.OccurredAt,
-					ip: evt.Ip,
-					user: evt.User,
 					script: null,
 					actionId: actionEvt.ActionId,
 					arguments: actionEvt.Arguments,
@@ -394,8 +420,6 @@ namespace Puppeteer.EventSourcing.DB
 					entryId: evt.EntryId,
 					kind: MaterializationRecordKind.Define,
 					occurredAt: evt.OccurredAt,
-					ip: evt.Ip,
-					user: evt.User,
 					script: null,
 					actionId: defineEvt.ActionId,
 					arguments: null,
@@ -471,7 +495,7 @@ namespace Puppeteer.EventSourcing.DB
 			throw new NotImplementedException("Primary key change not supported in InMemory storage.");
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
 		{
 			EventJournalClient.IsNew = events.Count == 0;
 
@@ -490,20 +514,8 @@ namespace Puppeteer.EventSourcing.DB
 			// In CONTINUOUS mode: CanContinueReplay() returns true until a shutdown signal arrives.
 			while (!forcedToEnd && !firstPassCompleted && (canContinueReplay = EventJournalClient.CanContinueReplay(lastEntryId)))
 			{
-				// Sort events according to direction.
-				IEnumerable<EventData> orderedEvents;
-				if (direction == RehydrateDirection.Forward)
-				{
-					orderedEvents = events.Where(evt => evt.EntryId > lastEntryId).OrderBy(evt => evt.EntryId);
-				}
-				else if (direction == RehydrateDirection.Backward)
-				{
-					orderedEvents = events.Where(evt => evt.EntryId > lastEntryId).OrderByDescending(evt => evt.EntryId);
-				}
-				else
-				{
-					throw new ArgumentException($"Unknown search direction '{direction}'.", nameof(direction));
-				}
+				// Forward replay: events in ascending EntryId order.
+				IEnumerable<EventData> orderedEvents = events.Where(evt => evt.EntryId > lastEntryId).OrderBy(evt => evt.EntryId);
 
 				// Compute how many events still need to be processed.
 				int eventCount = orderedEvents.Count();
@@ -561,8 +573,6 @@ namespace Puppeteer.EventSourcing.DB
 					}
 
 					tempEvent.EntryId = evt.EntryId;
-					tempEvent.Ip = evt.Ip;
-					tempEvent.User = evt.User;
 					tempEvent.OccurredAt = evt.OccurredAt;
 					tempEvent.ExposeData = evt.ExposeData;
 
@@ -595,9 +605,9 @@ namespace Puppeteer.EventSourcing.DB
 			return lastEntryId;
 		}
 
-		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
 		{
-			return Task.FromResult(RehydrateFromEvent(afterEntryId, direction, includeExposeData));
+			return Task.FromResult(RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
 		protected internal override long GetOrCreateReactionId(string formattedReaction)
@@ -658,34 +668,6 @@ namespace Puppeteer.EventSourcing.DB
 			reactionCheckpoints[(reactionId, pattern)] = (entryId, entryId);
 		}
 
-		protected internal override long? NextNonElided(long entryId, RehydrateDirection direction)
-		{
-			if (entryId < 0) throw new LanguageException("entryId must be zero or greater.");
-
-			if (direction == RehydrateDirection.Forward)
-			{
-				for (long id = entryId + 1; id < nextEntryId; id++)
-				{
-					if (!eventElisionStorage.IsEventElided(id) && events.Any(e => e.EntryId == id))
-					{
-						return id;
-					}
-				}
-			}
-			else if (direction == RehydrateDirection.Backward)
-			{
-				for (long id = entryId - 1; id >= 1; id--)
-				{
-					if (!eventElisionStorage.IsEventElided(id) && events.Any(e => e.EntryId == id))
-					{
-						return id;
-					}
-				}
-			}
-
-			return null;
-		}
-
 		protected internal override bool MarkEventsAsElidedWithCheckpoint(Follower.CheckpointCommit commit)
 		{
 			ArgumentNullException.ThrowIfNull(commit);
@@ -732,6 +714,53 @@ namespace Puppeteer.EventSourcing.DB
 				}
 
 				return true;
+			}
+		}
+
+		// Resume optimization (paso 2): dos cursores globales por reaction. Monotonia y default
+		// (0,0)=génesis los gobierna el caller (Reaction.Execute); aqui solo se persiste/lee.
+		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+
+			lock (reactionFrontiers)
+			{
+				if (reactionFrontiers.TryGetValue(reactionId, out var frontier))
+					return frontier;
+				return (0, 0);
+			}
+		}
+
+		protected internal override void SaveReactionFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+			if (highWater < 0) throw new LanguageException("highWater must be zero or greater.");
+			if (closedFrontier < 0) throw new LanguageException("closedFrontier must be zero or greater.");
+
+			lock (reactionFrontiers)
+			{
+				reactionFrontiers[reactionId] = (highWater, closedFrontier);
+			}
+		}
+
+		// Resume optimization (paso 4): snapshot de matches de cobertura abiertos.
+		protected internal override string GetReactionMatchSnapshot(long reactionId)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+
+			lock (reactionMatchSnapshots)
+			{
+				return reactionMatchSnapshots.TryGetValue(reactionId, out var blob) ? blob : null;
+			}
+		}
+
+		protected internal override void SaveReactionMatchSnapshot(long reactionId, string snapshot)
+		{
+			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
+
+			lock (reactionMatchSnapshots)
+			{
+				reactionMatchSnapshots[reactionId] = snapshot ?? string.Empty;
 			}
 		}
 

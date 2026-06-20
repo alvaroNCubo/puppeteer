@@ -1,46 +1,31 @@
-using log4net;
 using System;
 using System.Threading;
 
 namespace Puppeteer.EventSourcing
 {
-	internal sealed class Loggers
+	// ConsoleLogger es el default per-actor: ActorHandler lo construye en el
+	// field initializer de su `logger`. Util en desarrollo (Error -> stderr,
+	// Debug -> stdout via ThreadPool para no bloquear). El host inyecta su
+	// impl con actor.UseLogger(...) cuando necesita Serilog, MEL, NLog, etc.
+	// El singleton process-wide (la vieja class Loggers) fue retirado en F5
+	// del refactor de logger.
+	public sealed class ConsoleLogger : IPuppeteerLogger
 	{
-		public static Loggers loggers = new Loggers();
-
-		private Loggers()
+		public void Error(string message, Exception exception)
 		{
-			Db = new Logger();
-		}
-		internal Logger Db { get; set; }
-
-		internal static Loggers GetIntance()
-		{
-			return loggers;
-		}
-	}
-
-	internal sealed class Logger
-	{
-		private ILog logger = log4net.LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
-
-		internal Logger()
-		{
+			if (message == null) throw new ArgumentNullException(nameof(message));
+			if (exception == null) throw new ArgumentNullException(nameof(exception));
+			ThreadPool.QueueUserWorkItem(_ =>
+			{
+				Console.Error.WriteLine($"[Puppeteer ERROR] {message}");
+				Console.Error.WriteLine(exception);
+			});
 		}
 
-		internal void Error(string message, Exception e)
+		public void Debug(string message)
 		{
-			ThreadPool.QueueUserWorkItem(task => logger.Error(message, e));
-		}
-
-		internal void Debug(string message)
-		{
-			ThreadPool.QueueUserWorkItem(task => logger.Debug(message));
-		}
-
-		internal void SetLogger(ILog log)
-		{
-			this.logger = log;
+			if (message == null) throw new ArgumentNullException(nameof(message));
+			ThreadPool.QueueUserWorkItem(_ => Console.Out.WriteLine($"[Puppeteer DEBUG] {message}"));
 		}
 	}
 }

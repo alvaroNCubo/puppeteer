@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq.Expressions;
 using System.Text;
 
@@ -120,19 +121,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (tipo1 == typeof(string) && tipo2 == typeof(double))
 			{
-				return (string)objeto1 + (double)objeto2;
+				return (string)objeto1 + ((double)objeto2).ToString(CultureInfo.InvariantCulture);
 			}
 			else if (tipo1 == typeof(string) && tipo2 == typeof(decimal))
 			{
-				return (string)objeto1 + (decimal)objeto2;
+				return (string)objeto1 + ((decimal)objeto2).ToString(CultureInfo.InvariantCulture);
 			}
 			else if (tipo1 == typeof(string) && tipo2 == typeof(DateTime))
 			{
 				var valorDate = ((DateTime)objeto2);
 				if (valorDate.Hour == 0 && valorDate.Minute == 0 && valorDate.Second == 0)
-					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy");
+					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
 				else
-					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy HH:mm:ss");
+					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
 			}
 			else if (tipo1 == typeof(string) && tipo2 == typeof(bool))
 			{
@@ -180,6 +181,42 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var tipo1 = expr1.Type;
 			var tipo2 = expr2.Type;
 
+			// Coercion a string culture-invariante para concatenacion: las fechas
+			// usan el formato fijo MM/dd/yyyy y los numeros el separador decimal '.',
+			// igual que el camino interpretado. Sin esto el compilado caia en
+			// object.ToString() (CurrentCulture), divergiendo del interpretado y
+			// rompiendo la invariante de representacion del DSL en culturas no-US.
+			Expression CoerceToString(Expression operand)
+			{
+				Type t = operand.Type;
+				if (t == typeof(string))
+				{
+					return operand;
+				}
+				if (t == typeof(DateTime))
+				{
+					var hourProp = Expression.Property(operand, nameof(DateTime.Hour));
+					var minuteProp = Expression.Property(operand, nameof(DateTime.Minute));
+					var secondProp = Expression.Property(operand, nameof(DateTime.Second));
+					var zero = Expression.Constant(0, typeof(int));
+					var isShort = Expression.AndAlso(
+						Expression.AndAlso(Expression.Equal(hourProp, zero), Expression.Equal(minuteProp, zero)),
+						Expression.Equal(secondProp, zero));
+					var toStringMethod = typeof(DateTime).GetMethod("ToString", new[] { typeof(string), typeof(IFormatProvider) });
+					var invariant = Expression.Constant(CultureInfo.InvariantCulture, typeof(IFormatProvider));
+					return Expression.Condition(
+						isShort,
+						Expression.Call(operand, toStringMethod, Expression.Constant("MM/dd/yyyy"), invariant),
+						Expression.Call(operand, toStringMethod, Expression.Constant("MM/dd/yyyy HH:mm:ss"), invariant));
+				}
+				if (t == typeof(double) || t == typeof(decimal))
+				{
+					var toStringMethod = t.GetMethod(nameof(double.ToString), new[] { typeof(IFormatProvider) });
+					return Expression.Call(operand, toStringMethod, Expression.Constant(CultureInfo.InvariantCulture, typeof(IFormatProvider)));
+				}
+				return Expression.Call(operand, typeof(object).GetMethod(nameof(object.ToString)));
+			}
+
 			if (tipo1 == typeof(int) && tipo2 == typeof(int))
 			{
 				return Expression.Add(expr1, expr2);
@@ -204,8 +241,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (tipo1 == typeof(string) || tipo2 == typeof(string))
 			{
-				var left = tipo1 == typeof(string) ? expr1 : Expression.Call(expr1, typeof(object).GetMethod(nameof(object.ToString)));
-				var right = tipo2 == typeof(string) ? expr2 : Expression.Call(expr2, typeof(object).GetMethod(nameof(object.ToString)));
+				var left = CoerceToString(expr1);
+				var right = CoerceToString(expr2);
 				return Expression.Add(
 					left,
 					right,

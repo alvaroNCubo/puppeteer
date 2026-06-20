@@ -37,6 +37,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
 		}
 
+		protected internal override Type ComputeInstanceType()
+		{
+			return instance.ComputeType();
+		}
+
 		protected internal override Expression GetTargetExpression(ParameterExpression parametersParam)
 		{
 			var instanceExpr = instance.ExecuteExpression(parametersParam);
@@ -56,16 +61,44 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			// ChainedDotAccess has a chain of accesses we can extract
-			var chain = new List<MemberInfo>();
+			// Una cadena a.B().C() es ChainedDotAccess (C) envolviendo el prefijo
+			// (a.B(), un DotAccess/NewInstance). Para que TODAS las llamadas de la
+			// cadena sean matcheables como obligaciones:
+			//   1. recursar en el prefijo (instance) — se evalua antes, position menor.
+			//   2. recursar en los argumentos (llamadas anidadas como argumento), args-first.
+			//   3. registrar esta llamada/acceso de la cadena.
+			// El receiver de un eslabon encadenado es una expresion sin nombre simple, asi
+			// que target/targetName van nulos; el matcher casa por tipo declarante + metodo +
+			// args (suficiente para patrones [_:Tipo].Metodo(...)). Un instance name explicito
+			// sobre un eslabon encadenado no se correlaciona (caso de borde fuera de uso).
+			instance.PreparePatternMatching(patternAst, ref position);
 
-			throw new NotImplementedException($"{nameof(PreparePatternMatching)} is not yet implemented for {nameof(ChainedDotAccess)}.");
-
-			// For now, only the final type is registered
-			var type = ComputeType();
-			if (type != null && chain.Count > 0)
+			AstExpression[] nestedArgs = this.Arguments();
+			if (nestedArgs != null)
 			{
-				patternAst.RegisterChainedAccess(chain, position);
+				foreach (AstExpression nestedArg in nestedArgs)
+				{
+					nestedArg.PreparePatternMatching(patternAst, ref position);
+				}
+			}
+
+			Type instanceType = instance.ComputeType();
+			if (instanceType != null)
+			{
+				MemberInfo memberInfo = base.GetResolvedMemberInfo(instanceType);
+				if (memberInfo != null)
+				{
+					string memberName = Property() ?? Method();
+					patternAst.RegisterMemberAccess(null, memberName, memberInfo, position);
+
+					if (memberInfo is MethodInfo methodInfo)
+					{
+						List<object> argumentValues = base.GetArgumentValues();
+						patternAst.RegisterMethodCall(methodInfo, null, argumentValues, position, null);
+					}
+
+					position++;
+				}
 			}
 		}
 

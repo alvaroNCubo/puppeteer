@@ -14,10 +14,45 @@ namespace Puppeteer.EventSourcing.DB
 		protected IActorEventJournalClient EventJournalClient;
 		protected readonly EventDataPool EventDataPool;
 
+		// Atajo per-actor para los call sites de error logging en los backends
+		// y en wrappers que reciben un DiaryStorage (p.ej. ReplicationAgent).
+		// El sink llega via Actor.Logger -> ActorHandler.Logger -> IActorEventJournalClient.Logger.
+		// Reemplaza el viejo Loggers.GetInstance().Db (singleton process-wide) en F4
+		// del refactor de logger.
+		internal IPuppeteerLogger Logger => EventJournalClient.Logger;
+
 		protected static StreamWriter swDairyPeriodRangeToExport;
 		protected static MemoryStream msDairyPeriodRangeToExport;
 
 		internal DateTime DateOfLastActivity = DateTime.Now;
+
+		// Wire-equivalent record bytes are produced (via BinaryEventCodec.Encode*) by
+		// each backend after a successful write and passed to this callback. Stage
+		// (Choreography) subscribes to fire CueEvents to Cast pods for cross-pod
+		// replication. FS backend's bytes come for free (they are the bytes just written
+		// to disk); SQL/InMemory backends synthesize equivalent bytes via the codec.
+		internal Action<long, byte[]> OnRecordWritten;
+
+		// Synthetic encoding for backends that store typed columns (not bytes).
+		// FS backend produces these bytes as part of its write path; SQL/InMemory
+		// synthesize them only when OnRecordWritten has subscribers (lazy).
+		protected byte[] EncodeScriptRecord(long entryId, string script, DateTime now, string exposeData)
+		{
+			return FileSystem.BinaryEventCodec.EncodeScriptEvent(entryId, now, script,
+				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+		}
+
+		protected byte[] EncodeInvocationRecord(int actionId, long entryId, DateTime now, string arguments, string exposeData)
+		{
+			return FileSystem.BinaryEventCodec.EncodeActionEvent(entryId, now, actionId, arguments,
+				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+		}
+
+		protected byte[] EncodeDefineRecord(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData)
+		{
+			return FileSystem.BinaryEventCodec.EncodeDefineEvent(entryId, now, actionId, defineStatementText,
+				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+		}
 
 
 		protected EventElisionStorage eventElisionStorage;
@@ -56,9 +91,10 @@ namespace Puppeteer.EventSourcing.DB
 		protected internal abstract long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false);
 		protected internal abstract Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false);
 
-		protected internal abstract long RehydrateFromEvent(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false);
-		protected internal abstract Task<long> RehydrateFromEventAsync(long afterEntryId, RehydrateDirection direction, bool includeExposeData = false);
-		internal long RehydrateFromEvent(IActorEventJournalClient temporaryClient, long afterEntryId, RehydrateDirection direction, bool includeExposeData = false)
+		// Reactions replay against a temporary journal client (the ActorReactions
+		// wrapper) instead of the storage's own. Forward-only: the append-only
+		// journal has a single natural reading order.
+		internal long RehydrateFromEvent(IActorEventJournalClient temporaryClient, long afterEntryId, bool includeExposeData = false)
 		{
 			ArgumentNullException.ThrowIfNull(temporaryClient);
 
@@ -67,7 +103,7 @@ namespace Puppeteer.EventSourcing.DB
 			try
 			{
 				this.EventJournalClient = temporaryClient;
-				return RehydrateFromEvent(afterEntryId, direction, includeExposeData);
+				return RehydrateFromEvent(afterEntryId, includeExposeData);
 			}
 			finally
 			{
@@ -83,8 +119,8 @@ namespace Puppeteer.EventSourcing.DB
 		// WriteScriptEntry / WriteDefineEntry / WriteInvocationEntry /
 		// WriteDefineWithFirstInvocation.
 
-		protected internal abstract void WriteScriptEntry(long entryId, string script, string ip, string user, DateTime now, string exposeData = null);
-		protected internal abstract Task WriteScriptEntryAsync(long entryId, string script, string ip, string user, DateTime now, string exposeData = null);
+		protected internal abstract void WriteScriptEntry(long entryId, string script, DateTime now, string exposeData = null);
+		protected internal abstract Task WriteScriptEntryAsync(long entryId, string script, DateTime now, string exposeData = null);
 
 		// ============================================================
 		// Phase 2 of the Action refactor (project_puppeteer_action_refactor_plan.md):
@@ -122,22 +158,22 @@ namespace Puppeteer.EventSourcing.DB
 		// keep the legacy invocation lookup path simple, while `script` carries the
 		// full sentence for replay re-parsing.
 		// ============================================================
-		protected internal virtual void WriteDefineEntry(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal virtual void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteDefineEntry yet (Phase 3 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteNewActionEntry path until cutover.");
 		}
 
-		protected internal virtual Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, string ip, string user, DateTime now, string exposeData = null)
+		protected internal virtual Task WriteDefineEntryAsync(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteDefineEntryAsync yet (Phase 3 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteNewActionEntryAsync path until cutover.");
 		}
 
-		protected internal virtual void WriteInvocationEntry(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal virtual void WriteInvocationEntry(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteInvocationEntry yet (Phase 3 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteActionEntry path until cutover.");
 		}
 
-		protected internal virtual Task WriteInvocationEntryAsync(int actionId, long entryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal virtual Task WriteInvocationEntryAsync(int actionId, long entryId, DateTime now, string arguments, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteInvocationEntryAsync yet (Phase 3 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteActionEntryAsync path until cutover.");
 		}
@@ -173,12 +209,12 @@ namespace Puppeteer.EventSourcing.DB
 		// stays for replication paths where a follower applies a Define
 		// record received separately from its first Invocation.
 		// ============================================================
-		protected internal virtual void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal virtual void WriteDefineWithFirstInvocation(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteDefineWithFirstInvocation yet (Phase 4 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteNewActionEntry path until cutover.");
 		}
 
-		protected internal virtual Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, string ip, string user, DateTime now, string arguments, string exposeData = null)
+		protected internal virtual Task WriteDefineWithFirstInvocationAsync(int actionId, string defineStatementText, long defineEntryId, long invocationEntryId, DateTime now, string arguments, string exposeData = null)
 		{
 			throw new NotImplementedException($"{this.GetType().Name} has not adopted WriteDefineWithFirstInvocationAsync yet (Phase 4 of the Action refactor). Either adopt it in this backend or keep the caller on the legacy WriteNewActionEntryAsync path until cutover.");
 		}
@@ -204,11 +240,45 @@ namespace Puppeteer.EventSourcing.DB
 		// DEPRECATED: MarkEventsAsElidedWithCheckpoint ahora guarda Detected, usar SaveReactionConfirmedCheckpoint para Confirmed
 		protected internal abstract void SaveReactionLastProcessedEntryId(long reactionId, int pattern, long entryId);
 
-		protected internal abstract long? NextNonElided(long entryId, RehydrateDirection direction);
-
 		// MarkEventsAsElidedWithCheckpoint ahora guarda SOLO Detected (no Confirmed)
 		// Confirmed se guarda posteriormente con SaveReactionConfirmedCheckpoint tras ejecutar PerformCommand
 		protected internal abstract bool MarkEventsAsElidedWithCheckpoint(Follower.CheckpointCommit commit);
+
+		// ===== RESUME OPTIMIZATION: dos cursores globales por reaction (rediseño de checkpoint,
+		// paso 2). Detalle + matriz: notes/reactions-checkpoint-policy.md. =====
+		//
+		// Para reactions de cobertura (ForEach) el checkpoint escalar per-seek se descarta: los
+		// matches concurrentes multi-ancla cierran fuera de orden y no tienen orden total. El
+		// resume se gobierna por dos cursores monotonos por reaction:
+		//   - high-water    = max entryId escaneado por la reaction.
+		//   - closedFrontier = mayor entryId por debajo del cual TODA ancla de cobertura cerro.
+		// En el proximo Execute se re-lee desde closedFrontier en vez de génesis.
+		//
+		// Default (0,0) => "sin frontera conocida" => resume desde génesis (correcto, sin
+		// optimizar). Un backend que no adopte esto degrada al comportamiento previo. virtual
+		// (no abstract) para no romper backends que aun no lo implementan.
+		protected internal virtual (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
+		{
+			return (0, 0);
+		}
+
+		protected internal virtual void SaveReactionFrontier(long reactionId, long highWater, long closedFrontier)
+		{
+		}
+
+		// ===== RESUME OPTIMIZATION: snapshot de matches abiertos (paso 4) =====
+		// Cold-start de un consumidor-puro de replicacion (Svix no rebobina): en restart se
+		// restauran los matches de cobertura abiertos desde el snapshot y se resume en el frente,
+		// sin re-leer el journal. Blob opaco serializado por CoverageSnapshotCodec. Default null
+		// => sin snapshot persistido => el caller cae al re-read desde closedFrontier.
+		protected internal virtual string GetReactionMatchSnapshot(long reactionId)
+		{
+			return null;
+		}
+
+		protected internal virtual void SaveReactionMatchSnapshot(long reactionId, string snapshot)
+		{
+		}
 
 
 		// Paper 5 / Materialize v2 — Fase 2. Wire verb (a) EnviameDesde(afterEntryId).

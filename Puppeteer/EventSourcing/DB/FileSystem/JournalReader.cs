@@ -53,156 +53,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 				if (!File.Exists(filePath))
 				{
-					HandleMissingFile(indexEntry);
+					HandleMissingFile(indexEntry, client);
 					continue;
 				}
 
 				lastProcessedEntryId = ReadSingleFile(filePath, afterEntryId, eventDataPool, client, canContinue, lastProcessedEntryId, includeExposeData);
-			}
-
-			return lastProcessedEntryId;
-		}
-
-		internal long ReadAllBackward(long afterEntryId, EventDataPool eventDataPool,
-			IActorEventJournalClient client, Func<bool> canContinue, bool includeExposeData = false)
-		{
-			if (eventDataPool == null) throw new ArgumentNullException(nameof(eventDataPool));
-			if (client == null) throw new ArgumentNullException(nameof(client));
-
-			long lastProcessedEntryId = afterEntryId;
-			var allEntries = index.GetAllEntries();
-			if (allEntries.Count == 0) return lastProcessedEntryId;
-
-			// Read files in reverse order; within each file read all records then emit in reverse
-			for (int i = allEntries.Count - 1; i >= 0; i--)
-			{
-				if (canContinue != null && !canContinue()) break;
-
-				var indexEntry = allEntries[i];
-
-				// Skip files whose entire range is before afterEntryId
-				if (afterEntryId > 0 && indexEntry.LastEntryId <= afterEntryId) continue;
-
-				string filePath = GetJournalFilePath(indexEntry.FileNumber);
-				if (!File.Exists(filePath))
-				{
-					HandleMissingFile(indexEntry);
-					continue;
-				}
-
-				lastProcessedEntryId = ReadSingleFileBackward(filePath, afterEntryId, eventDataPool, client, canContinue, lastProcessedEntryId, includeExposeData);
-			}
-
-			return lastProcessedEntryId;
-		}
-
-		private long ReadSingleFileBackward(string filePath, long afterEntryId, EventDataPool eventDataPool,
-			IActorEventJournalClient client, Func<bool> canContinue, long lastProcessedEntryId, bool includeExposeData = false)
-		{
-			// Read all valid records from the file into a list, then emit in reverse order
-			var records = new System.Collections.Generic.List<(long entryId, EventRecordType eventType, DateTime occurredAt, string ip, string user, string content, int actionId, string exposeData)>();
-
-			using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, READ_BUFFER_SIZE, FileOptions.SequentialScan))
-			{
-				if (fs.Length < JournalWriter.HEADER_SIZE) return lastProcessedEntryId;
-				fs.Seek(JournalWriter.HEADER_SIZE, SeekOrigin.Begin);
-
-				while (fs.Position < fs.Length)
-				{
-					byte[] lenBuf = new byte[4];
-					int read = fs.Read(lenBuf, 0, 4);
-					if (read < 4) break;
-
-					int recordLen = BitConverter.ToInt32(lenBuf, 0);
-					if (recordLen <= 0 || fs.Position + recordLen > fs.Length) break;
-
-					byte[] recordBody = System.Buffers.ArrayPool<byte>.Shared.Rent(recordLen);
-					try
-					{
-						read = fs.Read(recordBody, 0, recordLen);
-						if (read < recordLen) break;
-
-						if (!BinaryEventCodec.ValidateCrc(recordBody, recordLen)) break;
-
-						long entryId = BinaryEventCodec.PeekEntryId(recordBody);
-						if (entryId <= afterEntryId) continue;
-						if (skipSet.Contains(entryId)) continue;
-
-						bool ok = BinaryEventCodec.TryDecode(recordBody, recordLen,
-							out var eventType, out _, out var occurredAt,
-							out var ip, out var user, out var content, out var actionId,
-							out var exposeDataDecoded,
-							compression, encryption, encryptionKey);
-
-						if (ok)
-						{
-							records.Add((entryId, eventType, occurredAt, ip, user, content, actionId, includeExposeData ? exposeDataDecoded : null));
-						}
-						else
-						{
-							// Phase 4 of the Action refactor: legacy TryDecode returns false on
-							// Define records. Attempt the Define-specific decode and capture
-							// the canonical sentence into `content` so the replay loop can
-							// populate the actionCommands cache via AddKnownActionFromDefine.
-							bool okDefine = BinaryEventCodec.TryDecodeDefine(recordBody, recordLen,
-								out _, out var defineOccurredAt,
-								out var defineIp, out var defineUser,
-								out var defineActionId, out var defineStatementText, out var defineExpose,
-								compression, encryption, encryptionKey);
-
-							if (okDefine)
-							{
-								records.Add((entryId, EventRecordType.Define, defineOccurredAt, defineIp, defineUser, defineStatementText, defineActionId, includeExposeData ? defineExpose : null));
-							}
-						}
-					}
-					finally
-					{
-						System.Buffers.ArrayPool<byte>.Shared.Return(recordBody);
-					}
-				}
-			}
-
-			for (int i = records.Count - 1; i >= 0; i--)
-			{
-				if (canContinue != null && !canContinue()) break;
-
-				var (entryId, eventType, occurredAt, ip, user, content, actionId, exposeJson) = records[i];
-
-				if (eventType == EventRecordType.Script)
-				{
-					var scriptData = eventDataPool.RentScript();
-					scriptData.EntryId = entryId;
-					scriptData.OccurredAt = occurredAt;
-					scriptData.Ip = ip;
-					scriptData.User = user;
-					scriptData.Script = content;
-					scriptData.ExposeData = exposeJson;
-					client.ReplayEvent(scriptData);
-				}
-				else if (eventType == EventRecordType.Define)
-				{
-					// Phase 4 of the Action refactor: replay a Define record by
-					// populating the actionCommands cache with the canonical sentence.
-					// No EventData is dispatched for Define rows — the actor's
-					// vocabulary mutates, but no domain side effect runs.
-					client.AddKnownActionFromDefine(actionId, content);
-				}
-				else
-				{
-					if (!client.IsActionKnown(actionId)) continue;
-					var actionData = eventDataPool.RentAction();
-					actionData.EntryId = entryId;
-					actionData.OccurredAt = occurredAt;
-					actionData.Ip = ip;
-					actionData.User = user;
-					actionData.ActionId = actionId;
-					actionData.Arguments = content;
-					actionData.ExposeData = exposeJson;
-					client.ReplayEvent(actionData);
-				}
-
-				lastProcessedEntryId = entryId;
 			}
 
 			return lastProcessedEntryId;
@@ -257,7 +112,13 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 						if (!BinaryEventCodec.ValidateCrc(recordBody, recordLen))
 						{
-							Console.WriteLine($"[REHYDRATION WARNING] CRC mismatch in file {filePath} at position {fs.Position - recordLen}. Skipping rest of file.");
+							// Integridad rota: la rehidratacion abandona el resto del archivo
+							// por contrato (recovery best-effort), pero el evento es serio. Va a
+							// IPuppeteerLogger.Error para que se vea en stderr (ConsoleLogger
+							// default) o en el sink que el host inyecto via Performance.Logger(...).
+							client.Logger.Error(
+								$"[REHYDRATION] CRC mismatch in file {filePath} at position {fs.Position - recordLen}. Skipping rest of file.",
+								new System.IO.InvalidDataException("CRC mismatch detected"));
 							break;
 						}
 
@@ -267,7 +128,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 						bool ok = BinaryEventCodec.TryDecode(recordBody, recordLen,
 							out var eventType, out _, out var occurredAt,
-							out var ip, out var user, out var content, out var actionId,
+							out var content, out var actionId,
 							out var exposeDataDecoded,
 							compression, encryption, encryptionKey);
 
@@ -279,7 +140,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 							// canonical sentence (no EventData dispatch — Define is
 							// vocabulary, not effect).
 							bool okDefine = BinaryEventCodec.TryDecodeDefine(recordBody, recordLen,
-								out _, out _, out _, out _,
+								out _, out _,
 								out int defineActionId, out string defineStatementText, out _,
 								compression, encryption, encryptionKey);
 
@@ -290,7 +151,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 								continue;
 							}
 
-							Console.WriteLine($"[REHYDRATION WARNING] Failed to decode record with entryId {entryId} in file {filePath}. Continuing.");
+							client.Logger.Error(
+								$"[REHYDRATION] Failed to decode record with entryId {entryId} in file {filePath}. Continuing.",
+								new System.IO.InvalidDataException("Record decode failed (not Script, not Define)"));
 							continue;
 						}
 
@@ -299,8 +162,6 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 							var scriptData = eventDataPool.RentScript();
 							scriptData.EntryId = entryId;
 							scriptData.OccurredAt = occurredAt;
-							scriptData.Ip = ip;
-							scriptData.User = user;
 							scriptData.Script = content;
 							scriptData.ExposeData = includeExposeData ? exposeDataDecoded : null;
 
@@ -310,15 +171,19 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 						{
 							if (!client.IsActionKnown(actionId))
 							{
-								Console.WriteLine($"[REHYDRATION WARNING] Action {actionId} not known for entryId {entryId}. Skipping.");
+								// Replay sin contexto: el actionId no esta en el cache de acciones
+								// del actor. Phase 5 garantiza Define-precede-Invocation por
+								// construccion, asi que esto SOLO deberia disparar con journals
+								// pre-Phase-5 o corrupcion. Visibilidad via logger del host.
+								client.Logger.Error(
+									$"[REHYDRATION] Action {actionId} not known for entryId {entryId}. Skipping.",
+									new System.IO.InvalidDataException($"Orphan Invocation: actionId={actionId} entryId={entryId}"));
 								continue;
 							}
 
 							var actionData = eventDataPool.RentAction();
 							actionData.EntryId = entryId;
 							actionData.OccurredAt = occurredAt;
-							actionData.Ip = ip;
-							actionData.User = user;
 							actionData.ActionId = actionId;
 							actionData.Arguments = content;
 							actionData.ExposeData = includeExposeData ? exposeDataDecoded : null;
@@ -375,14 +240,16 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return count;
 		}
 
-		private void HandleMissingFile(IndexEntry indexEntry)
+		private void HandleMissingFile(IndexEntry indexEntry, IActorEventJournalClient client)
 		{
 			long firstId = indexEntry.FirstEntryId;
 			long lastId = indexEntry.LastEntryId;
 
 			if (firstId <= 0 || lastId <= 0 || lastId < firstId)
 			{
-				Console.WriteLine($"[REHYDRATION ERROR] Missing journal file for sequence {indexEntry.FileNumber}. Index entry has invalid range [{firstId}..{lastId}]. Continuing rehydration.");
+				client.Logger.Error(
+					$"[REHYDRATION] Missing journal file for sequence {indexEntry.FileNumber}. Index entry has invalid range [{firstId}..{lastId}]. Continuing rehydration.",
+					new System.IO.InvalidDataException($"Index entry range invalid: [{firstId}..{lastId}]"));
 				return;
 			}
 
@@ -400,13 +267,18 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			{
 				string sampleIds = string.Join(", ", missingFromSkips.Count <= 10 ? missingFromSkips : missingFromSkips.GetRange(0, 10));
 				string extra = missingFromSkips.Count > 10 ? $" (and {missingFromSkips.Count - 10}+ more)" : "";
-				Console.WriteLine($"[REHYDRATION ERROR] Missing journal file for sequence {indexEntry.FileNumber} (entryIds [{firstId}..{lastId}]). " +
+				client.Logger.Error(
+					$"[REHYDRATION] Missing journal file for sequence {indexEntry.FileNumber} (entryIds [{firstId}..{lastId}]). " +
 					$"INCONSISTENCY DETECTED: {missingFromSkips.Count} entryIds NOT found in skip set. Sample: [{sampleIds}]{extra}. " +
-					$"Continuing rehydration -- priority is to bring system online.");
+					$"Continuing rehydration -- priority is to bring system online.",
+					new System.IO.FileNotFoundException($"Missing journal file for sequence {indexEntry.FileNumber}", $"sequence-{indexEntry.FileNumber}"));
 			}
 			else
 			{
-				Console.WriteLine($"[REHYDRATION INFO] Missing journal file for sequence {indexEntry.FileNumber} (entryIds [{firstId}..{lastId}]). " +
+				// Caso esperado: archivo purgado correctamente, todos sus entryIds estan
+				// en el skipSet. No es un problema — solo informacion para debug.
+				client.Logger.Debug(
+					$"[REHYDRATION] Missing journal file for sequence {indexEntry.FileNumber} (entryIds [{firstId}..{lastId}]). " +
 					$"All entryIds verified as skipped. File was correctly purged.");
 			}
 		}
