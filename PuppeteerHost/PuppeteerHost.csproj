@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Paper 7 demo host: the per-container process that consumes the
+    share-link emitted by `puppeteer issue-invitation`, syndicates with the
+    Usher via StageOnboardingClient, builds a Stage that hosts a domain
+    library loaded by reflection, and connects to its peers over TLS through
+    a shared-volume bootstrap rendezvous.
+
+    This project is a demo and is intentionally NOT part of Puppeteer.sln:
+    it depends on an out-of-tree domain assembly (see the Reference below),
+    so it is published on its own (see docker/README).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <RootNamespace>PuppeteerHost</RootNamespace>
+    <AssemblyName>puppeteer-host</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediatR" Version="13.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Puppeteer\Puppeteer.csproj" />
+    <ProjectReference Include="..\Choreography\Choreography.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Out-of-tree binary built from the public dotnet/eShop source.
+         Build Ordering.Domain from dotnet/eShop and set EShopOrderingDomainDll
+         to point at the resulting DLL (e.g. via Directory.Build.props or
+         -p:EShopOrderingDomainDll=...). -->
+    <Reference Include="Ordering.Domain">
+      <HintPath>$(EShopOrderingDomainDll)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
