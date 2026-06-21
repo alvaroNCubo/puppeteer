@@ -15,7 +15,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	//     end;
 	//
 	// The DSL accepts both `name:type` and `@name:type` at parse time (the Lexer drops
-	// '@' as a legibility-only alias per Claude.md of Pacifico); the canonical text on
+	// '@' as a legibility-only alias); the canonical text on
 	// the journal never contains '@'. Decision (A) firmada al cierre de Fase 1 (2026-05-09).
 	//
 	// The shape lives in the journal as a parseable sentence so replay can rebuild

@@ -2,11 +2,11 @@
 bin/
 obj/
 
-# Sync tooling — local cherry-pick script from Pacifico, must not be published.
-sync-from-pacifico.ps1
+# Sync tooling — local cherry-pick script from the private development fork; not published.
+sync-from-*.ps1
 
 # Test infrastructure — must never cross the public boundary.
-# Test projects live in Pacifico (private) and are mirrored into
+# Test projects live in the private development fork and are mirrored into
 # tests-local/ only for local validation against this public clone.
 tests-local/
 *.WithTests.sln

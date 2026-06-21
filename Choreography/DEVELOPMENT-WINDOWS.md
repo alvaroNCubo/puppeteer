@@ -89,7 +89,7 @@ Si no querés Docker Desktop pero tenés WSL2:
 # Dentro de WSL Ubuntu
 sudo apt install dotnet-sdk-9.0
 git clone <repo>
-cd "Puppeteer Pacifico"
+cd puppeteer
 LOCAL_SMP_KEYHASH=... dotnet test UnitTestChoreography
 ```
 
@@ -199,6 +199,6 @@ Server cerró el TLS — keyHash incorrecto o wire format incorrecto. Revisá:
 
 ## 7. Referencias
 
-- Repo: `Puppeteer Pacifico/Choreography/Transport/SimpleX/`
+- Repo: `Choreography/Transport/SimpleX/`
 - Spec SMP: https://github.com/simplex-chat/simplexmq/blob/master/protocol/simplex-messaging.md
 - Memory tags relacionados: `project_choreography_simplex_path_c`, `project_choreography_ushier_role`, `feedback_integration_tests_pipeline`.

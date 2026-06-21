@@ -768,7 +768,7 @@ namespace Puppeteer.EventSourcing
 				// si un record individual falla en cualquier stage (parser, resolver, executor),
 				// el error se loguea via IPuppeteerLogger.Error con entryId + script + exception
 				// y la rehidratacion SIGUE con el siguiente record. Este es el contrato del
-				// Puppeteer viejo de Exchange Engine (Dairy.cs:508-535) que se perdio en el
+				// Puppeteer anterior (Dairy.cs:508-535) que se perdio en el
 				// refactor del pipeline multi-stage; el consumidor que se migra esperaba este
 				// comportamiento. Si el host quiere ser estricto (abortar al primer error),
 				// inyecta un IPuppeteerLogger custom que throw-ee en Error -- los catches lo

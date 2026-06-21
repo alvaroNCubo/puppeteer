@@ -529,7 +529,7 @@ namespace Puppeteer.EventSourcing.Interpreter
         //
         // The DSL accepts both `@name:type` and `name:type` at the input — the Lexer treats
         // '@' as an alias-prefix that it silently drops on the way to the token stream
-        // (per Claude.md of Pacifico: "@ at the beginning of Id's name is just an alias of
+        // (by design: "@ at the beginning of Id's name is just an alias of
         // the same Id without @. It is for Parameter's legibility"). The canonical text
         // produced here therefore never contains '@' regardless of the input form, and
         // round-trip through the parser is a fixed point. Decision (A) firmada al cierre

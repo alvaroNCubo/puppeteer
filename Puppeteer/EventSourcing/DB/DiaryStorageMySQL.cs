@@ -179,7 +179,7 @@ namespace Puppeteer.EventSourcing.DB
 				.Append(")	ENGINE=InnoDB CHARSET=utf8;");
 
 			// Schema validation: si la tabla del actor ya existia con un schema
-			// viejo (Exchange Engine pre-rename), CREATE TABLE IF NOT EXISTS es
+			// viejo (pre-rename), CREATE TABLE IF NOT EXISTS es
 			// no-op y la siguiente SELECT con d.OccurredAt / d.Action /
 			// d.Arguments lanza MySqlException 'Unknown column ...' que el
 			// catch de RehydrateFromEvent silenciaba con Console.WriteLine,
@@ -274,7 +274,7 @@ namespace Puppeteer.EventSourcing.DB
 		}
 
 		// Inspecciona `information_schema.COLUMNS` para detectar tablas de actor
-		// pre-existentes con el schema viejo de Exchange Engine (FechaHora,
+		// pre-existentes con el schema viejo anterior (FechaHora,
 		// NOT NULL Ip/User/Script, sin Action/Arguments). Si encuentra mismatch,
 		// throw LanguageException con el script ALTER TABLE listo para correr.
 		// Llamado solo cuando created==false (la tabla ya existia).
