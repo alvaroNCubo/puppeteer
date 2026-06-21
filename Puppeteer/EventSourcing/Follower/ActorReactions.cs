@@ -87,8 +87,31 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			else
 			{
-				System.Threading.Thread.Sleep(sleepMs);
-				sleepMs = Math.Min(sleepMs * 2, MAX_SLEEP_MS);
+				// Signal-preemptible backoff. This is the catch-up poll that
+				// RehydrateFromEvent drives before the steady-state RunPushLoop is
+				// reached. When a Cue is freshly activated, a command journaled during
+				// this window used to wait out the in-progress Thread.Sleep (50→…→1000ms
+				// backoff) — that, not the push loop, is what dominated end-to-end Cue
+				// latency. EnqueuePushEvent (the RecordWritten callback) and
+				// RequestShutdown both Set pushSignal, so waiting on it instead lets a
+				// newly journaled event (or a shutdown) wake the poll immediately; the
+				// rehydrate re-read on the next turn then picks the event up.
+				//
+				// The signal is intentionally NOT Reset here: it is a level-triggered
+				// "events may be pending" poke that RunPushLoop owns and clears at the
+				// catch-up→push handoff. Leaving it set lets the rest of catch-up burst
+				// through without re-sleeping once any write has arrived, and carries a
+				// single harmless wake-up into RunPushLoop's first Wait. Delivery and
+				// exactly-once are unaffected — both the rehydrate re-read and DrainQueue
+				// gate on lastProcessedEntryId, so the wake is only a hint, never a
+				// source of duplicate or skipped events. When no write is pending the
+				// signal stays clear and Wait times out exactly like the old Thread.Sleep,
+				// so historical batch catch-up and Job-mode polling are unchanged.
+				bool signaled = pushSignal.Wait(sleepMs);
+				if (signaled)
+					sleepMs = 50;
+				else
+					sleepMs = Math.Min(sleepMs * 2, MAX_SLEEP_MS);
 				return true;
 			}
 		}
