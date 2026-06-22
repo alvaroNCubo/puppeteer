@@ -7,30 +7,30 @@ namespace Choreography.Transport.SimpleX
 {
     // SMP v6 wire format (per simplexmq/Protocol.hs encodeTransmission_, transmissionP):
     //
-    // BLOCK PAYLOAD (after SmpBlock.Pack length prefix + before padding) es un BATCH
-    // (THandleParams.batch = True por default). Format:
+    // BLOCK PAYLOAD (after SmpBlock.Pack length prefix + before padding) is a BATCH
+    // (THandleParams.batch = True by default). Format:
     //   [1 byte: count of transmissions]
     //   [Large = Word16 BE length, transmission1 bytes]
     //   [Large = Word16 BE length, transmission2 bytes]
     //   ...
     //
-    // Cada transmission individual (lo que va dentro del Large):
-    //   signature      (1-byte len + bytes; empty = 0x00 only para no auth)
-    //   sessionId      (1-byte len + 32 bytes, capturado del server hello)
+    // Each individual transmission (what goes inside the Large):
+    //   signature      (1-byte len + bytes; empty = 0x00 only for no auth)
+    //   sessionId      (1-byte len + 32 bytes, captured from the server hello)
     //   corrId         (1-byte len + 24 bytes random)
-    //   queueId        (1-byte len + bytes; empty para NEW)
-    //   command_body   (depende del comando)
+    //   queueId        (1-byte len + bytes; empty for NEW)
+    //   command_body   (depends on the command)
     //
-    // signature firma transmission_for_auth = sessionId+corrId+queueId+command_body.
+    // signature signs transmission_for_auth = sessionId+corrId+queueId+command_body.
     //
     // NEW v6 command body:  "NEW " + smpEncode(rKey) + smpEncode(dhKey) + auth + smpEncode(subMode)
     //   - rKey/dhKey: 1-byte len + 32 bytes (Ed25519/X25519 raw)
-    //   - auth: empty si no hay BasicAuth, "A" + smpEncode(auth) si hay
-    //   - subMode: 1 byte 'S' (SMSubscribe) o 'C' (SMOnlyCreate)
+    //   - auth: empty if there is no BasicAuth, "A" + smpEncode(auth) if there is
+    //   - subMode: 1 byte 'S' (SMSubscribe) or 'C' (SMOnlyCreate)
     //
-    // Length prefix de ByteString es **1 byte** (lenEncode = w2c . fromIntegral),
-    // no Word16 BE como tenia el codigo viejo. Limita fields a 255 bytes; OK para
-    // keys/sigs/ids pero NO para messages largos (esos usan Tail = sin prefix, o Large = 2-byte).
+    // The ByteString length prefix is **1 byte** (lenEncode = w2c . fromIntegral),
+    // not Word16 BE as the old code had. It limits fields to 255 bytes; OK for
+    // keys/sigs/ids but NOT for long messages (those use Tail = no prefix, or Large = 2-byte).
 
     internal enum SmpResponseType : byte
     {
@@ -43,8 +43,8 @@ namespace Choreography.Transport.SimpleX
     {
         public const int CorrIdSize = 24;
 
-        // NEW v6: crea queue. Firma con la rcvSignSecretKey (recientemente generada).
-        // Server responde con IDS {rcvId, sndId, srvDhPubKey}.
+        // NEW v6: creates queue. Signs with the rcvSignSecretKey (freshly generated).
+        // Server responds with IDS {rcvId, sndId, srvDhPubKey}.
         public static byte[] BuildNew(byte[] sessionId, byte[] corrId,
             byte[] rcvSignPubKey, byte[] rcvDhPubKey, byte[] rcvSignSecretKey)
         {
@@ -67,17 +67,17 @@ namespace Choreography.Transport.SimpleX
             using var ms = new MemoryStream();
             ms.Write(Encoding.ASCII.GetBytes("NEW"));
             ms.WriteByte((byte)' ');
-            // rKey (Ed25519) y dhKey (X25519) van como ASN.1 DER X.509 SubjectPublicKeyInfo,
-            // no como raw 32 bytes. Ver simplexmq Crypto.hs encodePubKey.
+            // rKey (Ed25519) and dhKey (X25519) go as ASN.1 DER X.509 SubjectPublicKeyInfo,
+            // not as raw 32 bytes. See simplexmq Crypto.hs encodePubKey.
             WriteByteString(ms, SmpCrypto.EncodeEd25519PublicKeyDer(rcvSignPubKey));
             WriteByteString(ms, SmpCrypto.EncodeX25519PublicKeyDer(rcvDhPubKey));
             // auth: no BasicAuth -> emit nothing (no marker, no bytes)
-            ms.WriteByte((byte)'S'); // subMode = SMSubscribe (server entrega mensajes apenas llegan)
+            ms.WriteByte((byte)'S'); // subMode = SMSubscribe (server delivers messages as soon as they arrive)
             return ms.ToArray();
         }
 
-        // PING v6: comando trivial sin auth ni queueId. Server responde PONG.
-        // Util para diagnosticar transmission/block encoding sin depender de NEW.
+        // PING v6: trivial command with no auth and no queueId. Server responds PONG.
+        // Useful to diagnose transmission/block encoding without depending on NEW.
         // Format: signature_empty(0x00) + sessionId + corrId + queueId_empty(0x00) + "PING"
         public static byte[] BuildPing(byte[] sessionId, byte[] corrId)
         {
@@ -95,7 +95,7 @@ namespace Choreography.Transport.SimpleX
 
         // Batch envelope per simplexmq Protocol.hs batchTransmissions_:
         //   [1 byte: count] [Word16 BE: len_t1] [t1 bytes] [Word16 BE: len_t2] [t2 bytes] ...
-        // Para outgoing transmissions desde cliente, count siempre 1.
+        // For outgoing transmissions from the client, count is always 1.
         private static byte[] WrapInBatch(byte[] transmission)
         {
             int len = transmission.Length;
@@ -109,9 +109,9 @@ namespace Choreography.Transport.SimpleX
             return result;
         }
 
-        // KEY v6: registra senderSignPubKey en queue para que el sender pueda
-        // autorizar comandos posteriores (SEND). Enviado por recipient (firma con
-        // recipientSignSecretKey) targeting su propio rcvId. Server responde OK.
+        // KEY v6: registers senderSignPubKey in the queue so the sender can
+        // authorize later commands (SEND). Sent by the recipient (signs with
+        // recipientSignSecretKey) targeting its own rcvId. Server responds OK.
         // Format: "KEY " + smpEncode(senderSignPubKey).
         public static byte[] BuildKey(byte[] sessionId, byte[] corrId, byte[] recipientQueueId,
             byte[] senderSignPubKey, byte[] recipientSignSecretKey)
@@ -125,7 +125,7 @@ namespace Choreography.Transport.SimpleX
             using var bodyMs = new MemoryStream();
             bodyMs.Write(Encoding.ASCII.GetBytes("KEY"));
             bodyMs.WriteByte((byte)' ');
-            // senderSignPubKey va como ASN.1 DER X.509 SPKI (igual que rKey en NEW)
+            // senderSignPubKey goes as ASN.1 DER X.509 SPKI (same as rKey in NEW)
             WriteByteString(bodyMs, SmpCrypto.EncodeEd25519PublicKeyDer(senderSignPubKey));
             byte[] commandBody = bodyMs.ToArray();
 
@@ -135,9 +135,9 @@ namespace Choreography.Transport.SimpleX
             return WrapInBatch(transmission);
         }
 
-        // SUB v6: subscribe to queue para recibir MSGs del sender.
-        // Format: "SUB" (sin args). Server responde OK + entrega MSGs pendientes
-        // (server-iniciados, requiere pump async = Fase 4d).
+        // SUB v6: subscribe to queue to receive MSGs from the sender.
+        // Format: "SUB" (no args). Server responds OK + delivers pending MSGs
+        // (server-initiated, requires async pump = Phase 4d).
         public static byte[] BuildSub(byte[] sessionId, byte[] corrId, byte[] recipientQueueId,
             byte[] recipientSignSecretKey)
         {
@@ -153,9 +153,9 @@ namespace Choreography.Transport.SimpleX
             return WrapInBatch(transmission);
         }
 
-        // SEND v6: sender envia mensaje encriptado a queue.
+        // SEND v6: sender sends an encrypted message to the queue.
         // Format: "SEND " + flags + ' ' + Tail(message). flags '0' (no first msg).
-        // Tail = raw bytes hasta fin de transmission (sin length prefix).
+        // Tail = raw bytes until the end of the transmission (no length prefix).
         public static byte[] BuildSend(byte[] sessionId, byte[] corrId, byte[] senderQueueId,
             byte[] encryptedMessage, byte[] senderSignSecretKey)
         {
@@ -169,7 +169,7 @@ namespace Choreography.Transport.SimpleX
             bodyMs.Write(Encoding.ASCII.GetBytes("SEND"));
             bodyMs.WriteByte((byte)' ');
             // MsgFlags{notification=False} encoded as "F" per simplexmq Encoding Bool.
-            // Parser consume hasta ' ' permitiendo mas flags futuras; minimal v6 = "F".
+            // Parser consumes up to ' ' allowing more future flags; minimal v6 = "F".
             bodyMs.WriteByte((byte)'F');
             bodyMs.WriteByte((byte)' ');
             bodyMs.Write(encryptedMessage); // Tail: raw bytes, no length prefix
@@ -181,11 +181,11 @@ namespace Choreography.Transport.SimpleX
             return WrapInBatch(transmission);
         }
 
-        // SEND unsigned v6: sender anonimo envia mensaje a queue NO secured (sin KEY emitido).
-        // Usado en el handshake bidireccional para el primer envelope antes de que las pubkeys
-        // esten cableadas. Format identico a SEND pero con signature vacia (length 0 prefix).
-        // El server SMP v6 acepta SENDs unsigned mientras la queue no haya recibido KEY;
-        // post-KEY, todo SEND requiere firma valida del sender registrado.
+        // SEND unsigned v6: anonymous sender sends a message to a NOT-secured queue (no KEY issued).
+        // Used in the bidirectional handshake for the first envelope before the pubkeys
+        // are wired up. Format identical to SEND but with an empty signature (length 0 prefix).
+        // The SMP v6 server accepts unsigned SENDs while the queue has not received KEY;
+        // post-KEY, every SEND requires a valid signature from the registered sender.
         public static byte[] BuildSendUnsigned(byte[] sessionId, byte[] corrId, byte[] senderQueueId,
             byte[] encryptedMessage)
         {
@@ -207,7 +207,7 @@ namespace Choreography.Transport.SimpleX
             return WrapInBatch(transmission);
         }
 
-        // ACK v6: recipient confirma recepcion de message identificado por msgId.
+        // ACK v6: recipient confirms reception of the message identified by msgId.
         // Format: "ACK " + smpEncode(msgId).
         public static byte[] BuildAck(byte[] sessionId, byte[] corrId, byte[] recipientQueueId,
             byte[] msgId, byte[] recipientSignSecretKey)
@@ -295,25 +295,25 @@ namespace Choreography.Transport.SimpleX
 
     internal sealed class SmpPong : SmpResponse { }
 
-    // Parser de transmissions del server. Layout v6:
-    //   signature (1+bytes; usualmente empty del server)
+    // Parser for server transmissions. Layout v6:
+    //   signature (1+bytes; usually empty from the server)
     //   sessionId (1+32)
     //   corrId    (1+24)
     //   queueId   (1+bytes)
-    //   command:  "TAG" [' ' arg1 arg2 ...]  o  "TAG" sin args
+    //   command:  "TAG" [' ' arg1 arg2 ...]  or  "TAG" with no args
     internal static class SmpResponseParser
     {
-        // Parsea TODAS las transmissions del batch. El server SimpleX puede batchear
-        // varias transmissions en un mismo TLS block (Protocol.hs batchTransmissions_),
-        // tipicamente cuando una respuesta OK (e.g. a un ACK del cliente) coincide en la
-        // ventana de I/O con un MSG server-push pendiente para la misma queue.
+        // Parses ALL transmissions of the batch. The SimpleX server may batch
+        // several transmissions in the same TLS block (Protocol.hs batchTransmissions_),
+        // typically when an OK response (e.g. to a client ACK) coincides in the
+        // I/O window with a pending server-push MSG for the same queue.
         //
-        // Bug historico (#2): el parser leia "count" pero solo deserializaba la primera
-        // transmission y descartaba el resto, lo que tiraba silenciosamente los MSGs
-        // batcheados con un OK de ACK. Como el server SMP entrega un MSG a la vez por
-        // queue (gated por ACK del cliente), perder un MSG dejaba la queue bloqueada
-        // sin error visible. Sintoma: el Cast recibia N entries y despues "silencio
-        // total", con N intermitente segun el timing de batching del server.
+        // Historical bug (#2): the parser read "count" but only deserialized the first
+        // transmission and discarded the rest, which silently dropped the MSGs
+        // batched with an ACK's OK. Since the SMP server delivers one MSG at a time per
+        // queue (gated by the client's ACK), losing a MSG left the queue blocked
+        // with no visible error. Symptom: the Cast received N entries and then "total
+        // silence", with N intermittent depending on the server's batching timing.
         public static IReadOnlyList<SmpResponse> ParseAll(byte[] payload)
         {
             if (payload == null || payload.Length == 0)
@@ -368,7 +368,7 @@ namespace Choreography.Transport.SimpleX
         }
 
         // IDS v6: "IDS " + smpEncode(rcvId) + smpEncode(sndId) + smpEncode(srvDh).
-        // Sin queueMode/linkId/serviceId/etc — esos son v9+.
+        // No queueMode/linkId/serviceId/etc — those are v9+.
         private static SmpIds ParseIds(MemoryStream ms)
         {
             ConsumeSpace(ms);
@@ -389,7 +389,7 @@ namespace Choreography.Transport.SimpleX
             return new SmpMsg { MsgId = msgId, Timestamp = DateTime.UtcNow, EncryptedBody = body };
         }
 
-        // ERR err: "ERR " + err encoding. Por ahora capturamos como string ASCII.
+        // ERR err: "ERR " + err encoding. For now we capture it as an ASCII string.
         private static SmpErr ParseErr(MemoryStream ms)
         {
             ConsumeSpace(ms);
@@ -419,7 +419,7 @@ namespace Choreography.Transport.SimpleX
                 if (b < 0) break;
                 if (b == ' ')
                 {
-                    // espacio inicia args; rebobinar para que ParseXxx lo consuma
+                    // space starts args; rewind so ParseXxx consumes it
                     ms.Position--;
                     break;
                 }

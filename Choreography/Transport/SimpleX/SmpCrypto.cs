@@ -10,17 +10,17 @@ using Org.BouncyCastle.X509;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Reemplaza Sodium.Core para que Choreography corra en MAUI Android/iOS donde
-    // Sodium no provee binarios nativos. Toda la crypto es managed via BouncyCastle
-    // o System.Security.Cryptography (SHA256 nativo .NET).
+    // Replaces Sodium.Core so Choreography runs on MAUI Android/iOS where
+    // Sodium provides no native binaries. All crypto is managed via BouncyCastle
+    // or System.Security.Cryptography (native .NET SHA256).
     //
-    // crypto_box (X25519 + XSalsa20-Poly1305) se implementa sobre primitivas BC:
-    //   - X25519Agreement para shared secret
-    //   - HSalsa20 manual para derivar shared_key (BC no expone HSalsa20 por separado)
-    //   - XSalsa20Engine + Poly1305 para secretbox
+    // crypto_box (X25519 + XSalsa20-Poly1305) is implemented over BC primitives:
+    //   - X25519Agreement for the shared secret
+    //   - manual HSalsa20 to derive shared_key (BC does not expose HSalsa20 separately)
+    //   - XSalsa20Engine + Poly1305 for secretbox
     //
-    // La correctitud de HSalsa20 + crypto_box se valida en tests via cross-check
-    // contra Chaos.NaCl (NetSparkleUpdater fork) — produce el mismo output byte-exacto.
+    // The correctness of HSalsa20 + crypto_box is validated in tests via cross-check
+    // against Chaos.NaCl (NetSparkleUpdater fork) — it produces the same byte-exact output.
     internal static class SmpCrypto
     {
         public const int NonceSize = 24;
@@ -29,9 +29,9 @@ namespace Choreography.Transport.SimpleX
         private static readonly Org.BouncyCastle.Security.SecureRandom Rng = new();
 
         // --- Ed25519 signing ---
-        // Sodium expone secret key como 64 bytes (32-byte seed || 32-byte public).
-        // BC usa solo el 32-byte seed. Mantenemos el formato Sodium-style en la API
-        // para no romper datos persistidos; internamente extraemos los primeros 32 bytes.
+        // Sodium exposes the secret key as 64 bytes (32-byte seed || 32-byte public).
+        // BC uses only the 32-byte seed. We keep the Sodium-style format in the API
+        // so as not to break persisted data; internally we extract the first 32 bytes.
 
         public static (byte[] PublicKey, byte[] SecretKey) GenerateSigningKeyPair()
         {
@@ -120,38 +120,38 @@ namespace Choreography.Transport.SimpleX
 
         // --- C2S (server-to-recipient) layer decryption ---
         //
-        // simplexmq encrypta MSG bodies para entrega al recipient con NaCl crypto_box
-        // (XSalsa20-Poly1305 secretbox precedido de HSalsa20 con nonce-16-cero sobre el raw
-        // X25519 shared, conforme a NaCl crypto_box_beforenm). El nonce es el msgId padeado
-        // a 24 bytes con ceros a la derecha. Wire layout:
+        // simplexmq encrypts MSG bodies for delivery to the recipient with NaCl crypto_box
+        // (XSalsa20-Poly1305 secretbox preceded by HSalsa20 with a zero-16 nonce over the raw
+        // X25519 shared, per NaCl crypto_box_beforenm). The nonce is the msgId padded
+        // to 24 bytes with zeros on the right. Wire layout:
         //
         //   EncryptedBody = [16-byte Poly1305 tag][N-byte XSalsa20 ciphertext]
         //
-        // Plaintext (post-secretbox_open) es un paddedString:
+        // Plaintext (post-secretbox_open) is a paddedString:
         //
-        //   [Word16 BE bodyLen][bodyLen bytes rcvMsgBody]['#' padding hasta tamano fijo]
+        //   [Word16 BE bodyLen][bodyLen bytes rcvMsgBody]['#' padding up to a fixed size]
         //
-        // rcvMsgBody contiene los meta del server + el body original que envio el sender:
+        // rcvMsgBody contains the server meta + the original body the sender sent:
         //
         //   [Word64 BE SystemTime (8B)][MsgFlags (1B 'F'/'T' + extras)][' '][... msgBody ...]
         //
-        // Para handshake bootstrap (SEND unsigned), msgBody es el envelope serializado raw.
-        // Post-handshake (SEND signed), msgBody es a su vez [24B sender-nonce][crypto_box(...)].
+        // For handshake bootstrap (unsigned SEND), msgBody is the raw serialized envelope.
+        // Post-handshake (signed SEND), msgBody is in turn [24B sender-nonce][crypto_box(...)].
         //
-        // Aclaracion sobre cryptoBox de simplexmq: a primera vista parece usar el raw X25519
-        // shared como key directa de secretbox; en realidad simplexmq/src/Simplex/Messaging/Crypto.hs
-        // xSalsa20 hace XSalsa.initialize 20 secret (16zeros++iv0) seguido de XSalsa.derive iv1
-        // — dos cryptonite_xsalsa_derive consecutivas. La primera (con nonce todo en ceros)
-        // equivale a HSalsa20(secret, 16zeros) = crypto_box_beforenm. La segunda es la
-        // derivacion estandar HSalsa20(subkey, nonce[0..16]). Resultado: cryptoBox secret nonce
-        // = NaCl crypto_box(msg, nonce, recipientPub, senderSec) con secret = X25519 raw shared.
-        // Por eso reutilizamos Decrypt() (que ya hace DeriveSharedKey = HSalsa20 + SecretBoxOpen).
+        // Clarification on simplexmq's cryptoBox: at first glance it appears to use the raw X25519
+        // shared as the direct secretbox key; in reality simplexmq/src/Simplex/Messaging/Crypto.hs
+        // xSalsa20 does XSalsa.initialize 20 secret (16zeros++iv0) followed by XSalsa.derive iv1
+        // — two consecutive cryptonite_xsalsa_derive. The first (with an all-zero nonce)
+        // equals HSalsa20(secret, 16zeros) = crypto_box_beforenm. The second is the
+        // standard derivation HSalsa20(subkey, nonce[0..16]). Result: cryptoBox secret nonce
+        // = NaCl crypto_box(msg, nonce, recipientPub, senderSec) with secret = X25519 raw shared.
+        // That is why we reuse Decrypt() (which already does DeriveSharedKey = HSalsa20 + SecretBoxOpen).
         //
-        // Referencias simplexmq:
+        // simplexmq references:
         //   Server.hs:2030-2036  encryptMsg = cbEncryptMaxLenBS rcvDhSecret (cbNonce msgId)
         //   Crypto.hs:1314-1316  cbEncryptMaxLenBS = cryptoBox secret nonce . padMaxLenBS
-        //   Crypto.hs            cryptoBox secret nonce s = tag <> c (sin nonce prepended)
-        //   Crypto.hs            cbNonce padea msgId a 24 con ceros a la derecha si es mas corto
+        //   Crypto.hs            cryptoBox secret nonce s = tag <> c (no nonce prepended)
+        //   Crypto.hs            cbNonce pads msgId to 24 with zeros on the right if shorter
         //   Protocol.hs:313      MaxRcvMessageLen = 16104; padded size = 16106
         //   Protocol.hs          encodeRcvMsgBody = [SystemTime 8B][MsgFlags + ' '][msgBody Tail]
         public static byte[] DecryptC2SEnvelope(byte[] wireBody, byte[] msgId,
@@ -166,18 +166,18 @@ namespace Choreography.Transport.SimpleX
             if (wireBody.Length < MacSize + 2)
                 throw new ArgumentException($"wireBody demasiado corto ({wireBody.Length}B) para tag+lenPrefix");
 
-            // 1. Padear msgId a 24 bytes con ceros a la derecha (cbNonce de simplexmq).
+            // 1. Pad msgId to 24 bytes with zeros on the right (simplexmq's cbNonce).
             byte[] nonce = new byte[NonceSize];
             int copyLen = Math.Min(msgId.Length, NonceSize);
             Buffer.BlockCopy(msgId, 0, nonce, 0, copyLen);
 
-            // 2. NaCl crypto_box_open con shared X25519 + HSalsa20(zeros) wrap. Reutiliza el
-            //    Decrypt() existente, que es bit-equivalente a Chaos.NaCl/libsodium per la
-            //    test suite SmpCrypto_*_ByteEqualsChaosNaCl_*.
+            // 2. NaCl crypto_box_open with X25519 shared + HSalsa20(zeros) wrap. Reuses the
+            //    existing Decrypt(), which is bit-equivalent to Chaos.NaCl/libsodium per the
+            //    SmpCrypto_*_ByteEqualsChaosNaCl_* test suite.
             byte[] serverDhPubRaw = DecodeX25519PublicKeyDer(serverDhPublicKeyDer);
             byte[] padded = Decrypt(wireBody, nonce, recipientDhSecretRaw, serverDhPubRaw);
 
-            // 3. UnPad: [Word16 BE len][body][# padding]  ->  body de "len" bytes.
+            // 3. UnPad: [Word16 BE len][body][# padding]  ->  body of "len" bytes.
             if (padded.Length < 2)
                 throw new InvalidOperationException("padded plaintext demasiado corto para Word16 length prefix");
             int bodyLen = (padded[0] << 8) | padded[1];
@@ -189,13 +189,13 @@ namespace Choreography.Transport.SimpleX
             return rcvMsgBody;
         }
 
-        // Extrae el msgBody (lo que el sender realmente envio) del rcvMsgBody que el server
-        // encodea (simplexmq Protocol.hs encodeRcvMsgBody + clientRcvMsgBodyP):
+        // Extracts the msgBody (what the sender actually sent) from the rcvMsgBody that the server
+        // encodes (simplexmq Protocol.hs encodeRcvMsgBody + clientRcvMsgBodyP):
         //
         //   rcvMsgBody = [SystemTime 8B][MsgFlags (1B boolean + 0..6B extras)][' '][... msgBody ...]
         //
-        // Quota messages tienen otro prefijo ("QUOTA "); para handshake bootstrap el server
-        // entrega Messages normales, asi que tratamos QUOTA como error explicito.
+        // Quota messages carry a different prefix ("QUOTA "); for handshake bootstrap the server
+        // delivers normal Messages, so we treat QUOTA as an explicit error.
         public static byte[] ExtractMsgBodyFromRcvMsgBody(byte[] rcvMsgBody)
         {
             if (rcvMsgBody == null) throw new ArgumentNullException(nameof(rcvMsgBody));
@@ -240,9 +240,9 @@ namespace Choreography.Transport.SimpleX
         }
 
         // --- Public key DER (X.509 SubjectPublicKeyInfo) ---
-        // simplexmq Crypto.hs encodePubKey = encodeASNObj . publicToX509 — las keys
-        // del wire SMP NO van como 32 bytes raw, van envueltas en ASN.1 DER X.509 SPKI.
-        // Para Ed25519: ~44 bytes (OID 1.3.101.112). Para X25519: ~44 bytes (OID 1.3.101.110).
+        // simplexmq Crypto.hs encodePubKey = encodeASNObj . publicToX509 — the SMP wire
+        // keys do NOT go as 32 raw bytes, they are wrapped in ASN.1 DER X.509 SPKI.
+        // For Ed25519: ~44 bytes (OID 1.3.101.112). For X25519: ~44 bytes (OID 1.3.101.110).
 
         public static byte[] EncodeEd25519PublicKeyDer(byte[] rawPubKey)
         {
@@ -260,13 +260,13 @@ namespace Choreography.Transport.SimpleX
             return Org.BouncyCastle.X509.SubjectPublicKeyInfoFactory.CreateSubjectPublicKeyInfo(param).GetEncoded();
         }
 
-        // Decodifica una pubkey X25519 envuelta en ASN.1 DER X.509 SubjectPublicKeyInfo
-        // (formato que el servidor SMP envia para ServerDhPublicKey en IDS) y devuelve
-        // los 32 bytes raw aptos para crypto_box.
+        // Decodes an X25519 pubkey wrapped in ASN.1 DER X.509 SubjectPublicKeyInfo
+        // (format the SMP server sends for ServerDhPublicKey in IDS) and returns
+        // the 32 raw bytes suitable for crypto_box.
         public static byte[] DecodeX25519PublicKeyDer(byte[] derBytes)
         {
             if (derBytes == null) throw new ArgumentNullException(nameof(derBytes));
-            // Si ya viene en formato raw 32 bytes (caso degenerado), devolverlo tal cual.
+            // If it already comes as raw 32 bytes (degenerate case), return it as-is.
             if (derBytes.Length == 32) return derBytes;
 
             var spki = Org.BouncyCastle.Asn1.X509.SubjectPublicKeyInfo.GetInstance(derBytes);
@@ -277,7 +277,7 @@ namespace Choreography.Transport.SimpleX
                 $"DER no contiene una pubkey X25519 valida: {keyParam.GetType().Name}");
         }
 
-        // --- Hash + encoding helpers (managed nativo, no cambian) ---
+        // --- Hash + encoding helpers (native managed, unchanged) ---
 
         public static byte[] ComputeFingerprint(byte[] publicKeyBytes)
         {
@@ -323,8 +323,8 @@ namespace Choreography.Transport.SimpleX
             return HSalsa20(x25519Shared, new byte[16]);
         }
 
-        // crypto_secretbox(m, n, k): keystream = XSalsa20(k, n) sobre 32 zeros || m.
-        // Primeros 32 bytes son mac_key, resto = ciphertext. tag = Poly1305(mac_key, ct).
+        // crypto_secretbox(m, n, k): keystream = XSalsa20(k, n) over 32 zeros || m.
+        // The first 32 bytes are the mac_key, the rest = ciphertext. tag = Poly1305(mac_key, ct).
         // Output = tag(16) || ciphertext.
         internal static byte[] SecretBox(byte[] plaintext, byte[] nonce, byte[] key)
         {
@@ -391,10 +391,10 @@ namespace Choreography.Transport.SimpleX
             return plaintext;
         }
 
-        // HSalsa20: KDF de NaCl. Input = 32-byte key, 16-byte nonce. Output = 32 bytes.
-        // BC no la expone publica (la usa internamente en XSalsa20Engine.init), asi que
-        // la implementamos siguiendo el algoritmo Salsa20/20 sin suma final, output = 8
-        // words especificos. Validado en tests via cross-check vs Chaos.NaCl.
+        // HSalsa20: NaCl's KDF. Input = 32-byte key, 16-byte nonce. Output = 32 bytes.
+        // BC does not expose it publicly (it uses it internally in XSalsa20Engine.init), so
+        // we implement it following the Salsa20/20 algorithm without the final addition, output = 8
+        // specific words. Validated in tests via cross-check vs Chaos.NaCl.
         internal static byte[] HSalsa20(byte[] key, byte[] nonce16)
         {
             if (key == null || key.Length != 32) throw new ArgumentException("HSalsa20 key must be 32 bytes");

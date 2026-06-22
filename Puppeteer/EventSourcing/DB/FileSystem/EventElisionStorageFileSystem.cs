@@ -8,25 +8,25 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 {
 	// Cross-process safe elision store.
 	//
-	// El bug original: dos procesos con FS compartido (actor local con Cue() y
-	// actor remoto con Job()) hacian read-modify-AtomicReplace sobre el mismo
-	// elision.bin/skips.bin y la segunda AtomicReplace silenciosamente perdia
-	// las contribuciones del primero (clasico lost-update).
+	// The original bug: two processes sharing the FS (a local actor with Cue() and
+	// a remote actor with Job()) performed read-modify-AtomicReplace over the same
+	// elision.bin/skips.bin and the second AtomicReplace silently lost the
+	// contributions of the first (classic lost-update).
 	//
-	// El fix: cada MarkEventsAsElided escribe un .batch unico (con guid) en
-	// pending/. Workers no compiten — cada uno escribe a un archivo distinto.
-	// La coordinacion ocurre solo en la consolidacion (witness lock OS-level
-	// via FileShare.None), que mergea pending/*.batch al elision.bin y
-	// skips.bin canonicos. El commit transaccional es el rename .tmp -> .batch.
+	// The fix: each MarkEventsAsElided writes a unique .batch (with a guid) into
+	// pending/. Workers do not compete — each one writes to a distinct file.
+	// Coordination happens only at consolidation (OS-level witness lock via
+	// FileShare.None), which merges pending/*.batch into the canonical elision.bin
+	// and skips.bin. The transactional commit is the rename .tmp -> .batch.
 	internal sealed class EventElisionStorageFileSystem : EventElisionStorage
 	{
-		// Formato del archivo consolidado elision.bin.
+		// Format of the consolidated elision.bin file.
 		private static readonly byte[] MAGIC = new byte[] { (byte)'P', (byte)'P', (byte)'E', (byte)'L' };
 		private const ushort FORMAT_VERSION = 1;
 		private const int HEADER_SIZE = 10;
 		private const int RECORD_SIZE = 12;
 
-		// Formato de los .batch en pending/.
+		// Format of the .batch files in pending/.
 		private static readonly byte[] BATCH_MAGIC = new byte[] { (byte)'P', (byte)'B', (byte)'A', (byte)'T' };
 		private const ushort BATCH_FORMAT_VERSION = 1;
 		private const int BATCH_HEADER_SIZE = 22; // 4 magic + 2 version + 4 reactionId + 8 ticks + 4 entryCount
@@ -37,8 +37,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		private readonly PendingBatchDirectory pendingDir;
 		private readonly ReaderWriterLockSlim elisionLock = new ReaderWriterLockSlim();
 
-		// Vista in-memory unificada (consolidated + batches ya mergeados).
-		// Se refresca lazily desde disco cuando otros procesos publicaron cambios.
+		// Unified in-memory view (consolidated + already-merged batches).
+		// Refreshed lazily from disk when other processes published changes.
 		private readonly Dictionary<int, HashSet<long>> eventsByReaction = new();
 		private DateTime consolidatedMtimeUtc;
 		private readonly HashSet<string> mergedBatchNames = new();
@@ -101,8 +101,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Mergea TODOS los pending batches del disco al estado in-memory.
-		// Llamado al inicio y por RefreshIfStale cuando aparecen archivos nuevos.
+		// Merges ALL pending batches from disk into the in-memory state.
+		// Called at startup and by RefreshIfStale when new files appear.
 		private void MergeAllPendingIntoMemory()
 		{
 			foreach (var batchPath in pendingDir.ListBatches())
@@ -121,9 +121,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Refresca la vista in-memory si el consolidado en disco cambio o si
-		// aparecieron batches nuevos de otros procesos. Operacion barata
-		// (mtime + dir listing) cuando no hay cambios.
+		// Refreshes the in-memory view if the consolidated file on disk changed or
+		// if new batches from other processes appeared. Cheap operation
+		// (mtime + dir listing) when there are no changes.
 		private void RefreshIfStale()
 		{
 			DateTime currentMtime = File.Exists(filePath) ? File.GetLastWriteTimeUtc(filePath) : DateTime.MinValue;
@@ -209,8 +209,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return true;
 		}
 
-		// Persiste el estado eventsByReaction al elision.bin canonico via AtomicReplace.
-		// Llamado solo desde Consolidate / RemoveElidedIds bajo elisionLock(write).
+		// Persists the eventsByReaction state to the canonical elision.bin via AtomicReplace.
+		// Called only from Consolidate / RemoveElidedIds under elisionLock(write).
 		private void SaveConsolidated()
 		{
 			int totalRecords = 0;
@@ -241,38 +241,38 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			consolidatedMtimeUtc = File.GetLastWriteTimeUtc(filePath);
 		}
 
-		// Fuerza un drain de pending/ a los archivos consolidados, usado por Distill
-		// para que la pasada de fisicalizacion vea un snapshot estable. Si otro
-		// proceso ya esta consolidando, esperamos a que termine releyendo del disco
-		// — no necesitamos *nosotros* ser quien consolide.
+		// Forces a drain of pending/ into the consolidated files, used by Distill
+		// so the physicalization pass sees a stable snapshot. If another process is
+		// already consolidating, we wait for it to finish by re-reading from disk
+		// — *we* don't need to be the one who consolidates.
 		internal void ForceConsolidate()
 		{
 			TryConsolidate(blockUntilDone: true);
 		}
 
-		// Intenta consolidar pending/ -> elision.bin + skips.bin. Best-effort:
-		// si otro proceso tiene el witness, simplemente retorna y otra ronda
-		// recogera nuestro batch (los .batch que dejamos quedan durables).
+		// Attempts to consolidate pending/ -> elision.bin + skips.bin. Best-effort:
+		// if another process holds the witness, it simply returns and another round
+		// will pick up our batch (the .batch files we left behind remain durable).
 		private void TryConsolidate(bool blockUntilDone)
 		{
 			using (var lease = pendingDir.TryAcquireWitness())
 			{
 				if (lease == null)
 				{
-					// Otro proceso consolida ahora. Si vamos a depender del resultado
-					// (Distill), esperamos un poco y recargamos del disco. La carga
-					// real de los .batch nuestros la haran ellos.
+					// Another process is consolidating now. If we are going to depend on the
+					// result (Distill), we wait a bit and reload from disk. The actual
+					// loading of our .batch files will be done by them.
 					if (blockUntilDone) WaitForConsolidationToProgress();
 					return;
 				}
 
-				// Estamos solos. Snapshot de batches a procesar.
+				// We are alone. Snapshot of batches to process.
 				List<string> batches = pendingDir.ListBatches();
 				if (batches.Count == 0) return;
 
-				// Releemos consolidated.bin del disco — no confiamos en in-memory
-				// porque otros procesos pueden haber publicado cambios entre nuestra
-				// ultima refresh y este momento.
+				// We re-read consolidated.bin from disk — we don't trust in-memory
+				// because other processes may have published changes between our
+				// last refresh and this moment.
 				var canonical = LoadConsolidatedFromDisk();
 				var skipSet = new SortedSet<long>(skipStore.Load());
 
@@ -290,15 +290,15 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					}
 				}
 
-				// Orden de escritura: primero skips.bin, luego elision.bin, luego
-				// borramos los batches consumidos. Si crasheamos en medio:
-				//   - antes de skips.bin: nada cambio, batches sobreviven.
-				//   - despues de skips.bin antes de elision.bin: skips tiene la
-				//     info nueva, elision aun no, batches sobreviven -> proxima
-				//     consolidacion los reaplica (idempotente).
-				//   - despues de elision.bin antes del delete: ambos consolidados,
-				//     batches sobreviven -> proxima consolidacion los reaplica
-				//     (idempotente, mismo estado final).
+				// Write order: skips.bin first, then elision.bin, then we delete the
+				// consumed batches. If we crash in the middle:
+				//   - before skips.bin: nothing changed, batches survive.
+				//   - after skips.bin before elision.bin: skips has the new
+				//     info, elision does not yet, batches survive -> the next
+				//     consolidation reapplies them (idempotent).
+				//   - after elision.bin before the delete: both consolidated,
+				//     batches survive -> the next consolidation reapplies them
+				//     (idempotent, same final state).
 				skipStore.Save(skipSet);
 
 				elisionLock.EnterWriteLock();
@@ -342,9 +342,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return result;
 		}
 
-		// Espera pasiva por un consolidador externo. Usado solo desde ForceConsolidate.
-		// Si nuestro batch propio sigue en pending/ tras la espera, lo consolidamos
-		// nosotros mismos (en la siguiente iteracion el lease ya estara libre).
+		// Passive wait for an external consolidator. Used only from ForceConsolidate.
+		// If our own batch is still in pending/ after the wait, we consolidate it
+		// ourselves (on the next iteration the lease will already be free).
 		private void WaitForConsolidationToProgress()
 		{
 			const int maxSpins = 20;
@@ -354,14 +354,14 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				Thread.Sleep(spinMs);
 				if (pendingDir.CountBatches() == 0) return;
 
-				// Reintentar tomar el witness — si el otro consolidador termino,
-				// quiza queden batches nuevos que escribimos durante su trabajo.
+				// Retry acquiring the witness — if the other consolidator finished,
+				// there may be new batches we wrote during its work.
 				using (var lease = pendingDir.TryAcquireWitness())
 				{
 					if (lease != null)
 					{
-						// Soltamos y dejamos que TryConsolidate(false) corra normalmente
-						// — esto evita re-tomarlo dentro del using.
+						// We release it and let TryConsolidate(false) run normally
+						// — this avoids re-acquiring it inside the using.
 					}
 					else continue;
 				}
@@ -378,9 +378,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			var skipSet = skipStore.Load();
 			if (skipSet.Contains(dairyId)) return true;
 
-			// Tambien chequear pending batches que aun no se mergearon al skipStore.
-			// La operacion es necesaria porque skipStore.Load() solo lee skips.bin
-			// consolidado, no los .batch.
+			// Also check pending batches that have not yet been merged into the skipStore.
+			// This operation is necessary because skipStore.Load() only reads the
+			// consolidated skips.bin, not the .batch files.
 			elisionLock.EnterReadLock();
 			try
 			{
@@ -403,14 +403,14 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			if (reactionId <= 0) throw new LanguageException($"ReactionId {reactionId} must be greater than zero.");
 			if (dairyIds.Length == 0) return;
 
-			// Fase 1 (commit transaccional): escribir batch durable a pending/.
-			// El rename .tmp -> .batch es el commit point — antes nada es visible,
-			// despues el batch sobrevive cualquier crash.
+			// Phase 1 (transactional commit): write a durable batch to pending/.
+			// The rename .tmp -> .batch is the commit point — before it nothing is visible,
+			// after it the batch survives any crash.
 			byte[] payload = EncodeBatch(reactionId, timestamp, dairyIds);
 			pendingDir.WriteBatch(payload);
 
-			// Fase 2 (in-memory): este proceso ve los nuevos markers inmediatamente.
-			// Otros procesos los veran cuando consoliden o cuando refresquen su vista.
+			// Phase 2 (in-memory): this process sees the new markers immediately.
+			// Other processes will see them when they consolidate or refresh their view.
 			elisionLock.EnterWriteLock();
 			try
 			{
@@ -421,10 +421,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 			finally { elisionLock.ExitWriteLock(); }
 
-			// Fase 3 (consolidacion oportunista): intentar drenar pending/. Si otro
-			// proceso ya tiene el witness, no esperamos — nuestro .batch quedo
-			// durable en disco y otra ronda lo recogera. Esto evita acoplar la
-			// latencia del Mark a la consolidacion.
+			// Phase 3 (opportunistic consolidation): try to drain pending/. If another
+			// process already holds the witness, we do not wait — our .batch is
+			// durable on disk and another round will pick it up. This avoids coupling
+			// the Mark latency to consolidation.
 			TryConsolidate(blockUntilDone: false);
 		}
 
@@ -477,7 +477,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					result.Add(id);
 			}
 
-			// Tambien incluir lo que esta en pending y aun no llego a skips.bin.
+			// Also include what is in pending and has not yet reached skips.bin.
 			elisionLock.EnterReadLock();
 			try
 			{
@@ -499,12 +499,12 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return Task.CompletedTask;
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange.
-		// GAP HONESTO: el formato binario actual del consolidado (RECORD_SIZE = 12 =
-		// reactionId + entryId) NO preserva timestamp por marker. Devolvemos
-		// DateTime.MinValue como sentinel. Orden de marcaje se reduce a EntryId.
-		// SQL backends preservan Timestamp via columna EventElision.Timestamp y
-		// devuelven el valor real.
+		// Materialize v2 / Phase 3 — wire verb (d) DameElidedRange.
+		// HONEST GAP: the current binary format of the consolidated file (RECORD_SIZE = 12 =
+		// reactionId + entryId) does NOT preserve a per-marker timestamp. We return
+		// DateTime.MinValue as a sentinel. The marking order reduces to EntryId.
+		// SQL backends preserve Timestamp via the EventElision.Timestamp column and
+		// return the real value.
 		protected internal override void ReadElisionMarkersInRange(long fromDairyId, long toDairyId, List<MaterializationElisionMarker> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -546,10 +546,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return Task.CompletedTask;
 		}
 
-		// Cuenta de IDs genuinamente nuevos respecto al estado in-memory actual.
-		// Aproximacion: no fuerza refresh ni mira pending de otros procesos. Es
-		// suficiente porque metadata.TotalNonSkippedCount se recomputa cada
-		// startup desde skipStore.LoadCount() (DiaryStorageFileSystem.cs:101-108).
+		// Count of genuinely new IDs relative to the current in-memory state.
+		// Approximation: it does not force a refresh nor look at other processes'
+		// pending files. It is sufficient because metadata.TotalNonSkippedCount is
+		// recomputed every startup from skipStore.LoadCount() (DiaryStorageFileSystem.cs:101-108).
 		internal int GetNewSkipCount(long[] dairyIds)
 		{
 			if (dairyIds == null) throw new ArgumentNullException(nameof(dairyIds));
@@ -576,10 +576,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			finally { elisionLock.ExitReadLock(); }
 		}
 
-		// Usado por Distill: tras materializar fisicamente las elisiones, los EntryIds
-		// removidos dejan de ser "logicamente elididos" para volverse "ausentes". Caller
-		// es DiaryStorageFileSystem.Distill, que ya forzo ForceConsolidate antes para
-		// que la operacion vea un snapshot estable.
+		// Used by Distill: after physically materializing the elisions, the removed
+		// EntryIds stop being "logically elided" and become "absent". The caller
+		// is DiaryStorageFileSystem.Distill, which already forced ForceConsolidate
+		// beforehand so the operation sees a stable snapshot.
 		internal void RemoveElidedIds(IEnumerable<long> dairyIds)
 		{
 			if (dairyIds == null) throw new ArgumentNullException(nameof(dairyIds));
@@ -599,8 +599,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			finally { elisionLock.ExitWriteLock(); }
 		}
 
-		// Test seam: cantidad de batches pending. Usado por tests de concurrencia
-		// para verificar que la consolidacion drena el directorio.
+		// Test seam: number of pending batches. Used by concurrency tests
+		// to verify that consolidation drains the directory.
 		internal int CountPendingBatches() => pendingDir.CountBatches();
 	}
 }

@@ -79,17 +79,49 @@ namespace Puppeteer.EventSourcing.Follower
 			reaction.SetCausationAction(script);
 		}
 
-		// Variante con check: el tell del script entrega al RECEPTOR un
-		// CheckThenCommand — el check (predicado DSL) se evalua contra el estado
-		// del receptor, no aqui (el origen siempre cumpliria). Asi un fan-out
-		// replicado es idempotente: el nodo que ya creo el efecto absorbe el
-		// echo. El check viaja en TellEnvelope.Check. Firma pensada para
-		// `Continue(check: "...", "tell ...")`.
+		// Variant with check: the script's tell delivers a CheckThenCommand to
+		// the RECEIVER — the check (DSL predicate) is evaluated against the
+		// receiver's state, not here (the origin would always satisfy it). This
+		// makes a replicated fan-out idempotent: the node that already created
+		// the effect absorbs the echo. The check travels in TellEnvelope.Check.
+		// Signature intended for `Continue(check: "...", "tell ...")`.
 		public void Continue(string check, string script)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(check);
 			ArgumentException.ThrowIfNullOrWhiteSpace(script);
 			reaction.SetCausationAction(script, check);
+		}
+	}
+
+	// Journal-outbox emit (INFRASTRUCTURE — NOT currently exposed as a Reaction
+	// action plane; the three exposed planes are Program, Causation, Metadata).
+	// Retained, not deleted, for future re-exposure: it would record the outgoing
+	// message into the diary's outbox table, committed atomically with the reaction
+	// cursor advance (the exactly-once-recording primitive); a relay (actor.Outbox)
+	// then delivers it at-least-once and a deduplicating sink makes the effect
+	// exactly-once. Write-mode (it touches the journal), so it could never be the
+	// isQuery emit of the read-only Program plane. See notes/reactions-outbox-emit.md.
+	public sealed class OutboxPlane
+	{
+		private readonly Reaction reaction;
+
+		internal OutboxPlane(Reaction reaction)
+		{
+			ArgumentNullException.ThrowIfNull(reaction);
+			this.reaction = reaction;
+		}
+
+		// destination — the logical sink name carried on every recorded message
+		// (the relay's IOutboxSink decides what it maps to).
+		// payload — a template string recorded verbatim except that `@name` tokens
+		// are substituted with the matched parameter bindings at record time. It is
+		// recorded DATA, not an executed script, so the query-block / top-level-call
+		// parser rules that constrain Program.Emit do not apply here.
+		public void Emit(string destination, string payload)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+			ArgumentNullException.ThrowIfNull(payload);
+			reaction.SetOutboxAction(destination, payload);
 		}
 	}
 
@@ -112,9 +144,9 @@ namespace Puppeteer.EventSourcing.Follower
 			reaction.SetMetadataAction(MetadataKind.Elide, destination: null);
 		}
 
-		// F4: elisión selectiva. Elide(seek: "X") elide solo los entryIds del Seek "X"
-		// del match (p.ej. la compra ancla, sin sus confirms). Elide(seeks: "A","B")
-		// elide varios. Sin argumentos, Elide() elide la cadena completa del match.
+		// F4: selective elision. Elide(seek: "X") elides only the entryIds of Seek "X"
+		// from the match (e.g. the anchor entry, without its confirms). Elide(seeks: "A","B")
+		// elides several. With no arguments, Elide() elides the full chain of the match.
 		public void Elide(string seek)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(seek);

@@ -13,8 +13,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 	/// Designed to overlap human-TTY readability with LLM-context efficiency.
 	///
 	/// <para>
-	/// Dialect chosen for Phase 2 (subject to refinement after Alvaro
-	/// reviews actual output of canonical examples):
+	/// Dialect chosen for Phase 2 (subject to refinement after review
+	/// of actual output of canonical examples):
 	/// <list type="bullet">
 	/// <item>2-space indent per nesting level.</item>
 	/// <item>Object: <c>key: value</c> per line.</item>
@@ -229,7 +229,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			atLineStart = false;
 		}
 
-		// ── Field (escalar) ────────────────────────────────────────────────
+		// ── Field (scalar) ─────────────────────────────────────────────────
 
 		public void Field(ReadOnlySpan<char> name, bool value)
 		{
@@ -335,7 +335,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			atLineStart = true;
 		}
 
-		// ── Field (collection de primitivos — inline array) ────────────────
+		// ── Field (collection of primitives — inline array) ────────────────
 
 		private void WriteInlineArrayHeader(ReadOnlySpan<char> name)
 		{

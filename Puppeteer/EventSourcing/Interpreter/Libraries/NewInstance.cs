@@ -20,10 +20,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		private List<ConstructorInfo> constructors;
 		private readonly string targetNamespace;
 
-		// Estado capturado en CollectConstructors solo para el diagnostico de
-		// BuildConstructorMismatchMessage: distingue "clase ausente de la libreria"
-		// de "clase presente pero sin constructor de esa aridad", y lista lo que la
-		// libreria SI cargo. Sin esto ambas causas emitian el mismo mensaje enganoso.
+		// State captured in CollectConstructors only for the diagnostic of
+		// BuildConstructorMismatchMessage: distinguishes "class absent from the library"
+		// from "class present but without a constructor of that arity", and lists what the
+		// library DID load. Without this both causes emitted the same misleading message.
 		private bool classRegisteredInLibrary;
 		private List<EventSourcing.DomainLibraries.ClassInfo> registeredClasses;
 		private string[] loadedAssemblyNames;
@@ -146,9 +146,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// "Cannot generate an Expression for Id '...' because its scope is undefined".
 			if (parameterType.IsEnum && AstExpression.ClassifyEnumArg(arguments[i]) != AstExpression.EnumArgKind.NotEnumBindable)
 			{
-				// Simbolo pelado -> Enum.Parse(Name) sin ExecuteExpression (no tiene scope);
-				// string con valor (parametro/variable/literal) -> Enum.Parse(valor). El helper
-				// elige la fuente del nombre segun el tipo del argumento.
+				// Bare symbol -> Enum.Parse(Name) without ExecuteExpression (it has no scope);
+				// string with a value (parameter/variable/literal) -> Enum.Parse(value). The helper
+				// chooses the source of the name according to the argument's type.
 				argExpr = AstExpression.ParseEnumArgExpression(parameterType, arguments[i], parametersParam);
 			}
 			else
@@ -184,9 +184,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return argExpr;
 		}
 
-		// Binding compilado de un constructor params expandido: liga los fijos por la ruta normal y
-		// emite Expression.NewArrayInit del element-type con cada trailing convertido por la ruta
-		// escalar (numerica via CoerceScalarExpression + enum via ParseEnumArgExpression).
+		// Compiled binding of an expanded params constructor: binds the fixed ones by the normal path and
+		// emits Expression.NewArrayInit of the element-type with each trailing one converted by the
+		// scalar path (numeric via CoerceScalarExpression + enum via ParseEnumArgExpression).
 		private Expression BuildParamsExpansionNew(ConstructorInfo constructor, ParameterInfo[] parameters, Type elementType, int fixedCount, ParameterExpression parametersParam)
 		{
 			Expression[] args = new Expression[parameters.Length];
@@ -261,9 +261,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
         }
 
-        // Binding interpretado de un constructor params expandido: liga los parametros fijos por la
-        // ruta escalar normal y arma el arreglo del element-type coercionando cada elemento trailing
-        // por la misma ruta escalar (numerica + enum). Paralelo a DotAccess.BindParamsExpansionInterpreted.
+        // Interpreted binding of an expanded params constructor: binds the fixed parameters by the
+        // normal scalar path and builds the element-type array coercing each trailing element
+        // by the same scalar path (numeric + enum). Parallel to DotAccess.BindParamsExpansionInterpreted.
         private object[] BindParamsExpansionInterpreted(ParameterInfo[] parameters, Type elementType, int fixedCount)
         {
             object[] result = new object[parameters.Length];
@@ -315,8 +315,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	{
 		constructors = new List<ConstructorInfo>();
 
-		// Capturamos el contexto de la libreria para el diagnostico de clase ausente.
-		// Es barato (lista de nombres) y solo se usa si la resolucion falla.
+		// We capture the library context for the absent-class diagnostic.
+		// It is cheap (a list of names) and only used if resolution fails.
 		loadedAssemblyNames = libraries.LoadedAssemblyNames.ToArray();
 
 		if (!libraries.TryFindClassesByName(className, out var classInfosEnumerable))
@@ -352,20 +352,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		}
 		else
 		{
-			// Sin clausula 'in': aceptamos todos los candidatos por nombre simple. La
-			// ambiguedad por homonimia entre namespaces NO se decide aqui — se difiere
-			// a ResolveConstructor (via ComputeType/FindMatchingConstructor), donde se
-			// filtra por compatibilidad de la firma del constructor. Cuando los tipos
-			// de los argumentos identifican una sola clase, no hay ambiguedad real y
-			// la instanciacion procede; si la firma matchea constructores de varios
-			// namespaces, alli se lanza el error de "Ambiguous reference" con el detalle
-			// correcto (firma + namespaces que la satisfacen).
+			// Without the 'in' clause: we accept all candidates by simple name. The
+			// ambiguity from homonymy across namespaces is NOT decided here — it is deferred
+			// to ResolveConstructor (via ComputeType/FindMatchingConstructor), where it is
+			// filtered by compatibility of the constructor signature. When the argument
+			// types identify a single class, there is no real ambiguity and
+			// instantiation proceeds; if the signature matches constructors of several
+			// namespaces, there the "Ambiguous reference" error is thrown with the
+			// correct detail (signature + namespaces that satisfy it).
 			candidateClasses = classInfos;
 		}
 
-		// Conservamos las clases candidatas (por nombre/namespace) para que, si NINGUN
-		// constructor coincide con la aridad, el diagnostico pueda listar los constructores
-		// realmente disponibles en lugar de mentir con "no class with that name is registered".
+		// We keep the candidate classes (by name/namespace) so that, if NO
+		// constructor matches the arity, the diagnostic can list the constructors
+		// actually available instead of lying with "no class with that name is registered".
 		registeredClasses = candidateClasses;
 
 		foreach (var classInfo in candidateClasses)
@@ -376,9 +376,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				int parameterCount = constructorParameters.Length;
 				bool sameArgumentCount = parameterCount == arguments.Length;
 
-				// Candidato params: ultimo parametro params y al menos N-1 argumentos. Asi una
-				// llamada de aridad variable tambien colecciona el constructor params aunque su
-				// numero de parametros no coincida exactamente con el numero de argumentos.
+				// params candidate: last parameter is params and at least N-1 arguments. This way a
+				// variable-arity call also collects the constructor params even though its
+				// parameter count does not exactly match the number of arguments.
 				bool paramsCandidate =
 					parameterCount > 0
 					&& AstExpression.IsParamsParameter(constructorParameters[parameterCount - 1])
@@ -402,9 +402,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         {
             if (constructors == null) throw new LanguageException($"Constructors have not been collected for class '{className}'. CollectConstructors must be called before resolving a constructor.");
 
-            // Seleccion determinista: primero los constructores no-params de aridad exacta. Solo
-            // si ninguno matchea se consideran los params. Asi un constructor no-params de aridad
-            // exacta SIEMPRE gana sobre la variante params (paralelo a FindMethod en DotAccess).
+            // Deterministic selection: first the non-params constructors of exact arity. Only
+            // if none matches are the params ones considered. Thus a non-params constructor of exact
+            // arity ALWAYS wins over the params variant (parallel to FindMethod in DotAccess).
             List<ConstructorInfo> exactConstructors = new List<ConstructorInfo>();
             List<ConstructorInfo> paramsConstructors = new List<ConstructorInfo>();
             foreach (ConstructorInfo constructorInfo in constructors)
@@ -442,10 +442,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 throw new LanguageException($"Ambiguous reference: class '{className}' with the given constructor signature exists in multiple namespaces: {namespaces}. Use the 'in' clause to specify the namespace (e.g. ClassName(...) in MyNamespace).");
             }
 
-            // Ruta no-params: se conserva la seleccion historica "primer compatible en orden del
-            // CLR" para no alterar la desambiguacion numerica ya establecida entre sobrecargas de
-            // coleccion (p.ej. List<double> liga tanto a List<double> como a List<decimal>).
-            // Ruta params: pick determinista (no depende del orden del CLR).
+            // Non-params path: the historical selection "first compatible in CLR order" is kept
+            // so as not to alter the numeric disambiguation already established between collection
+            // overloads (e.g. List<double> binds to both List<double> and List<decimal>).
+            // Params path: deterministic pick (does not depend on CLR order).
             return usingExact ? compatibleConstructors[0] : PickDeterministicConstructor(compatibleConstructors);
         }
 
@@ -482,9 +482,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return sb.ToString();
         }
 
-        // Compatibilidad no-params de aridad exacta. Replica EXACTAMENTE la logica historica de
-        // IsConstructorCompatibleWithArguments (sin el guard de null/object de la ruta params) para
-        // no alterar que constructores se consideran compatibles en la ruta no-params.
+        // Non-params compatibility of exact arity. Replicates EXACTLY the historical logic of
+        // IsConstructorCompatibleWithArguments (without the null/object guard of the params path) so as
+        // not to alter which constructors are considered compatible in the non-params path.
         private bool IsConstructorExactCompatible(ConstructorInfo constructorInfo)
         {
             ParameterInfo[] parameters = constructorInfo.GetParameters();
@@ -506,9 +506,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return true;
         }
 
-        // Match de un constructor params: ultimo parametro params, al menos N-1 argumentos, los
-        // fijos compatibles, y los trailing compatibles como elementos del element-type (forma
-        // expandida) o como el arreglo ya armado pasado directo (forma directa). Conservadora.
+        // Match of a params constructor: last parameter is params, at least N-1 arguments, the
+        // fixed ones compatible, and the trailing ones compatible as elements of the element-type (expanded
+        // form) or as the already-built array passed directly (direct form). Conservative.
         private bool IsConstructorParamsCompatible(ConstructorInfo constructorInfo)
         {
             ParameterInfo[] parameters = constructorInfo.GetParameters();
@@ -555,8 +555,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return AreCompatible(argType, paramType);
         }
 
-        // Decide si la llamada al constructor debe EXPANDIR los trailing en un arreglo nuevo, o si
-        // el arreglo se paso directo. Misma regla que en DotAccess.UsesParamsExpansion.
+        // Decides whether the constructor call must EXPAND the trailing ones into a new array, or whether
+        // the array was passed directly. Same rule as in DotAccess.UsesParamsExpansion.
         private bool ConstructorUsesParamsExpansion(ParameterInfo[] parameters, out Type elementType, out int fixedCount)
         {
             elementType = null;
@@ -616,22 +616,22 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
             if (errorMessage.Length == 0)
             {
-                // La lista `constructors` quedo vacia (ningun constructor coincide con la
-                // aridad). Eso ocurre en DOS situaciones distintas que antes producian el
-                // mismo mensaje enganoso. Las separamos:
+                // The `constructors` list ended up empty (no constructor matches the
+                // arity). That happens in TWO distinct situations that previously produced the
+                // same misleading message. We separate them:
                 if (!classRegisteredInLibrary)
                 {
-                    // (a) La clase NO esta en la libreria del actor. Listamos los assemblies
-                    // cargados — el dato que hace obvia una mala configuracion de librerias
-                    // (p.ej. un follower que paso el assembly de la app y no el del dominio).
+                    // (a) The class is NOT in the actor's library. We list the loaded
+                    // assemblies — the datum that makes a bad library configuration obvious
+                    // (e.g. a follower that passed the host assembly and not the domain one).
                     errorMessage = string.Format(
                         "Class '{0}' is not registered in the actor's library. Loaded assemblies: {1}. Known classes: {2}.",
                         className, FormatLoadedAssemblies(), FormatKnownClasses());
                 }
                 else
                 {
-                    // (b) La clase SI esta registrada, pero ningun constructor acepta esta
-                    // aridad. Listamos los constructores disponibles en vez de mentir.
+                    // (b) The class IS registered, but no constructor accepts this
+                    // arity. We list the available constructors instead of lying.
                     errorMessage = string.Format(
                         "Class '{0}' is registered, but no constructor takes {1} argument(s). Available constructors: {2}.",
                         className, arguments.Length, FormatAvailableConstructors());
@@ -646,8 +646,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return string.Join(", ", loadedAssemblyNames);
         }
 
-        // Preview acotado de las clases conocidas: ordenado y limitado para que el mensaje
-        // no explote cuando la libreria carga assemblies grandes (p.ej. el motor completo).
+        // Bounded preview of the known classes: ordered and limited so the message
+        // does not explode when the library loads large assemblies (e.g. the whole engine).
         private string FormatKnownClasses()
         {
             if (knownClassNames == null || knownClassNames.Length == 0) return "(none)";

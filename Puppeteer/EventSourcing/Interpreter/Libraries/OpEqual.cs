@@ -235,7 +235,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
 		{
 			// Special case: nullable parameter == null
-			// Lee VariableSymbol.value directamente (type object) para evitar unbox de value types
+			// Reads VariableSymbol.value directly (type object) to avoid unboxing value types
 			{
 				Id paramId = null;
 				if (e1 is LiteralNull && e2 is Id rightId && rightId.IsNullableParameter)

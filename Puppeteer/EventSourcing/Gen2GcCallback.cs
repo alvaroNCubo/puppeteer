@@ -4,15 +4,15 @@ using System.Runtime.InteropServices;
 
 namespace Puppeteer.EventSourcing
 {
-	// Dispara un callback en cada coleccion de GC Gen2 (presion de memoria), via el
-	// truco BCL de finalizador re-registrado — mismo patron que System.Buffers.ArrayPool.
-	// Lo usa el pool POR FORMA para invocar Trim() (decaimiento del idle) sin un timer ni
-	// reloj de pared: el decaimiento ocurre justo cuando hay presion de memoria, y nunca
-	// toca el hot path (corre en el hilo finalizador).
+	// Fires a callback on every Gen2 GC collection (memory pressure), via the BCL
+	// re-registered-finalizer trick — the same pattern as System.Buffers.ArrayPool.
+	// The BY-SHAPE pool uses it to invoke Trim() (idle decay) without a timer or a
+	// wall clock: the decay happens exactly when there is memory pressure, and it
+	// never touches the hot path (it runs on the finalizer thread).
 	//
-	// Mantiene una referencia DEBIL al objetivo: el callback NO impide que el objetivo
-	// (y por ende este callback) sean recolectados. Cuando el objetivo muere — p.ej. el
-	// ActorHandler dueño del pool —, el callback deja de re-registrarse y se extingue.
+	// Holds a WEAK reference to the target: the callback does NOT prevent the target
+	// (and therefore this callback) from being collected. When the target dies — e.g.
+	// the ActorHandler that owns the pool — the callback stops re-registering and dies.
 	internal sealed class Gen2GcCallback : CriticalFinalizerObject
 	{
 		private readonly Func<object, bool> _callback;
@@ -24,7 +24,7 @@ namespace Puppeteer.EventSourcing
 			_weakTarget = GCHandle.Alloc(target, GCHandleType.Weak);
 		}
 
-		// callback recibe el objetivo y retorna true para seguir re-registrandose.
+		// callback receives the target and returns true to keep re-registering.
 		internal static void Register(Func<object, bool> callback, object target)
 		{
 			ArgumentNullException.ThrowIfNull(callback);
@@ -43,7 +43,7 @@ namespace Puppeteer.EventSourcing
 			object target = _weakTarget.Target;
 			if (target == null)
 			{
-				// El objetivo fue recolectado: dejar morir el callback.
+				// The target was collected: let the callback die.
 				_weakTarget.Free();
 				return;
 			}

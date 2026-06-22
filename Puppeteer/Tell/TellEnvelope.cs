@@ -1,9 +1,9 @@
 namespace Puppeteer.Tell
 {
-	// Sobre que viaja del actor de origen (A) al transport, y del transport al
-	// receptor (B). Es DTO operacional — no es la oración del journal. La oración
-	// vive en el journal de A; el envelope es solo el sobre que el transport
-	// entrega para que B procese por su endpoint público.
+	// Envelope that travels from the origin actor (A) to the transport, and from the transport to the
+	// receiver (B). It is an operational DTO — it is not the journal sentence. The sentence
+	// lives in A's journal; the envelope is just the envelope that the transport
+	// delivers so that B processes it through its public endpoint.
 	//
 	// Plan 4 of the Tell primitive roadmap introduces the type. Plan 5 wires it
 	// to the journal entry of the executing TellStatement.
@@ -15,8 +15,8 @@ namespace Puppeteer.Tell
 		string Transport,
 		string CausalEventId,
 		string ReactionName,
-		// Predicado DSL opcional de un Causation.Continue(check:, ...). Cuando no
-		// es null, el receptor debe correr el CommandText como CheckThenCommand
-		// (check primero, contra su propio estado) para idempotencia del fan-out.
+		// Optional DSL predicate of a Causation.Continue(check:, ...). When it is
+		// not null, the receiver must run the CommandText as a CheckThenCommand
+		// (check first, against its own state) for fan-out idempotency.
 		string Check = null);
 }

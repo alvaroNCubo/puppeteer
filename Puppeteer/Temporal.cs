@@ -2,9 +2,9 @@ using System;
 
 namespace Puppeteer
 {
-	// Helper temporal expuesto al DSL de Reactions.Where como instance global 'time'.
-	// Permite escribir time.Days(14), time.Hours(3), etc. que retornan TimeSpan
-	// para comparaciones con (@Now - SeekName.@Now).
+	// Temporal helper exposed to the Reactions.Where DSL as the global instance 'time'.
+	// Allows writing time.Days(14), time.Hours(3), etc. that return TimeSpan
+	// for comparisons with (@Now - SeekName.@Now).
 	public class Temporal
 	{
 		public TimeSpan Days(int n)

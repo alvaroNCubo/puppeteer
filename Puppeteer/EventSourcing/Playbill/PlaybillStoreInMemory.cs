@@ -6,11 +6,11 @@ using Puppeteer.EventSourcing.DB;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Backend de Playbill en memoria. Tests-only por construccion (paralelo a
-	// DiaryStorageInMemory). Shared storage por nombre de actor — multiples
-	// instancias del mismo actor comparten el mismo storage dict para que el
-	// patron "construir Performance varias veces apuntando al mismo actor en
-	// tests" funcione consistentemente.
+	// In-memory Playbill backend. Tests-only by construction (parallel to
+	// DiaryStorageInMemory). Shared storage by actor name — multiple
+	// instances of the same actor share the same storage dict so the
+	// "build Performance several times pointing at the same actor in
+	// tests" pattern works consistently.
 	internal sealed class PlaybillStoreInMemory : PlaybillStore
 	{
 		private static readonly Dictionary<string, SharedStorageData> sharedStorages = new Dictionary<string, SharedStorageData>();
@@ -38,8 +38,8 @@ namespace Puppeteer.EventSourcing.Playbill
 			}
 		}
 
-		// Test seam: limpia el storage compartido para un actor. Solo para tests
-		// que quieren aislamiento entre cases.
+		// Test seam: clears the shared storage for an actor. Only for tests
+		// that want isolation between cases.
 		internal static void ClearForTesting(string actorName)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(actorName);
@@ -155,16 +155,16 @@ namespace Puppeteer.EventSourcing.Playbill
 			}
 		}
 
-		// Distill autonomo: en InMemory necesitamos consultar el journal del
-		// actor (que vive en DiaryStorageInMemory.sharedStorages bajo el mismo
-		// actorName). Acceso por API publica del DiaryStorageInMemory no esta
-		// disponible, pero como ambos viven en el mismo namespace y son
-		// internal, podemos hacer una consulta directa. Pragmatica: si en el
-		// futuro la integracion necesita ser mas formal, se introduce un
-		// IJournalLiveSet abstraction — por ahora la asimetria se acepta.
+		// Autonomous Distill: in InMemory we need to query the actor's journal
+		// (which lives in DiaryStorageInMemory.sharedStorages under the same
+		// actorName). Access via a public API of DiaryStorageInMemory is not
+		// available, but since both live in the same namespace and are
+		// internal, we can do a direct query. Pragmatic: if in the
+		// future the integration needs to be more formal, an
+		// IJournalLiveSet abstraction is introduced — for now the asymmetry is accepted.
 		internal override void Distill()
 		{
-			// Obtener set de EntryIds vivos en el journal del actor.
+			// Get the set of live EntryIds in the actor's journal.
 			HashSet<long> aliveJournalEntries = JournalAlive();
 
 			lock (storage.gate)
@@ -183,12 +183,12 @@ namespace Puppeteer.EventSourcing.Playbill
 		}
 
 		// Helper: peek into the actor's journal InMemory storage to get alive EntryIds.
-		// Coupling pragmatico: ambos storages viven en el mismo proceso para tests,
-		// asi que la consulta es directa al dict shared de DiaryStorageInMemory.
+		// Pragmatic coupling: both storages live in the same process for tests,
+		// so the query goes directly to DiaryStorageInMemory's shared dict.
 		private HashSet<long> JournalAlive()
 		{
 			var alive = new HashSet<long>();
-			// Cross-storage peek via internal static getter del DiaryStorageInMemory.
+			// Cross-storage peek via DiaryStorageInMemory's internal static getter.
 			var events = DiaryStorageInMemory.PeekEventsForActor(ActorName);
 			if (events == null) return alive;
 			foreach (var evt in events)

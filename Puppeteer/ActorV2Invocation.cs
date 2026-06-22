@@ -11,10 +11,10 @@ namespace Puppeteer
 		private readonly string _script;
 		private readonly Parameters _parameters;
 		private readonly bool _parametersAutoRented;
-		// True cuando _parameters proviene de un Rent POR FORMA (clave = _script):
-		// WithParameters(configure) o el auto-rent de los Perform*. Falso para el lease
-		// externo RentedParameter, que se rentea/devuelve keyless. Gobierna si el Return
-		// va al pool keyed o al keyless.
+		// True when _parameters comes from a Rent BY SHAPE (key = _script):
+		// WithParameters(configure) or the auto-rent of the Perform*. False for the
+		// external RentedParameter lease, which is rented/returned keyless. Governs
+		// whether the Return goes to the keyed pool or the keyless one.
 		private readonly bool _parametersKeyed;
 
 		// Playbill context — null when the invocation has no playbill attached
@@ -102,9 +102,9 @@ namespace Puppeteer
 		{
 			ArgumentNullException.ThrowIfNull(configure);
 
-			// Rent POR FORMA con clave = _script: la forma de parametros es invariante
-			// por operacion, asi que el instance rentado conserva sus slots y configure
-			// solo sobreescribe valores.
+			// Rent BY SHAPE with key = _script: the parameter shape is invariant
+			// per operation, so the rented instance keeps its slots and configure
+			// only overwrites values.
 			var parameters = _actor.Handler.ParametersPool.Rent(_script);
 			configure(parameters);
 
@@ -123,8 +123,8 @@ namespace Puppeteer
 			var parameters = rentedParameter.Parameters;
 			configure(parameters);
 
-			// Lease externo: rentado/devuelto keyless (RentedParameter no tiene script
-			// en su Rent), por eso parametersKeyed: false.
+			// External lease: rented/returned keyless (RentedParameter has no script
+			// in its Rent), hence parametersKeyed: false.
 			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false, parametersKeyed: false,
 				_playbill, _playbillSchemaName, _playbillValues);
 		}
@@ -191,9 +191,9 @@ namespace Puppeteer
 			{
 				if (parameters != null)
 				{
-					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
-					// WithParameters(configure)); keyless para el lease externo
-					// RentedParameter. La clave es _script (forma invariante por operacion).
+					// Keyed when the instance came from a Rent BY SHAPE (auto-rent or
+					// WithParameters(configure)); keyless for the external
+					// RentedParameter lease. The key is _script (shape invariant per operation).
 					if (autoRented || _parametersKeyed)
 					{
 						_actor.Handler.ParametersPool.Return(_script, parameters);
@@ -235,9 +235,9 @@ namespace Puppeteer
 			{
 				if (parameters != null)
 				{
-					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
-					// WithParameters(configure)); keyless para el lease externo
-					// RentedParameter. La clave es _script (forma invariante por operacion).
+					// Keyed when the instance came from a Rent BY SHAPE (auto-rent or
+					// WithParameters(configure)); keyless for the external
+					// RentedParameter lease. The key is _script (shape invariant per operation).
 					if (autoRented || _parametersKeyed)
 					{
 						_actor.Handler.ParametersPool.Return(_script, parameters);
@@ -280,9 +280,9 @@ namespace Puppeteer
 			{
 				if (parameters != null)
 				{
-					// Keyed cuando el instance vino de un Rent POR FORMA (auto-rent o
-					// WithParameters(configure)); keyless para el lease externo
-					// RentedParameter. La clave es _script (forma invariante por operacion).
+					// Keyed when the instance came from a Rent BY SHAPE (auto-rent or
+					// WithParameters(configure)); keyless for the external
+					// RentedParameter lease. The key is _script (shape invariant per operation).
 					if (autoRented || _parametersKeyed)
 					{
 						_actor.Handler.ParametersPool.Return(_script, parameters);
@@ -297,7 +297,7 @@ namespace Puppeteer
 
 		// Second-write: after the actor's journal write succeeds, persist the
 		// playbill record using the EntryId the handler just allocated. Let-it-fail
-		// policy (firmado en project_playbill_design.md): if this write throws,
+		// policy (signed in project_playbill_design.md): if this write throws,
 		// the journal entry remains and the exception propagates to the caller —
 		// gap detection via LEFT JOIN forensic query.
 		private void WritePlaybillIfNeeded()
@@ -313,7 +313,7 @@ namespace Puppeteer
 		{
 			foreach (var p in values)
 			{
-				// Playbill final refactor: ya no hay SystemParameter (incluido Now) — todo es user.
+				// Playbill final refactor: there is no longer a SystemParameter (including Now) — everything is user.
 				var t = p.ParameterType;
 				if (t == typeof(string)) values[p.Name, typeof(string)] = string.Empty;
 				else if (t == typeof(int)) values[p.Name, typeof(int)] = 0;

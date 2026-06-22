@@ -4,16 +4,16 @@ using System.Text;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Builder fluent para declarar un Playbill schema. El dev escribe:
+	// Fluent builder to declare a Playbill schema. The dev writes:
 	//   .Playbill("RestApi", s => s
 	//        .Required<string>("ip")
 	//        .Required<string>("user")
 	//        .Optional<string>("requestId"));
 	//
-	// Internamente construye un declarations text canonico compatible con el
-	// parser de V2 Parameters, con sufijo '?' en el nombre del field para
-	// marcar opcionalidad. La presencia/ausencia del sufijo se interpreta
-	// SOLO a nivel Playbill — V2 actions no lo procesan ni necesitan saberlo.
+	// Internally it builds a canonical declarations text compatible with the
+	// V2 Parameters parser, with a '?' suffix on the field name to
+	// mark optionality. The presence/absence of the suffix is interpreted
+	// ONLY at the Playbill level — V2 actions neither process it nor need to know it.
 	public sealed class PlaybillSchemaBuilder
 	{
 		private readonly List<(string Name, Type Type, bool Required)> fields = new List<(string, Type, bool)>();

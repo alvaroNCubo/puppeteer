@@ -4,11 +4,11 @@ using System.Threading.Tasks;
 
 namespace Puppeteer.EventSourcing.DB
 {
-	// Paper 5 / Materialize v2 — Fase 2. Tipo de un record materializado del
-	// journal. Public porque actor.Materialization.ReadRecordsAfter lo expone
-	// al destination side (proxy HTTP en produccion). Tres kinds por construccion
-	// del journal: Script (codigo DSL libre), Invocation (llamada a action por id),
-	// Define (declaracion de action).
+	// Paper 5 / Materialize v2 — Phase 2. Type of a materialized journal record.
+	// Public because actor.Materialization.ReadRecordsAfter exposes it to the
+	// destination side (HTTP proxy in production). Three kinds by journal
+	// construction: Script (free DSL code), Invocation (action call by id),
+	// Define (action declaration).
 	public enum MaterializationRecordKind
 	{
 		Script,
@@ -16,14 +16,14 @@ namespace Puppeteer.EventSourcing.DB
 		Define
 	}
 
-	// Snapshot inmutable de un record del journal. Wire-format-agnostic — el
-	// transport (HTTP/binario/JSON) serializa esto. Capa 1 del wire (records
-	// solos, sin elision markers ni checkpoints — esos vienen por (c) y (d) en
-	// Fase 3). Para destination que quiere Capa 1 only, este record es la
-	// unidad transferida via wire verb (a) EnviameDesde.
+	// Immutable snapshot of a journal record. Wire-format-agnostic — the
+	// transport (HTTP/binary/JSON) serializes this. Layer 1 of the wire (records
+	// alone, without elision markers or checkpoints — those come via (c) and (d) in
+	// Phase 3). For a destination that wants Layer 1 only, this record is the
+	// unit transferred via wire verb (a) EnviameDesde.
 	//
-	// Polimorfismo aplanado: cada kind tiene sus campos relevantes y los otros
-	// quedan en default. RecordKind selecciona la rama valida.
+	// Flattened polymorphism: each kind has its relevant fields and the others
+	// stay at default. RecordKind selects the valid branch.
 	public readonly struct MaterializationRecord
 	{
 		public long EntryId { get; }
@@ -57,11 +57,11 @@ namespace Puppeteer.EventSourcing.DB
 		}
 	}
 
-	// Paper 5 / Materialize v2 — Fase 3. Una entrada del reaction registry del
-	// actor primary, ship via wire verb (c) DameCheckpointsHasta. El destination
-	// recibe el formatted reaction (string canonico del DSL) y su reactionId
-	// asignado por el primary; con esto puede reconstruir su propio registry
-	// local con el mismo mapping.
+	// Paper 5 / Materialize v2 — Phase 3. An entry of the primary actor's reaction
+	// registry, shipped via wire verb (c) DameCheckpointsHasta. The destination
+	// receives the formatted reaction (canonical DSL string) and its reactionId
+	// assigned by the primary; with this it can rebuild its own local registry
+	// with the same mapping.
 	public readonly struct MaterializationReactionDefinition
 	{
 		public long ReactionId { get; }
@@ -76,12 +76,12 @@ namespace Puppeteer.EventSourcing.DB
 		}
 	}
 
-	// Estado de un seek level de una reaction (decision D1 #13: ship AS-IS,
-	// snapshot atomic read). detected = match detectado y persistido; confirmed
-	// = PerformCommand ejecutado con exito. La asimetria justifica el shipping
-	// AS-IS sin clipping: valores adelantados al record watermark no causan dano
-	// porque GetMinimum + IsCheckpointGreater controlan el comportamiento en
-	// failover; el matcher no fabrica matches inexistentes.
+	// State of a reaction's seek level (decision D1 #13: ship AS-IS,
+	// atomic snapshot read). detected = match detected and persisted; confirmed
+	// = PerformCommand executed successfully. The asymmetry justifies shipping
+	// AS-IS without clipping: values ahead of the record watermark cause no harm
+	// because GetMinimum + IsCheckpointGreater control the behavior on
+	// failover; the matcher does not fabricate non-existent matches.
 	public readonly struct MaterializationReactionCheckpoint
 	{
 		public long ReactionId { get; }
@@ -102,10 +102,10 @@ namespace Puppeteer.EventSourcing.DB
 		}
 	}
 
-	// Snapshot atomic combinado del estado de reactions: registry + checkpoints.
-	// Resultado de (c) DameCheckpointsHasta. El destination usa esto para
-	// reconstruir su propio EventElision storage local — junto con (d) ElidedRange
-	// para los markers concretos.
+	// Combined atomic snapshot of the reactions state: registry + checkpoints.
+	// Result of (c) DameCheckpointsHasta. The destination uses this to
+	// rebuild its own local EventElision storage — together with (d) ElidedRange
+	// for the concrete markers.
 	public readonly struct MaterializationReactionsSnapshot
 	{
 		public IReadOnlyList<MaterializationReactionDefinition> Reactions { get; }
@@ -122,11 +122,11 @@ namespace Puppeteer.EventSourcing.DB
 		}
 	}
 
-	// Un elision marker — un EntryId del journal marcado como elidido por una
-	// reaction especifica. Ship via wire verb (d) DameElidedRange ordenados por
-	// (Timestamp, EntryId) — el orden de marcaje temporal sale de
-	// EventElision.Timestamp + DiaryId tie-break (sin MarkingOrder autoincrement
-	// adicional, decision firmada 2026-05-13 PM: "no crear nuevos conceptos").
+	// An elision marker — a journal EntryId marked as elided by a
+	// specific reaction. Shipped via wire verb (d) DameElidedRange ordered by
+	// (Timestamp, EntryId) — the temporal marking order comes from
+	// EventElision.Timestamp + DiaryId tie-break (without an additional
+	// MarkingOrder autoincrement, signed decision 2026-05-13 PM: "do not create new concepts").
 	public readonly struct MaterializationElisionMarker
 	{
 		public long EntryId { get; }
@@ -143,23 +143,23 @@ namespace Puppeteer.EventSourcing.DB
 		}
 	}
 
-	// Paper 5 / Materialize v2 — Fase 0 (firmado D1 2026-05-13). Una row por
-	// destination registrada; modela el contrato de presencia entre el actor
-	// primary y un destination simbolico (ver decision #17). Habilita el
-	// invariante Materialize-then-Distill de Fase 1: Distill(Until N) falla si
-	// alguna destination registrada no confirmo expresamente haber recibido
-	// hasta N. Fase 0 solo cubre la presencia (register/deregister/list); el
-	// watermark monotonico (LastConfirmedEntryId via ConfirmoUntil) se ejercita
-	// en Fase 1.
+	// Paper 5 / Materialize v2 — Phase 0 (signed D1 2026-05-13). One row per
+	// registered destination; models the presence contract between the primary
+	// actor and a symbolic destination (see decision #17). Enables the
+	// Materialize-then-Distill invariant of Phase 1: Distill(Until N) fails if
+	// some registered destination did not explicitly confirm having received
+	// up to N. Phase 0 only covers presence (register/deregister/list); the
+	// monotonic watermark (LastConfirmedEntryId via ConfirmoUntil) is exercised
+	// in Phase 1.
 	//
-	// Por-actor-por-construccion: cross-ref project_actor_per_db_principle.md
-	// — cada actor vive en su propia DB, ninguna columna de particion necesaria.
+	// Per-actor-by-construction: cross-ref project_actor_per_db_principle.md
+	// — each actor lives in its own DB, no partition column needed.
 	//
-	// Diferencia ontologica vs EventMaterializationStorage (v1, marker queue):
-	// aquel acumula filas (DiaryId, ReactionId, Destination) — N markers por
-	// destination. Este es un registry: una sola row por destination con su
-	// estado de delivery. v1 sigue vivo como capa de notificacion push; v2 le
-	// agrega encima la capa de contrato de transferencia.
+	// Ontological difference vs EventMaterializationStorage (v1, marker queue):
+	// that one accumulates rows (DiaryId, ReactionId, Destination) — N markers per
+	// destination. This is a registry: a single row per destination with its
+	// delivery state. v1 remains alive as the push notification layer; v2 adds
+	// on top of it the transfer contract layer.
 	internal abstract class MaterializationCheckpointStorage
 	{
 		protected readonly string ConnectionString;
@@ -174,50 +174,50 @@ namespace Puppeteer.EventSourcing.DB
 			this.ConnectionString = connectionString;
 		}
 
-		// Idempotente: si la destination ya existe, no-op (preserva watermark y
-		// registeredAtEntryId existentes). Decision firmada — el caller debe
-		// hacer Deregister + Register explicito para resetear. Retorna true si
-		// se inserto una row nueva, false si la destination ya estaba registrada.
+		// Idempotent: if the destination already exists, no-op (preserves the existing
+		// watermark and registeredAtEntryId). Signed decision — the caller must
+		// do an explicit Deregister + Register to reset. Returns true if
+		// a new row was inserted, false if the destination was already registered.
 		protected internal abstract bool Register(string destination, long registeredAtEntryId, DateTime now);
 		protected internal abstract Task<bool> RegisterAsync(string destination, long registeredAtEntryId, DateTime now);
 
-		// Unilateral (decision D1 #11): no falla si la destination no existe.
-		// Retorna true si se removio una row, false si no habia nada que remover.
+		// Unilateral (decision D1 #11): does not fail if the destination does not exist.
+		// Returns true if a row was removed, false if there was nothing to remove.
 		protected internal abstract bool Deregister(string destination);
 		protected internal abstract Task<bool> DeregisterAsync(string destination);
 
-		// Para Fase 1: lectura del watermark. Si la destination no esta
-		// registrada, lastConfirmed sale 0 y retorna false. Decision firmada
-		// D1 #14: Max-monotonic — el caller (ConfirmoUntil) lo subira solo cuando
-		// el nuevo valor sea estrictamente mayor.
+		// For Phase 1: watermark read. If the destination is not
+		// registered, lastConfirmed comes out 0 and returns false. Signed decision
+		// D1 #14: Max-monotonic — the caller (ConfirmoUntil) will only raise it when
+		// the new value is strictly greater.
 		protected internal abstract bool TryGetWatermark(string destination, out long lastConfirmedEntryId);
 		protected internal abstract Task<(bool found, long lastConfirmedEntryId)> TryGetWatermarkAsync(string destination);
 
-		// Fase 1 — wire verb (b) ConfirmoUntil (decision D1 #14). Max-monotonic
-		// idempotente: actor.watermark[destination] = Max(existing, entryId). Si la
-		// destination no esta registrada, lanza LanguageException (no se permite
-		// confirm para destinations desconocidas — habria que registrar primero,
-		// decisiones D1 #11/#12 sobre forward-fidelity desde registration time).
+		// Phase 1 — wire verb (b) ConfirmoUntil (decision D1 #14). Max-monotonic
+		// idempotent: actor.watermark[destination] = Max(existing, entryId). If the
+		// destination is not registered, throws LanguageException (confirm is not
+		// allowed for unknown destinations — they would have to be registered first,
+		// decisions D1 #11/#12 about forward-fidelity from registration time).
 		//
-		// Retorna true si el watermark avanzo (entryId > existing), false si fue
-		// no-op (entryId <= existing). Recovery natural: retry de (a)(c)(d)(b)
-		// recupera correctamente porque el segundo ConfirmoUntil con el mismo
-		// entryId es no-op (decision D1 #14).
+		// Returns true if the watermark advanced (entryId > existing), false if it was
+		// a no-op (entryId <= existing). Natural recovery: a retry of (a)(c)(d)(b)
+		// recovers correctly because the second ConfirmoUntil with the same
+		// entryId is a no-op (decision D1 #14).
 		//
-		// Tambien actualiza ConfirmedAt al timestamp del avance (solo si avanza).
+		// Also updates ConfirmedAt to the timestamp of the advance (only if it advances).
 		protected internal abstract bool ConfirmUntil(string destination, long entryId, DateTime now);
 		protected internal abstract Task<bool> ConfirmUntilAsync(string destination, long entryId, DateTime now);
 
-		// Snapshot del registry: una row por destination registrada. Result
-		// se rellena en orden estable (alfabetico por destination) para
-		// determinismo en tests.
+		// Registry snapshot: one row per registered destination. Result
+		// is filled in stable order (alphabetical by destination) for
+		// determinism in tests.
 		protected internal abstract void List(List<MaterializationCheckpointRow> result);
 		protected internal abstract Task ListAsync(List<MaterializationCheckpointRow> result);
 	}
 
-	// Row inmutable para evitar mutacion accidental tras List(). Snapshot del
-	// estado de una destination registered en un instante. Public porque la
-	// API actor.Materialization.List() la expone como elemento del resultado.
+	// Immutable row to avoid accidental mutation after List(). Snapshot of the
+	// state of a registered destination at an instant. Public because the
+	// actor.Materialization.List() API exposes it as an element of the result.
 	public readonly struct MaterializationCheckpointRow : IEquatable<MaterializationCheckpointRow>
 	{
 		public string Destination { get; }

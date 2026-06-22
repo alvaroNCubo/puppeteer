@@ -7,11 +7,12 @@ using System.Linq;
 
 namespace Puppeteer.EventSourcing.Follower
 {
-	// Paso 4 del rediseño de checkpoint (notes/reactions-checkpoint-policy.md):
-	// fotografia de un match de cobertura ABIERTO (compra cuya tupla-cobertura aun no
-	// cierra completa, o cerrada pero parqueada por .Aged). Es lo que se serializa para
-	// el cold-start de un consumidor-puro de replicacion (Svix no rebobina): en restart
-	// se reconstruyen estos nodos y se resume en el frente, sin re-leer el journal.
+	// Step 4 of the checkpoint redesign (notes/reactions-checkpoint-policy.md):
+	// snapshot of an OPEN coverage match (an anchor whose coverage tuple has not yet
+	// fully closed, or closed but parked by .Aged). This is what gets serialized for
+	// the cold-start of a pure replication consumer (a downstream that cannot rewind):
+	// on restart these nodes are reconstructed and the work resumes at the front,
+	// without re-reading the Journal.
 	internal class CoverageMatchSnapshot
 	{
 		internal long AnchorEntryId { get; set; }
@@ -22,9 +23,9 @@ namespace Puppeteer.EventSourcing.Follower
 		internal List<long> AccumulatedConfirmIds { get; set; }
 	}
 
-	// Codec del snapshot de cobertura. Formato interno (NO user-facing) linea-por-match,
-	// culture-invariante: las obligaciones (strings de dominio arbitrarios) van en Base64
-	// para evitar colision con los separadores. Una linea:
+	// Coverage snapshot codec. Internal format (NOT user-facing), one line per match,
+	// culture-invariant: obligations (arbitrary domain strings) are Base64-encoded to
+	// avoid collision with the separators. One line:
 	//   anchorId|occurredAtTicks|pendingSettle(0/1)|lastConfirmTicks|cid,cid,...|oblB64,oblB64,...
 	internal static class CoverageSnapshotCodec
 	{
@@ -109,34 +110,34 @@ namespace Puppeteer.EventSourcing.Follower
 		internal MatchNode Parent { get; set; }
 		internal long LastExpansionAttemptEntryId { get; set; }
 
-		// Many (K.1): acumulacion de IDs de eventos matcheados en este nivel
+		// Many (K.1): accumulation of matched event IDs at this level
 		internal List<long> AccumulatedEventIds { get; set; }
 		internal int AccumulatedCount { get; set; }
 
-		// I.time: anchor temporal del ultimo evento acumulado. Para ventanas por
-		// TimeSpan, la ventana se desliza con la actividad reciente del Many parent
-		// igual que el anchor de EntryId se desliza con AccumulatedEventIds.Last().
-		// Default = OccurredAt al crear el nodo; se actualiza en cada accumulate.
+		// I.time: temporal anchor of the last accumulated event. For TimeSpan windows,
+		// the window slides with the recent activity of the Many parent, just as the
+		// EntryId anchor slides with AccumulatedEventIds.Last().
+		// Default = OccurredAt at node creation; updated on every accumulate.
 		internal DateTime LastAccumulatedOccurredAt { get; set; }
 
-		// K.2: gate de avance para Exact-family nodes. Default true (backward
-		// compat — regular y Many nodes son advanceable apenas creados). Para
-		// Exact nodes se setea false al eager-creation y true cuando la ventana
-		// cierra con count == expected (lazy success). ExpandExistingMatches
-		// salta parents con IsAdvanceable=false (Exact aun no cerrada/satisfecha).
+		// K.2: advancement gate for Exact-family nodes. Default true (backward
+		// compat — regular and Many nodes are advanceable as soon as created). For
+		// Exact nodes it is set false at eager-creation and true when the window
+		// closes with count == expected (lazy success). ExpandExistingMatches
+		// skips parents with IsAdvanceable=false (Exact not yet closed/satisfied).
 		internal bool IsAdvanceable { get; set; } = true;
 
-		// ForEach (F1b/F2): conjunto de obligaciones pendientes de este nodo captor.
-		// Materializado al matchear el Seek captor = producto cartesiano de las
-		// colecciones fuente (claves-tupla). Un Seek de cobertura descarga claves a
-		// medida que matchea; cuando queda vacio, dispara el match completo. null si el
-		// Reaction no tiene ForEach o este nodo no es el captor.
+		// ForEach (F1b/F2): set of pending obligations for this captor node.
+		// Materialized when the captor Seek matches = cartesian product of the
+		// source collections (tuple keys). A coverage Seek discharges keys as it
+		// matches; when the set is empty, it fires the complete match. null if the
+		// Reaction has no ForEach or this node is not the captor.
 		internal HashSet<string> RemainingObligations { get; set; }
 
-		// F3 .Aged: el nodo de cobertura completo (obligaciones vacias) pero cuyo evento
-		// de cierre aun no asienta 'span' respecto al frente. Queda pendiente; el tick
-		// por-evento lo dispara cuando el frente avanza lo suficiente. LastAccumulatedOccurredAt
-		// del nodo Many de cobertura = OccurredAt del confirm de cierre.
+		// F3 .Aged: the coverage node is complete (obligations empty) but its closing
+		// event has not yet aged 'span' relative to the front. It stays pending; the
+		// per-event tick fires it when the front advances far enough. LastAccumulatedOccurredAt
+		// of the coverage Many node = OccurredAt of the closing confirm.
 		internal bool CoveragePendingSettle { get; set; }
 
 		internal MatchNode()
@@ -223,7 +224,7 @@ namespace Puppeteer.EventSourcing.Follower
 		private long totalNodesPruned = 0;
 		private long totalNodesCreated = 0;
 
-		// Buffers reutilizables para evitar alocaciones en hot paths
+		// Reusable buffers to avoid allocations in hot paths
 		private readonly Dictionary<int, long> _checkpointBuffer = new Dictionary<int, long>();
 		private readonly List<MatchNode> _nodesAtDepthBuffer = new List<MatchNode>();
 		private readonly List<MatchNode> _staleNodesBuffer = new List<MatchNode>();
@@ -270,17 +271,17 @@ namespace Puppeteer.EventSourcing.Follower
 				return;
 			}
 
-			// K.2 + I.time: tick antes de procesar el evento. Cierra ventanas
-			// vencidas (Exact-nodes pendientes cuya ventana ya quedo atras vs
-			// currentEntryId o currentOccurredAt). Solo en level=0 porque
-			// ReplayEvent itera levels secuencialmente para un mismo evento —
-			// un solo tick por evento basta. Tick puede disparar fires (Exact
-			// at FinalSeek) o prunes (count != expected).
+			// K.2 + I.time: tick before processing the event. Closes expired
+			// windows (pending Exact-nodes whose window is now behind vs
+			// currentEntryId or currentOccurredAt). Only at level=0 because
+			// ReplayEvent iterates levels sequentially for a single event —
+			// one tick per event is enough. The tick may trigger fires (Exact
+			// at FinalSeek) or prunes (count != expected).
 			if (level == 0)
 			{
 				TickPendingExactNodes(eventData.EntryId, eventData.OccurredAt);
-				// F3 .Aged: el evento entrante avanza el frente; dispara los matches de
-				// cobertura completos cuyo confirm de cierre ya asento 'span'.
+				// F3 .Aged: the incoming event advances the front; fires the coverage
+				// matches that are complete and whose closing confirm has aged 'span'.
 				TickPendingCoverageSettle(eventData.OccurredAt);
 			}
 
@@ -407,10 +408,10 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				// K.2: gate por advanceability. Exact parents que aun no han
-				// cerrado/satisfecho su ventana no permiten avance al siguiente
-				// nivel. La satisfaccion se establece en TickPendingExactNodes
-				// al cerrar la ventana con count == expected.
+				// K.2: gate by advanceability. Exact parents that have not yet
+				// closed/satisfied their window do not allow advancing to the next
+				// level. Satisfaction is established in TickPendingExactNodes
+				// when the window closes with count == expected.
 				if (node.Engine != null && node.Engine.IsExact && !node.IsAdvanceable)
 				{
 					continue;
@@ -437,8 +438,8 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				// K.2: Exact at this level — accumular o eager-fail contra el
-				// Exact-child eager-creado del parent.
+				// K.2: Exact at this level — accumulate or eager-fail against the
+				// parent's eager-created Exact-child.
 				if (engine.IsExact)
 				{
 					TryMatchOrAccumulateExact(parent: node, level: level, engine: engine, eventData: eventData, engines: engines, script: script, symbolTable: symbolTable, cachedProgram: cachedProgram, cachedProgramIsCanonical: cachedProgramIsCanonical);
@@ -501,7 +502,7 @@ namespace Puppeteer.EventSourcing.Follower
 						node.Children.Add(child);
 						totalNodesCreated++;
 
-						// K.2: si el siguiente engine es Exact, pre-crear su placeholder.
+						// K.2: if the next engine is Exact, pre-create its placeholder.
 						MaybeCreateEagerExactChild(child, level, engines);
 
 						// Check whether this is the last engine (complete match).
@@ -597,11 +598,11 @@ namespace Puppeteer.EventSourcing.Follower
 					roots.Add(node);
 					totalNodesCreated++;
 
-					// ForEach (F1b): el Seek raiz es el captor; materializa el conjunto de
-					// obligaciones (producto cartesiano de las colecciones fuente capturadas).
+					// ForEach (F1b): the root Seek is the captor; materializes the set of
+					// obligations (cartesian product of the captured source collections).
 					MaterializeObligations(node);
 
-					// K.2: si engines[1] es Exact, pre-crear su Exact-child placeholder.
+					// K.2: if engines[1] is Exact, pre-create its Exact-child placeholder.
 					MaybeCreateEagerExactChild(node, 0, engines);
 
 					// With a single engine, all patterns matched and this is a complete match.
@@ -678,12 +679,12 @@ namespace Puppeteer.EventSourcing.Follower
 				int threshold = engine.AtLeastCount ?? 1;
 				bool isLastLevel = level == engines.Count - 1;
 
-				// ForEach (F2): modo cobertura. Si el parent es un nodo captor con
-				// obligaciones, este Many descarga una obligacion por match en vez de
-				// contar. El evento solo cuenta si su tupla (formada con las loop-vars
-				// capturadas) es una obligacion pendiente del parent; los matches cuya
-				// tupla no pertenece a este parent (o ya descargada) se ignoran sin
-				// acumular. El disparo es cuando el conjunto de obligaciones queda vacio.
+				// ForEach (F2): coverage mode. If the parent is a captor node with
+				// obligations, this Many discharges one obligation per match instead of
+				// counting. The event only counts if its tuple (formed with the captured
+				// loop-vars) is a pending obligation of the parent; matches whose tuple
+				// does not belong to this parent (or already discharged) are ignored
+				// without accumulating. Fires when the obligation set becomes empty.
 				bool coverage = forEachSpec != null && parent != null && parent.RemainingObligations != null;
 				string coverageKey = null;
 				if (coverage)
@@ -715,9 +716,9 @@ namespace Puppeteer.EventSourcing.Follower
 						parent.RemainingObligations.Remove(coverageKey);
 						if (isLastLevel && parent.RemainingObligations.Count == 0)
 						{
-							// F3 .Aged: si el seek de cierre tiene asentamiento, no dispares aun
-							// (el frente = el confirm recien acumulado, edad 0); marca pendiente y
-							// deja que el tick por-evento dispare al envejecer 'span'.
+							// F3 .Aged: if the closing seek has a settle span, do not fire yet
+							// (the front = the just-accumulated confirm, age 0); mark pending and
+							// let the per-event tick fire it once 'span' has aged.
 							if (engine.AgedSpan.HasValue)
 								existing.CoveragePendingSettle = true;
 							else
@@ -755,7 +756,7 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				totalNodesCreated++;
 
-				// K.2: si el siguiente engine es Exact, pre-crear su placeholder.
+				// K.2: if the next engine is Exact, pre-create its placeholder.
 				MaybeCreateEagerExactChild(node, level, engines);
 
 				if (coverage)
@@ -763,7 +764,7 @@ namespace Puppeteer.EventSourcing.Follower
 					parent.RemainingObligations.Remove(coverageKey);
 					if (isLastLevel && parent.RemainingObligations.Count == 0)
 					{
-						// F3 .Aged: ver nota en la rama 'existing'.
+						// F3 .Aged: see note in the 'existing' branch.
 						if (engine.AgedSpan.HasValue)
 							node.CoveragePendingSettle = true;
 						else
@@ -803,10 +804,10 @@ namespace Puppeteer.EventSourcing.Follower
 			return null;
 		}
 
-		// I.entry: anchor de una ventana es el ultimo EntryId activo del parent.
-		// Para un parent Many el anchor es el ultimo evento acumulado — la ventana
-		// se desliza con la actividad reciente del Seek previo. Para un parent
-		// regular el anchor es su EntryId de creacion (un solo punto de match).
+		// I.entry: the anchor of a window is the parent's last active EntryId.
+		// For a Many parent the anchor is the last accumulated event — the window
+		// slides with the recent activity of the previous Seek. For a regular
+		// parent the anchor is its creation EntryId (a single match point).
 		private long GetParentAnchorEntryId(MatchNode parent)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -818,9 +819,9 @@ namespace Puppeteer.EventSourcing.Follower
 			return parent.EntryId;
 		}
 
-		// I.time: anchor temporal del parent. Mismo principio de slide que para
-		// EntryId — para Many el anchor es LastAccumulatedOccurredAt (se actualiza
-		// en cada AccumulateEventId), para regular es OccurredAt de creacion.
+		// I.time: temporal anchor of the parent. Same slide principle as for
+		// EntryId — for Many the anchor is LastAccumulatedOccurredAt (updated
+		// on every AccumulateEventId), for regular it is the creation OccurredAt.
 		private DateTime GetParentAnchorOccurredAt(MatchNode parent)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -832,10 +833,10 @@ namespace Puppeteer.EventSourcing.Follower
 			return parent.OccurredAt;
 		}
 
-		// K.2: cuantificador exact-family. Accumula contra el Exact-child eager-creado
-		// del parent. Eager-fail si AccumulatedCount excede expected (Exactly/One con
-		// match adicional, None con cualquier match). El fire por satisfaccion ocurre
-		// en TickPendingExactNodes cuando la ventana cierra con count == expected.
+		// K.2: exact-family quantifier. Accumulates against the parent's eager-created
+		// Exact-child. Eager-fail if AccumulatedCount exceeds expected (Exactly/One with
+		// an additional match, None with any match). The satisfaction fire happens
+		// in TickPendingExactNodes when the window closes with count == expected.
 		private void TryMatchOrAccumulateExact(MatchNode parent, int level, ReactionEngine engine, EventData eventData, List<ReactionEngine> engines, string script, SymbolTable symbolTable, Program cachedProgram, bool cachedProgramIsCanonical)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -843,7 +844,7 @@ namespace Puppeteer.EventSourcing.Follower
 			MatchNode exactNode = FindExactNode(parent, engine);
 			if (exactNode == null)
 			{
-				// Pruned ya (eager-fail anterior) o no eager-creado. Nada que hacer.
+				// Already pruned (prior eager-fail) or not eager-created. Nothing to do.
 				return;
 			}
 
@@ -880,8 +881,8 @@ namespace Puppeteer.EventSourcing.Follower
 				exactNode.LastExpansionAttemptEntryId = eventData.EntryId;
 				if (exactNode.EntryId == 0)
 				{
-					// Primer match: arrastrar el EntryId del primer evento (mismo
-					// patron que Many) para que la cadena tenga un anchor identificable.
+					// First match: carry over the first event's EntryId (same
+					// pattern as Many) so the chain has an identifiable anchor.
 					exactNode.EntryId = eventData.EntryId;
 					exactNode.OccurredAt = eventData.OccurredAt;
 				}
@@ -889,7 +890,7 @@ namespace Puppeteer.EventSourcing.Follower
 				int expected = engine.ExactCount.Value;
 				if (exactNode.AccumulatedCount > expected)
 				{
-					// Eager-fail. La trayectoria por este Exact-child esta muerta.
+					// Eager-fail. The trajectory through this Exact-child is dead.
 					PruneNode(exactNode);
 				}
 			}
@@ -900,7 +901,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// K.2: localizar el Exact-child de un parent para un engine dado (eager-creado).
+		// K.2: locate a parent's Exact-child for a given engine (eager-created).
 		private MatchNode FindExactNode(MatchNode parent, ReactionEngine engine)
 		{
 			if (parent == null) return null;
@@ -912,21 +913,21 @@ namespace Puppeteer.EventSourcing.Follower
 			return null;
 		}
 
-		// K.2 + I.time: cierre por evento out-of-window. Recorre el arbol buscando
-		// Exact-nodes pendientes (IsAdvanceable=false) cuya ventana haya cerrado.
-		// El cierre se evalua segun el tipo de ventana del engine: EntryId (I.entry)
-		// o TimeSpan (I.time). Para cada uno: count == expected -> satisfaccion
-		// (marca advanceable; si es FinalSeek, fire). count != expected -> falla,
-		// prune. Sin este tick los Exact que nunca matchearon (None vacuo, etc)
-		// quedarian eternamente pending.
+		// K.2 + I.time: closure on out-of-window event. Walks the tree looking for
+		// pending Exact-nodes (IsAdvanceable=false) whose window has closed.
+		// Closure is evaluated according to the engine's window type: EntryId (I.entry)
+		// or TimeSpan (I.time). For each: count == expected -> satisfaction
+		// (mark advanceable; if FinalSeek, fire). count != expected -> failure,
+		// prune. Without this tick the Exact nodes that never matched (vacuous None, etc)
+		// would stay pending forever.
 		private readonly List<MatchNode> _tickBuffer = new List<MatchNode>();
 		private readonly List<MatchNode> _coverageSettleBuffer = new List<MatchNode>();
 
-		// F3 .Aged: dispara los nodos de cobertura completos (CoveragePendingSettle) cuyo
-		// evento de cierre (LastAccumulatedOccurredAt) ya asento 'span' respecto al frente
-		// (currentOccurredAt = el evento entrante, reloj logico del journal). Los nodos de
-		// cobertura son Many -> ExecuteCompleteMatch NO los prunea, asi que limpiar la
-		// bandera evita re-disparo.
+		// F3 .Aged: fires the complete coverage nodes (CoveragePendingSettle) whose
+		// closing event (LastAccumulatedOccurredAt) has aged 'span' relative to the front
+		// (currentOccurredAt = the incoming event, the Journal's logical clock). Coverage
+		// nodes are Many -> ExecuteCompleteMatch does NOT prune them, so clearing the
+		// flag avoids re-firing.
 		private void TickPendingCoverageSettle(DateTime currentOccurredAt)
 		{
 			_coverageSettleBuffer.Clear();
@@ -1015,11 +1016,11 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// K.2: eager-creation del Exact-child al crearse un parent. Si engines[parentLevel+1]
-		// es Exact, crea inmediatamente el placeholder node con AccumulatedCount=0,
-		// IsAdvanceable=false. La ventana se evaluara al tick cuando llegue un evento
-		// con EntryId > parent.anchor + within. Si llega match del Exact pattern antes,
-		// AccumulatedCount sube; eager-fail si excede expected.
+		// K.2: eager-creation of the Exact-child when a parent is created. If engines[parentLevel+1]
+		// is Exact, immediately creates the placeholder node with AccumulatedCount=0,
+		// IsAdvanceable=false. The window is evaluated at the tick when an event arrives
+		// with EntryId > parent.anchor + within. If a match of the Exact pattern arrives first,
+		// AccumulatedCount rises; eager-fail if it exceeds expected.
 		private void MaybeCreateEagerExactChild(MatchNode parent, int parentLevel, List<ReactionEngine> engines)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -1031,7 +1032,7 @@ namespace Puppeteer.EventSourcing.Follower
 			var childEngine = engines[childLevel];
 			if (!childEngine.IsExact) return;
 
-			// Si ya existe (defensivo), no recrear.
+			// If it already exists (defensive), do not recreate.
 			if (FindExactNode(parent, childEngine) != null) return;
 
 			var exactNode = nodePool.Rent();
@@ -1084,10 +1085,10 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				// K.2: gate por advanceability. Exact parents que aun no han
-				// cerrado/satisfecho su ventana no permiten avance al siguiente
-				// nivel. La satisfaccion se establece en TickPendingExactNodes
-				// al cerrar la ventana con count == expected.
+				// K.2: gate by advanceability. Exact parents that have not yet
+				// closed/satisfied their window do not allow advancing to the next
+				// level. Satisfaction is established in TickPendingExactNodes
+				// when the window closes with count == expected.
 				if (node.Engine != null && node.Engine.IsExact && !node.IsAdvanceable)
 				{
 					continue;
@@ -1114,8 +1115,8 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				// K.2: Exact at this level — accumular o eager-fail contra el
-				// Exact-child eager-creado del parent.
+				// K.2: Exact at this level — accumulate or eager-fail against the
+				// parent's eager-created Exact-child.
 				if (engine.IsExact)
 				{
 					TryMatchOrAccumulateExact(parent: node, level: level, engine: engine, eventData: eventData, engines: engines, script: script, symbolTable: symbolTable, cachedProgram: cachedProgram, cachedProgramIsCanonical: cachedProgramIsCanonical);
@@ -1179,7 +1180,7 @@ namespace Puppeteer.EventSourcing.Follower
 						node.Children.Add(child);
 						totalNodesCreated++;
 
-						// K.2: si el siguiente engine es Exact, pre-crear su placeholder.
+						// K.2: if the next engine is Exact, pre-create its placeholder.
 						MaybeCreateEagerExactChild(child, level, engines);
 
 						// Check whether this is the last engine (complete match).
@@ -1220,7 +1221,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			else
 			{
-				// Buscar recursivamente
+				// Search recursively
 				foreach (var root in roots)
 				{
 					CollectNodesAtDepth(root, depth, 0, _nodesAtDepthBuffer);
@@ -1248,7 +1249,7 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 			System.Diagnostics.Debug.WriteLine($"[MatchTree] ExecuteCompleteMatch for leafNode EntryId={leafNode.EntryId}");
 #endif
-			// Colectar EventIds una sola vez, reutilizar para checkpoint y MarkAsSkip
+			// Collect EventIds once, reuse for checkpoint and MarkAsSkip
 			reactionAction.EventIdsToSkip.Clear();
 			CollectEventIdsFromChain(leafNode, reactionAction.EventIdsToSkip);
 
@@ -1264,13 +1265,23 @@ namespace Puppeteer.EventSourcing.Follower
 			_checkpointBuffer.Clear();
 			CollectCheckpointLevelIds(leafNode, _checkpointBuffer);
 
-			// Shadow Replay — S3. Skip-preview (dry-run): en un shadow con preview
-			// encendido, una reaction Elide captura el batch que elidiria en
-			// Reaction.WouldSkip + registra el match en Phase A, pero OMITE el commit
-			// (no MarkEventsAsElidedWithCheckpoint) y no ejecuta side-effects. Es "ver
-			// que se elidiria" sin tocar ningun journal. WouldSkip SOLO se puebla aqui,
-			// y esta rama RETORNA antes del commit — por eso WouldSkip poblado prueba
-			// que corrio el dry-run y NO la elision real.
+			// Journal-outbox emit: record the outgoing message atomically with the
+			// cursor advance, then return. Distinct from the Program/Metadata path
+			// below — the recording IS the action (no read-only emit, no elide
+			// marker, no separate Confirmed write). See notes/reactions-outbox-emit.md.
+			if (reactionAction.ActionType == ReactionActionType.Outbox && diaryStorage != null && reactionId > 0)
+			{
+				ExecuteOutboxMatch(leafNode);
+				return;
+			}
+
+			// Shadow Replay — S3. Skip-preview (dry-run): in a shadow with preview
+			// turned on, an Elide reaction captures the batch it would elide into
+			// Reaction.WouldSkip + records the match in Phase A, but OMITS the commit
+			// (no MarkEventsAsElidedWithCheckpoint) and does not run side-effects. It is "seeing
+			// what would be elided" without touching any Journal. WouldSkip is ONLY populated here,
+			// and this branch RETURNS before the commit — that is why a populated WouldSkip proves
+			// the dry-run ran and NOT the real elision.
 			if (reactionAction.ActionType == ReactionActionType.Metadata
 				&& reactionAction.MetadataKind == MetadataKind.Elide
 				&& actorHandler.SkipPreviewEnabled)
@@ -1302,14 +1313,14 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				if (forEachSpec != null)
 				{
-					// Cobertura (ForEach): los matches concurrentes multi-ancla cierran FUERA
-					// de orden de ancla, asi que el guard lexicografico monotono
-					// (VerifyAndSaveTransactional + el de MarkEventsAsElidedWithCheckpoint) los
-					// deduplicaria (p.ej. ancla 1 tras ancla 2). Se elide IDEMPOTENTE directo:
-					// re-elidir es no-op (flag Skip) y MarkEventsAsElided es transaccional por
-					// fila -> seguridad cross-pod por membership, no por orden. NO se guarda el
-					// checkpoint escalar (no aplica a cobertura; el resume es por frontera-cerrada
-					// / snapshot — rediseño en notes/reactions-checkpoint-policy.md).
+					// Coverage (ForEach): concurrent multi-anchor matches close OUT of
+					// anchor order, so the monotonic lexicographic guard
+					// (VerifyAndSaveTransactional + the one in MarkEventsAsElidedWithCheckpoint) would
+					// deduplicate them (e.g. anchor 1 after anchor 2). Elide IDEMPOTENTLY directly:
+					// re-eliding is a no-op (Skip flag) and MarkEventsAsElided is transactional per
+					// row -> cross-pod safety by membership, not by order. The scalar checkpoint
+					// is NOT saved (it does not apply to coverage; resume is by closed-frontier
+					// / snapshot — redesign in notes/reactions-checkpoint-policy.md).
 					diaryStorage.EventElisionStorage.MarkEventsAsElided(reactionAction.EventIdsToSkip.ToArray(), (int)reactionId, leafNode.OccurredAt);
 					shouldExecuteAction = true;
 				}
@@ -1328,7 +1339,7 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 				System.Diagnostics.Debug.WriteLine($"[MatchTree] Match already processed by another pod, skipping action execution");
 #endif
-				// Limpiar EventIdsToSkip ya que no se ejecutara la accion
+				// Clear EventIdsToSkip since the action will not run
 				reactionAction.EventIdsToSkip.Clear();
 				PruneNode(leafNode);
 				return;
@@ -1390,25 +1401,82 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// POLITICA DE CHECKPOINT/RESUME/DEDUP — leer antes de tocar esto.
-		// Detalle completo y matriz: notes/reactions-checkpoint-policy.md
+		// Journal-outbox emit path. Renders the payload from the matched bindings,
+		// then records (destination + payload + deterministic idempotency key) into
+		// the diary's outbox table ATOMICALLY with the reaction cursor advance via
+		// RecordOutboxWithCheckpoint. The monotonic guard inside that call (plus the
+		// idempotency-key uniqueness in the outbox table) makes the recording
+		// exactly-once: a re-detected match after a crash/handoff is a no-op. The
+		// relay (actor.Outbox) delivers the row at-least-once afterwards.
+		private void ExecuteOutboxMatch(MatchNode leafNode)
+		{
+			Reaction reaction = leafNode.Engine?.Reaction;
+			if (reaction == null) return;
+
+			long anchorEntryId = leafNode.EntryId;
+			int seekLevel = leafNode.CurrentDepth;
+			string idempotencyKey = OutboxCommit.BuildIdempotencyKey(reactionId, anchorEntryId, seekLevel);
+
+			Parameters allParameters = actorHandler.ParametersPool.Rent();
+			try
+			{
+				CollectAllParametersFromChain(leafNode, allParameters);
+				string payload = reaction.RenderOutboxPayload(allParameters);
+
+				CheckpointVector vector = CheckpointVector.FromDictionary(_checkpointBuffer);
+				OutboxCommit commit = new OutboxCommit(
+					reactionId,
+					anchorEntryId,
+					reaction.OutboxDestination,
+					payload,
+					idempotencyKey,
+					leafNode.OccurredAt,
+					vector);
+
+				bool recorded = diaryStorage.RecordOutboxWithCheckpoint(commit);
+
+				if (recorded)
+				{
+					long[] chainSnapshot = reactionAction.EventIdsToSkip.ToArray();
+					reaction.RecordCompleteMatch(leafNode.EntryId, leafNode.OccurredAt, chainSnapshot, allParameters);
+				}
+#if DEBUG
+				else
+				{
+					System.Diagnostics.Debug.WriteLine($"[MatchTree] Outbox emit already recorded by another pod (key={idempotencyKey}), skipping");
+				}
+#endif
+			}
+			finally
+			{
+				allParameters.PurgeUserParameters();
+				actorHandler.ParametersPool.Return(allParameters);
+			}
+
+			reactionAction.EventIdsToSkip.Clear();
+			if (leafNode.Engine == null || !leafNode.Engine.IsMany)
+				PruneNode(leafNode);
+		}
+
+		// CHECKPOINT/RESUME/DEDUP POLICY — read before touching this.
+		// Full detail and matrix: notes/reactions-checkpoint-policy.md
 		//
-		// HOY: dedup por comparacion lexicografica monotona del vector per-seek
-		// (IsCheckpointGreater). Funciona SOLO cuando los matches cierran en orden de
-		// ancla (patrones secuenciales). LIMITACION CONOCIDA: con cobertura (ForEach) los
-		// matches cierran FUERA de orden (fan-out multi-ancla) y el gate lexicografico
-		// descarta commits legitimos (p.ej. (1,4) tras (2,3)). Test que lo fija:
+		// TODAY: dedup by monotonic lexicographic comparison of the per-seek vector
+		// (IsCheckpointGreater). Works ONLY when matches close in anchor order
+		// (sequential patterns). KNOWN LIMITATION: with coverage (ForEach) the
+		// matches close OUT of order (multi-anchor fan-out) and the lexicographic gate
+		// discards legitimate commits (e.g. (1,4) after (2,3)). Test that pins it:
 		// ReactionForEachCoverageTests.ForEach_FanOut [Ignore].
 		//
-		// OBJETIVO (disenado, no implementado):
-		//   - dedup = membership idempotente (flag Skip + MarkEventsAsElidedWithCheckpoint
-		//     transaccional por fila), NO orden lexicografico. Los matches concurrentes no
-		//     tienen orden total.
-		//   - resume = dos cursores globales: frente-leido (high-water) + frontera-cerrada
-		//     (min ancla abierta), acotada por settle (.Aged es su gate).
-		//   - cold-start: Job/Cue con journal local -> re-lee [closed, high-water]; replicacion
-		//     consumidor-puro (Svix no rebobina) -> snapshot de matches abiertos; Shadow ->
-		//     nada (no commitea, no resume).
+		// GOAL (designed, not implemented):
+		//   - dedup = idempotent membership (Skip flag + MarkEventsAsElidedWithCheckpoint
+		//     transactional per row), NOT lexicographic order. Concurrent matches have no
+		//     total order.
+		//   - resume = two global cursors: read-front (high-water) + closed-frontier
+		//     (min open anchor), bounded by settle (.Aged is its gate).
+		//   - cold-start: Job/Cue with a local journal -> re-reads [closed, high-water]; a
+		//     pure replication consumer (cannot rewind) -> snapshot of open matches; Shadow ->
+		//     nothing (does not commit, does not resume).
 		private bool VerifyAndSaveTransactional(MatchNode leafNode, List<long> matchEntryIds, Dictionary<int, long> newCheckpoint)
 		{
 			// Lexicographic comparison of the checkpoint.
@@ -1599,8 +1667,8 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// ForEach (F1b): materializa el conjunto de obligaciones del nodo captor =
-		// producto cartesiano de las colecciones fuente capturadas, como claves-tupla.
+		// ForEach (F1b): materializes the captor node's set of obligations =
+		// cartesian product of the captured source collections, as tuple keys.
 		private void MaterializeObligations(MatchNode node)
 		{
 			if (forEachSpec == null) return;
@@ -1624,9 +1692,9 @@ namespace Puppeteer.EventSourcing.Follower
 			node.RemainingObligations = set;
 		}
 
-		// Clave canonica de una obligacion / tupla de cobertura. La materializacion y la
-		// descarga deben coincidir byte-a-byte, asi que ambas pasan por aqui (valores
-		// formateados culture-invariante).
+		// Canonical key of an obligation / coverage tuple. Materialization and
+		// discharge must match byte-for-byte, so both go through here (values
+		// formatted culture-invariant).
 		private string CoverageKey(Parameters parameters)
 		{
 			var vars = forEachSpec.TupleVars;
@@ -1669,9 +1737,9 @@ namespace Puppeteer.EventSourcing.Follower
 			var current = node;
 			while (current != null)
 			{
-				// F4 Elide(seek:/seeks:): si hay Seeks objetivo, solo recolectar los ids de
-				// los nodos cuyo Seek esta en el conjunto (p.ej. elidir la compra ancla pero
-				// no sus confirms). Sin objetivos -> la cadena completa.
+				// F4 Elide(seek:/seeks:): if there are target Seeks, only collect the ids of
+				// the nodes whose Seek is in the set (e.g. elide the anchor event but
+				// not its confirms). No targets -> the whole chain.
 				if (IsSeekElideTarget(current))
 				{
 					if (current.AccumulatedEventIds != null && current.AccumulatedEventIds.Count > 0)
@@ -1696,9 +1764,9 @@ namespace Puppeteer.EventSourcing.Follower
 			eventIds.Reverse(startIndex, eventIds.Count - startIndex);
 		}
 
-		// F4: ¿el Seek de este nodo esta entre los objetivos de Elide(seek:/seeks:)?
-		// null = sin filtro (cadena completa). Comparacion case-insensitive (consistente
-		// con la validacion de nombres de Seek).
+		// F4: is this node's Seek among the targets of Elide(seek:/seeks:)?
+		// null = no filter (whole chain). Case-insensitive comparison (consistent
+		// with Seek name validation).
 		private bool IsSeekElideTarget(MatchNode current)
 		{
 			string[] targets = reactionAction.ElideTargetSeeks;
@@ -1750,7 +1818,7 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			_staleNodesBuffer.Clear();
 
-			// Buscar nodos obsoletos en todos los niveles
+			// Look for stale nodes at all levels
 			foreach (var root in roots)
 			{
 				CollectStaleNodes(root, currentEntryId, _staleNodesBuffer);
@@ -1772,20 +1840,20 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			if (node == null) return;
 
-			// Resume/cobertura: NUNCA podar por stale un match de cobertura ABIERTO. Su ancla
-			// debe sobrevivir para que la frontera-cerrada no avance por encima de ella (si se
-			// podara, el resume desde la frontera la perderia). Se salta el subarbol completo.
-			// Solo aplica a roots captores de cobertura (RemainingObligations != null); para
-			// reactions sin ForEach es no-op y el comportamiento de pruning queda intacto.
+			// Resume/coverage: NEVER prune an OPEN coverage match as stale. Its anchor
+			// must survive so the closed-frontier does not advance past it (if it were
+			// pruned, resume from the frontier would lose it). The whole subtree is skipped.
+			// Only applies to coverage captor roots (RemainingObligations != null); for
+			// reactions without ForEach it is a no-op and pruning behavior stays intact.
 			if (node.Parent == null && IsOpenCoverageRoot(node)) return;
 
-			// Bottom-up: primero recursar hijos para que se poden las hojas
+			// Bottom-up: recurse into children first so the leaves get pruned
 			for (int i = node.Children.Count - 1; i >= 0; i--)
 			{
 				CollectStaleNodes(node.Children[i], currentEntryId, result);
 			}
 
-			// Despues de podar hijos, verificar si este nodo quedo sin hijos y es stale
+			// After pruning children, check whether this node is now childless and stale
 			long eventsSinceLastExpansion = currentEntryId - node.LastExpansionAttemptEntryId;
 			if (eventsSinceLastExpansion > staleNodeThreshold && node.Children.Count == 0)
 			{
@@ -1802,7 +1870,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// FASE 2: navega la str Parent hasta encontrar un MatchNode cuyo engine tenga el nombre dado.
+		// PHASE 2: walks the Parent chain until it finds a MatchNode whose engine has the given name.
 		private static MatchNode FindAncestorBySeekName(MatchNode start, string seekName)
 		{
 			if (start == null || string.IsNullOrEmpty(seekName)) return null;
@@ -1819,9 +1887,9 @@ namespace Puppeteer.EventSourcing.Follower
 			return null;
 		}
 
-		// FASE 2 / Fase 4.5 refactor Playbill: inyecta el value del symbol de un ancestor
-		// con el nombre placeholder. Ip/User dejaron de ser simbolos scoped validos (ya no
-		// viajan en el journal y por lo tanto nunca existen en un ancestor matcheado).
+		// PHASE 2 / Phase 4.5 Playbill refactor: injects the value of an ancestor's symbol
+		// under the placeholder name. Ip/User are no longer valid scoped symbols (they no
+		// longer travel in the journal and therefore never exist in a matched ancestor).
 		private static void InjectScopedSymbol(Parameters target, string placeholder, string symbolName, MatchNode ancestor)
 		{
 			ArgumentNullException.ThrowIfNull(target);
@@ -1842,21 +1910,21 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Evalua la clausula Where del engine contra el evento actual.
-		// Retorna true si el filtro pasa, false si el match debe descartarse.
-		// Fase 4.5 refactor Playbill: los simbolos validos en Where son @Now y @EntryId
-		// (Ip/User dejaron de inyectarse — no viajan en el journal). El lexer trata '@'
-		// como whitespace y lo descarta, asi que '@Now' parsea a 'Now' y coincide con
-		// el parametro Now pre-populado por el pool.
-		// FASE 2: 'SeekName.@Simbolo' se pre-procesa en Reaction a placeholders '_seek_SeekName_Simbolo'
-		// que aqui se resuelven navegando parentNode.Parent hasta encontrar el MatchNode cuyo engine
-		// tenga el nombre correspondiente.
-		// Where compilation: el path preferido cachea el Program compilado en
-		// engine.CachedWhereProgram (poblado por Reaction.CompileWhereExpressions
-		// al inicio de Execute). Per-event solo se actualizan los Values del
-		// Parameters dedicado al engine y se invoca el delegate compilado. El
-		// path de re-parse + interpretado se conserva como fallback para
-		// callsites que bypasean CompileWhereExpressions.
+		// Evaluates the engine's Where clause against the current event.
+		// Returns true if the filter passes, false if the match must be discarded.
+		// Phase 4.5 Playbill refactor: the valid symbols in Where are @Now and @EntryId
+		// (Ip/User are no longer injected — they do not travel in the journal). The lexer treats '@'
+		// as whitespace and discards it, so '@Now' parses to 'Now' and matches
+		// the Now parameter pre-populated by the pool.
+		// PHASE 2: 'SeekName.@Symbol' is pre-processed in Reaction into placeholders '_seek_SeekName_Symbol'
+		// that are resolved here by walking parentNode.Parent until finding the MatchNode whose engine
+		// has the corresponding name.
+		// Where compilation: the preferred path caches the compiled Program in
+		// engine.CachedWhereProgram (populated by Reaction.CompileWhereExpressions
+		// at the start of Execute). Per-event only the Values of the engine-dedicated
+		// Parameters are updated and the compiled delegate is invoked. The
+		// re-parse + interpreted path is kept as a fallback for
+		// callsites that bypass CompileWhereExpressions.
 		private bool EvaluateWhereIfPresent(ReactionEngine engine, Parameters matchedParameters, SymbolTable symbolTable, EventData eventData, MatchNode parentNode)
 		{
 			ArgumentNullException.ThrowIfNull(engine);
@@ -1889,8 +1957,8 @@ namespace Puppeteer.EventSourcing.Follower
 						dedicated[param.Name, param.ParameterType] = param.GetValue();
 					}
 					dedicated["Now", typeof(DateTime)] = eventData.OccurredAt;
-					// Los operadores del interprete solo soportan int (no long). Para EntryId usamos int,
-					// asumiendo que un diario real no supera 2.1B eventos en el horizonte esperado.
+					// The interpreter operators only support int (not long). For EntryId we use int,
+					// assuming a real journal does not exceed 2.1B events within the expected horizon.
 					dedicated["EntryId", typeof(int)] = checked((int)eventData.EntryId);
 					if (engine.SeekScopedRefs != null)
 					{
@@ -1924,11 +1992,11 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 
 				whereParameters["Now", typeof(DateTime)] = eventData.OccurredAt;
-				// Los operadores del interprete solo soportan int (no long). Para EntryId usamos int,
-				// asumiendo que un diario real no supera 2.1B eventos en el horizonte esperado.
+				// The interpreter operators only support int (not long). For EntryId we use int,
+				// assuming a real journal does not exceed 2.1B events within the expected horizon.
 				whereParameters[ "EntryId", typeof(int) ] = checked((int)eventData.EntryId);
 
-				// FASE 2: resolver referencias scoped SeekName.@Simbolo navegando parentNode.Parent.
+				// PHASE 2: resolve scoped references SeekName.@Symbol by walking parentNode.Parent.
 				if (engine.SeekScopedRefs != null)
 				{
 					foreach (var kvp in engine.SeekScopedRefs)
@@ -1961,21 +2029,21 @@ namespace Puppeteer.EventSourcing.Follower
 				actorHandler.ParametersPool.Return(whereParameters);
 			}
 		}
-		// ===== RESUME OPTIMIZATION (rediseño de checkpoint, pasos 2-4) =====
-		// Detalle + matriz: notes/reactions-checkpoint-policy.md.
+		// ===== RESUME OPTIMIZATION (checkpoint redesign, steps 2-4) =====
+		// Detail + matrix: notes/reactions-checkpoint-policy.md.
 		//
-		// El modelo escalar lexicografico per-seek se descarta para cobertura: los matches
-		// concurrentes multi-ancla cierran FUERA de orden y no tienen orden total. El resume
-		// se gobierna por DOS cursores globales: el frente-leido (high-water = max entryId
-		// escaneado, lo provee el caller) y la frontera-cerrada (closed-frontier), que es el
-		// mayor entryId por debajo del cual TODA ancla de cobertura ya cerro (cobertura
-		// completa + asentada + elidida). En el proximo Execute se re-lee desde la
-		// frontera-cerrada en vez de génesis.
+		// The per-seek scalar lexicographic model is dropped for coverage: concurrent
+		// multi-anchor matches close OUT of order and have no total order. Resume is
+		// governed by TWO global cursors: the read-front (high-water = max scanned
+		// entryId, provided by the caller) and the closed-frontier, which is the
+		// largest entryId below which EVERY coverage anchor has already closed (coverage
+		// complete + settled + elided). On the next Execute it re-reads from the
+		// closed-frontier instead of from genesis.
 
-		// Frontera-cerrada = (ancla abierta mas vieja) - 1; si no hay anclas abiertas, todo lo
-		// escaneado cerro -> la frontera es el frente-leido. Paso 3: .Aged parquea esta
-		// frontera porque un nodo de cobertura completo-pero-pending-settle cuenta como ABIERTO
-		// (ver IsOpenCoverageRoot), asi la frontera no avanza por encima de un cierre no asentado.
+		// Closed-frontier = (oldest open anchor) - 1; if there are no open anchors, everything
+		// scanned has closed -> the frontier is the read-front. Step 3: .Aged parks this
+		// frontier because a complete-but-pending-settle coverage node counts as OPEN
+		// (see IsOpenCoverageRoot), so the frontier does not advance past an unsettled closure.
 		internal long ComputeClosedFrontier(long highWater)
 		{
 			long minOpenAnchor = long.MaxValue;
@@ -1990,11 +2058,11 @@ namespace Puppeteer.EventSourcing.Follower
 			return cf < 0 ? 0 : cf;
 		}
 
-		// Un root captor de cobertura esta ABIERTO si aun le faltan obligaciones por cubrir, o
-		// si su cobertura ya esta completa pero parqueada por .Aged (CoveragePendingSettle en su
-		// hijo de cobertura). Cerrado = obligaciones vacias y ningun hijo pendiente de asentar
-		// (ya disparo ExecuteCompleteMatch y elidio). Para reactions sin ForEach el root no tiene
-		// RemainingObligations -> retorna false (no participa de la frontera).
+		// A coverage captor root is OPEN if it still has obligations left to cover, or
+		// if its coverage is already complete but parked by .Aged (CoveragePendingSettle in its
+		// coverage child). Closed = obligations empty and no child pending settle
+		// (it already fired ExecuteCompleteMatch and elided). For reactions without ForEach the
+		// root has no RemainingObligations -> returns false (does not participate in the frontier).
 		private static bool IsOpenCoverageRoot(MatchNode root)
 		{
 			if (root == null || root.RemainingObligations == null) return false;
@@ -2006,8 +2074,8 @@ namespace Puppeteer.EventSourcing.Follower
 			return false;
 		}
 
-		// Paso 4: fotografia de los matches de cobertura abiertos para el cold-start de un
-		// consumidor-puro de replicacion (no re-lee journal; restaura y resume en el frente).
+		// Step 4: snapshot of the open coverage matches for the cold-start of a
+		// pure replication consumer (does not re-read the journal; restores and resumes at the front).
 		internal List<CoverageMatchSnapshot> SnapshotOpenCoverageMatches()
 		{
 			var result = new List<CoverageMatchSnapshot>();
@@ -2040,11 +2108,11 @@ namespace Puppeteer.EventSourcing.Follower
 			return result;
 		}
 
-		// Paso 4: reconstruye los roots captores abiertos desde un snapshot, ANTES de la
-		// rehidratacion. El resume posterior arranca en el frente: los confirms nuevos descargan
-		// las obligaciones restauradas y al vaciarse disparan la elision del ancla (cuyo entryId
-		// se conserva aunque su evento no se re-lea). Un match parqueado por .Aged se restaura
-		// como hijo de cobertura pending-settle para que el tick lo dispare al asentar.
+		// Step 4: reconstructs the open captor roots from a snapshot, BEFORE
+		// rehydration. The subsequent resume starts at the front: new confirms discharge
+		// the restored obligations and, once emptied, fire the anchor's elision (whose entryId
+		// is preserved even though its event is not re-read). A match parked by .Aged is restored
+		// as a pending-settle coverage child so the tick fires it once it settles.
 		internal void RestoreOpenCoverageMatches(List<CoverageMatchSnapshot> snapshots, List<ReactionEngine> engines)
 		{
 			ArgumentNullException.ThrowIfNull(snapshots);

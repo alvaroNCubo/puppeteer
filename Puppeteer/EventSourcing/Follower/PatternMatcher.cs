@@ -33,7 +33,7 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(patternAst);
 
-			// Guardar el ExposeData JSON para usarlo en matching de ExposeNode
+			// Keep the ExposeData JSON to use it when matching ExposeNode.
 			this.exposeDataJson = exposeDataJson;
 
 			// IMPORTANT: clear the previous script's info before preparing the match.
@@ -864,10 +864,10 @@ namespace Puppeteer.EventSourcing.Follower
 				bool argMatched;
 				if (patternParam is NestedCallParameterNode nestedCall)
 				{
-					// Argumento que es a su vez una llamada-con-receiver: lo casamos contra
-					// las ScriptMethodCalls registradas (la llamada interna quedo registrada
-					// por la recursion en DottedId/ChainedDotAccess.PreparePatternMatching),
-					// capturando sus $vars internos. No miramos scriptArgument (placeholder).
+					// Argument that is itself a call-with-receiver: we match it against
+					// the registered ScriptMethodCalls (the inner call was registered by
+					// the recursion in DottedId/ChainedDotAccess.PreparePatternMatching),
+					// capturing its inner $vars. We do not look at scriptArgument (placeholder).
 					argMatched = MatchExpression(nestedCall.Call, patternAst, capturedVariables,
 						usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition);
 				}
@@ -1082,23 +1082,23 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private bool MatchAlternative(AlternativeExpressionNode alternative, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
-			// Intentar cada rama secuencialmente, la primera que matchea gana
+			// Try each branch sequentially; the first that matches wins.
 			foreach (var branch in alternative.Branches)
 			{
-				// Guardar estado para rollback si esta rama no matchea.
-				// PERF (Tier 3): el snapshot solo se necesita si ya hay indices
-				// consumidos. Para alternativas que aparecen al inicio del patron
-				// (caso comun) los sets estan vacios y el rollback es un simple
-				// Clear(), evitando las dos copias de HashSet. Recursion-safe: cada
-				// invocacion (incluidas alternativas anidadas) tiene sus propias
-				// variables locales de snapshot.
+				// Save state for rollback if this branch does not match.
+				// PERF (Tier 3): the snapshot is only needed if there are already
+				// consumed indices. For alternatives that appear at the start of the
+				// pattern (the common case) the sets are empty and the rollback is a
+				// simple Clear(), avoiding the two HashSet copies. Recursion-safe: each
+				// invocation (including nested alternatives) has its own local snapshot
+				// variables.
 				int savedPosition = lastMatchedPosition;
 				HashSet<int> savedMemberIndices = usedMemberAccessIndices.Count > 0 ? new HashSet<int>(usedMemberAccessIndices) : null;
 				HashSet<int> savedMethodIndices = usedMethodCallIndices.Count > 0 ? new HashSet<int>(usedMethodCallIndices) : null;
 
 				if (MatchExpression(branch.Expression, patternAst, capturedVariables, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 				{
-					// Si la rama tiene label, capturarla
+					// If the branch has a label, capture it.
 					if (branch.Label != null)
 					{
 						capturedVariables["_matchedBranch", typeof(string)] = branch.Label;
@@ -1106,7 +1106,7 @@ namespace Puppeteer.EventSourcing.Follower
 					return true;
 				}
 
-				// Rollback del estado
+				// Rollback the state.
 				lastMatchedPosition = savedPosition;
 				usedMemberAccessIndices.Clear();
 				if (savedMemberIndices != null) foreach (var idx in savedMemberIndices) usedMemberAccessIndices.Add(idx);
@@ -1119,13 +1119,13 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private bool MatchGuardedExpression(GuardedExpressionNode guarded, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
-			// Primero: match estructural de la expression interna
+			// First: structural match of the inner expression.
 			if (!MatchExpression(guarded.InnerExpression, patternAst, capturedVariables, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 			{
 				return false;
 			}
 
-			// Segundo: evaluar todas las guard clauses (AND implicito)
+			// Second: evaluate all guard clauses (implicit AND).
 			foreach (var guard in guarded.Guards)
 			{
 				if (!EvaluateGuard(guard, capturedVariables, patternAst))
@@ -1142,12 +1142,12 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private bool EvaluateGuard(GuardClause guard, Parameters capturedVariables, PatternListNode patternAst)
 		{
-			// Caso especial: contains / not contains sobre el text completo del script
+			// Special case: contains / not contains over the whole script text.
 			if (guard.Operator == GuardOperator.Contains || guard.Operator == GuardOperator.NotContains)
 			{
 				if (guard.VariableName == null)
 				{
-					// Evaluar sobre el text completo del script
+					// Evaluate over the whole script text.
 					if (scriptText == null)
 					{
 #if DEBUG
@@ -1164,10 +1164,10 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				else
 				{
-					// contains/not contains sobre una variable capturada
+					// contains/not contains over a captured variable.
 					object variableValue = GetCapturedVariableValue(guard.VariableName, capturedVariables, patternAst);
 					if (variableValue == null || variableValue is TypedValuePlaceholder)
-						return false; // ValueGetter runtime no evaluable, falla el guard
+						return false; // Runtime-only value, not evaluable; the guard fails.
 
 					string variableStr = variableValue.ToString();
 					string searchText = guard.Value?.ToString();
@@ -1199,7 +1199,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private object GetCapturedVariableValue(string variableName, Parameters capturedVariables, PatternListNode patternAst)
 		{
-			// Buscar en los parameters capturados
+			// Look up the captured parameters.
 			string cleanName = variableName.StartsWith("$") ? variableName.Substring(1) : variableName;
 
 			if (capturedVariables.ContainsParameter(cleanName))
@@ -1208,9 +1208,9 @@ namespace Puppeteer.EventSourcing.Follower
 				return param?.GetValue();
 			}
 
-			// Buscar en los ScriptMethodCalls - arguments que matchearon con la variable
-			// Los values de arguments de methods estan en ScriptMethodCall.Arguments
-			// Necesitamos buscar por el nombre de la variable que matcheo
+			// Look up the ScriptMethodCalls - arguments that matched the variable.
+			// Method argument values live in ScriptMethodCall.Arguments.
+			// We need to search by the name of the variable that matched.
 			foreach (var methodCall in patternAst.ScriptMethodCalls)
 			{
 				for (int i = 0; i < methodCall.Arguments.Count; i++)
@@ -1218,7 +1218,7 @@ namespace Puppeteer.EventSourcing.Follower
 					var arg = methodCall.Arguments[i];
 					if (arg is TypedValuePlaceholder placeholder && placeholder.VariableName == cleanName)
 					{
-						return placeholder; // Es runtime, el guard fallara
+						return placeholder; // Runtime-only value; the guard will fail.
 					}
 				}
 			}
@@ -1297,7 +1297,7 @@ namespace Puppeteer.EventSourcing.Follower
 		//   expose _:int total;      → match alias "total" with type int.
 		//   expose 100 total;        → match alias "total" with literal value 100.
 		//   expose _ total;          → match any value at alias "total".
-		//   expose $x total;          → Captura el value del alias "total" en $x (Step 13, pendiente)
+		//   expose $x total;          → capture the alias "total" value into $x (Step 13, pending).
 		private bool MatchExposeNode(ExposeNode exposeNode, PatternListNode patternAst, Parameters capturedVariables, ref int lastMatchedPosition)
 		{
 			if (exposeNode == null) return false;
@@ -1307,7 +1307,7 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Matching ExposeNode for alias: {exposeNode.Alias}");
 #endif
 
-			// Buscar el alias en el JSON del expose
+			// Look up the alias in the expose JSON.
 			var aliasValue = FindAliasInExposeJson(exposeDataJson, exposeNode.Alias);
 			if (aliasValue == null)
 			{
@@ -1471,11 +1471,11 @@ namespace Puppeteer.EventSourcing.Follower
 
 			try
 			{
-				// Parsear el JSON
+				// Parse the JSON.
 				var jsonDoc = System.Text.Json.JsonDocument.Parse(json);
 				var root = jsonDoc.RootElement;
 
-				// Buscar recursivamente el alias
+				// Search recursively for the alias.
 				return FindAliasRecursive(root, alias);
 			}
 			catch (Exception ex)
@@ -1487,19 +1487,19 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Helper recursivo para buscar alias en JSON
+		// Recursive helper to search for an alias in JSON.
 		private object FindAliasRecursive(System.Text.Json.JsonElement element, string alias)
 		{
 			switch (element.ValueKind)
 			{
 				case System.Text.Json.JsonValueKind.Object:
-					// Buscar la property directamente
+					// Search the property directly.
 					if (element.TryGetProperty(alias, out var property))
 					{
 						return JsonElementToObject(property);
 					}
 
-					// Si no se encuentra, buscar recursivamente en todas las properties
+					// If not found, search recursively in all properties.
 					foreach (var prop in element.EnumerateObject())
 					{
 						var result = FindAliasRecursive(prop.Value, alias);
@@ -1508,7 +1508,7 @@ namespace Puppeteer.EventSourcing.Follower
 					break;
 
 				case System.Text.Json.JsonValueKind.Array:
-					// Buscar en cada elemento del array
+					// Search each array element.
 					foreach (var item in element.EnumerateArray())
 					{
 						var result = FindAliasRecursive(item, alias);
@@ -1520,7 +1520,7 @@ namespace Puppeteer.EventSourcing.Follower
 			return null;
 		}
 
-		// Helper: Convierte JsonElement a value CLR
+		// Helper: convert a JsonElement to a CLR value.
 		private object JsonElementToObject(System.Text.Json.JsonElement element)
 		{
 			switch (element.ValueKind)
@@ -1532,7 +1532,7 @@ namespace Puppeteer.EventSourcing.Follower
 					if (element.TryGetInt32(out int intValue))
 						return intValue;
 					if (element.TryGetInt64(out long longValue))
-						return (int)longValue; // Convertir a int
+						return (int)longValue; // Convert to int.
 					if (element.TryGetDecimal(out decimal decimalValue))
 						return decimalValue;
 					if (element.TryGetDouble(out double doubleValue))
@@ -1553,7 +1553,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Step 13: Extraer TODOS los values de un alias desde el JSON (con aplanamiento de arrays)
+		// Step 13: extract ALL values of an alias from the JSON (flattening arrays).
 		private List<object> ExtractAllAliasValues(string json, string alias)
 		{
 			if (string.IsNullOrEmpty(json)) return null;
@@ -1576,13 +1576,13 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Helper recursivo para extraer TODOS los values de un alias
+		// Recursive helper to extract ALL values of an alias.
 		private void ExtractAllAliasValuesRecursive(System.Text.Json.JsonElement element, string alias, List<object> values)
 		{
 			switch (element.ValueKind)
 			{
 				case System.Text.Json.JsonValueKind.Object:
-					// Buscar la property directamente
+					// Search the property directly.
 					if (element.TryGetProperty(alias, out var property))
 					{
 						var value = JsonElementToObject(property);
@@ -1592,7 +1592,7 @@ namespace Puppeteer.EventSourcing.Follower
 						}
 					}
 
-					// Continuar buscando en todas las properties del value
+					// Keep searching in all the value's properties.
 					foreach (var prop in element.EnumerateObject())
 					{
 						if (!string.Equals(prop.Name, alias, StringComparison.Ordinal))

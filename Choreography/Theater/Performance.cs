@@ -45,17 +45,17 @@ namespace Choreography.Theater
 
         protected abstract Actor CreateActor(string actorName);
 
-        // Hook legacy: corre una sola vez cuando el actor es brand-new (journal vacio).
-        // Se mantiene como muleta de backward-compat para Performances ya en produccion
-        // cuyo seed esta acoplado al path de ItsANewOne. Codigo nuevo prefiere usar
-        // OnHydrated() con un PerformCmd que contenga 'upgrade('init') { ... }'.
+        // Legacy hook: runs exactly once when the actor is brand-new (empty journal).
+        // Kept as a backward-compat crutch for Performances already in production
+        // whose seed is coupled to the ItsANewOne path. New code prefers
+        // OnHydrated() with a PerformCmd containing 'upgrade('init') { ... }'.
         protected virtual void OnFirstHydration() { }
 
-        // Hook nuevo: corre despues de cada hidratacion (tanto la primera como las
-        // subsiguientes en restarts). Pensado para invocar PerformCmd con un script que
-        // contiene una secuencia de 'upgrade('X') { ... }' — los ya aplicados se saltan
-        // silenciosamente, los nuevos se aplican y se journalizan. Es la via para
-        // versionar la inicializacion y migraciones del actor sin .exe externos.
+        // New hook: runs after every hydration (both the first and subsequent
+        // ones on restarts). Intended to invoke PerformCmd with a script that
+        // contains a sequence of 'upgrade('X') { ... }' — the already-applied ones are
+        // skipped silently, the new ones are applied and journaled. This is the way to
+        // version actor initialization and migrations without external .exe files.
         protected virtual void OnHydrated() { }
 
         internal Performance(string actorName)
@@ -99,12 +99,12 @@ namespace Choreography.Theater
             storageConfigured = true;
         }
 
-        // Logger seam (fluent, aplica a V1 y V2): el sink es per-actor. Esta
-        // fachada propaga la impl inyectada por el host (Serilog, Microsoft.Extensions
-        // .Logging, NLog, etc.) al Actor que vive bajo este Performance. Sin
-        // inyeccion, Puppeteer usa un ConsoleLogger default (Error -> stderr,
-        // Debug -> stdout). V1/V2 hacen `new` shadow para preservar el tipo concreto
-        // en la cadena.
+        // Logger seam (fluent, applies to V1 and V2): the sink is per-actor. This
+        // facade propagates the impl injected by the host (Serilog, Microsoft.Extensions
+        // .Logging, NLog, etc.) to the Actor that lives under this Performance. Without
+        // injection, Puppeteer uses a default ConsoleLogger (Error -> stderr,
+        // Debug -> stdout). V1/V2 do a `new` shadow to preserve the concrete type
+        // in the chain.
         public Performance Logger(IPuppeteerLogger logger)
         {
             if (logger == null) throw new ArgumentNullException(nameof(logger));
@@ -123,18 +123,18 @@ namespace Choreography.Theater
             this.isFollower = asFollower;
             started = true;
 
-            // Modo follower: suprime el JOURNALING de los Tell terminators que
-            // disparen las Cued Reactions del actor (invariante 1-escritor: solo
-            // el primary escribe al journal canonico compartido). Etapa 2
-            // implementada: el follower SI ejecuta el tell y SI despacha el
-            // envelope via Transport; solo se omite la escritura al journal.
+            // Follower mode: suppresses the JOURNALING of the Tell terminators that
+            // fire the actor's Cued Reactions (1-writer invariant: only the primary
+            // writes to the shared canonical journal). Stage 2 implemented: the
+            // follower DOES execute the tell and DOES dispatch the envelope via
+            // Transport; only the journal write is omitted.
             hook.SuppressReactionJournaling = asFollower;
 
-            // Gate de ReactionActivation: la Performance Theater actua como
-            // director/primary cuando NO es follower. El provider es vivo: lee
-            // isFollower en cada Reaction.Execute, asi tras el handover
-            // (UnlockAndRunAlive pone isFollower=false) las DirectorOnly empiezan
-            // a correr y las CastOnly dejan de hacerlo.
+            // ReactionActivation gate: the Theater Performance acts as
+            // director/primary when it is NOT a follower. The provider is live: it reads
+            // isFollower on every Reaction.Execute, so after the handover
+            // (UnlockAndRunAlive sets isFollower=false) the DirectorOnly ones start
+            // running and the CastOnly ones stop.
             hook.SetActingAsDirectorProvider(() => !isFollower);
 
             if (!asFollower && hook.IsNew)
@@ -216,12 +216,12 @@ namespace Choreography.Theater
         }
 
         // Shadow Replay — S1 (handoff_shadow_S1_implementation.md / design §3.0).
-        // Fachada de Performance: produce un ShadowPerformance que HOSPEDA (por
-        // composicion, NO herencia) un shadow del actor de esta Performance. El
-        // shadow lee el journal real (replay) pero escribe en su propio storage y
-        // produce cero efecto externo. ShadowPerformance es un tipo DISTINTO de
-        // Performance — el compilador impide que un shadow sustituya silenciosamente
-        // a un Performance real.
+        // Performance facade: produces a ShadowPerformance that HOSTS (by
+        // composition, NOT inheritance) a shadow of this Performance's actor. The
+        // shadow reads the real journal (replay) but writes to its own storage and
+        // produces zero external effect. ShadowPerformance is a type DISTINCT from
+        // Performance — the compiler prevents a shadow from silently substituting
+        // a real Performance.
         public ShadowPerformance Shadow(Puppeteer.ShadowConfig cfg)
         {
             if (cfg == null) throw new ArgumentNullException(nameof(cfg));
@@ -232,17 +232,17 @@ namespace Choreography.Theater
             return new ShadowPerformance(shadow);
         }
 
-        // Distill: materializa fisicamente las elisiones acumuladas en el journal del
-        // actor hospedado por esta Performance. Operacional/administrativo — corresponde
-        // al verbo de Performance. El equivalente declarativo en V2 (metadata.Distill()
-        // dentro de un Reaction) llega en Etapa 4.
+        // Distill: physically materializes the elisions accumulated in the journal of
+        // the actor hosted by this Performance. Operational/administrative — corresponds
+        // to the Performance verb. The declarative equivalent in V2 (metadata.Distill()
+        // inside a Reaction) arrives in Stage 4.
         public void Distill()
         {
             if (!storageConfigured)
                 throw new InvalidOperationException("Storage not configured. Call ConfigureStorage before Distill.");
-            // Materialize v2 / Fase 1: Distill ahora retorna builder DistillCommand;
-            // .Now() es el terminator. Sin destinations registradas via
-            // actor.Materialization.Register, ejecuta sin restriccion (compat).
+            // Materialize v2 / Phase 1: Distill now returns a DistillCommand builder;
+            // .Now() is the terminator. Without destinations registered via
+            // actor.Materialization.Register, it executes without restriction (compat).
             ActorInstance.Distill().Now();
         }
 

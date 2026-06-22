@@ -246,7 +246,7 @@ namespace Puppeteer.EventSourcing.DB
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
 			if (entryId < 0) throw new LanguageException($"entryId {entryId} must be zero or greater.");
 
-			// UPDATE solo si avanza (Max-monotonic, idempotente).
+			// UPDATE only when it advances (Max-monotonic, idempotent).
 			string sql = @"
 				UPDATE MaterializationCheckpoint
 				SET LastConfirmedEntryId = @EntryId, ConfirmedAt = @Now
@@ -269,7 +269,7 @@ namespace Puppeteer.EventSourcing.DB
 
 					if (affected > 0) return true;
 
-					// Affected = 0 → o no avanzo, o la destination no existe.
+					// Affected = 0 → either it did not advance, or the destination does not exist.
 					using (SqlCommand check = new SqlCommand(
 						"SELECT COUNT(*) FROM MaterializationCheckpoint WITH (NOLOCK) WHERE Destination = @Destination", connection))
 					{

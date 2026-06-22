@@ -3,14 +3,14 @@ using System.Threading.Tasks;
 
 namespace Choreography.Usher
 {
-    // Decision D2: ContactSecret NO es peer del RSM, es membership authority. Este es el
-    // canal privilegiado por el que el Usher inyecta MembershipRecord al journal
-    // replicado.
+    // Decision D2: ContactSecret is NOT an RSM peer, it is a membership authority. This is the
+    // privileged channel through which the Usher injects MembershipRecord into the replicated
+    // journal.
     //
-    // El handoff real ira contra el journal de un anchor peer (o un quorum-shim),
-    // que se encarga de propagar el record al resto via los mecanismos normales de
-    // replicacion. La interfaz solo necesita "appendear y devolver el epoch en que
-    // quedo committed".
+    // The real handoff will go against the journal of an anchor peer (or a quorum-shim),
+    // which is responsible for propagating the record to the rest via the normal
+    // replication mechanisms. The interface only needs to "append and return the epoch in which
+    // it was committed".
     public interface IJournalWriter
     {
         Task<long> AppendMembershipAsync(MembershipRecord record, CancellationToken ct);

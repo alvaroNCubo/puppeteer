@@ -101,10 +101,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal bool RecoveringState { get; set; } = false;
 
-		// Check transitorio que TellStatement.Execute hornea en el TellEnvelope.Check
-		// de los tell emitidos durante el body de una Causation.Continue(check:, ...).
-		// Lo set/clear ActorHandler.CausationTellCheck alrededor de ese PerformCmd.
-		// No se evalua aqui; viaja al receptor para correr como CheckThenCommand.
+		// Transient check that TellStatement.Execute bakes into the TellEnvelope.Check
+		// of the tells emitted during the body of a Causation.Continue(check:, ...).
+		// ActorHandler.CausationTellCheck sets/clears it around that PerformCmd.
+		// It is not evaluated here; it travels to the receiver to run as CheckThenCommand.
 		internal string CurrentCausationCheck { get; set; }
 
 		internal IEnumerable<string> Symbols
@@ -115,10 +115,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		// Enumerador de las globales reales del actor — usado por IActorIntrospection
-		// para emitir 'show symbols' / 'show symbol <name>'. NO incluye cacheVariables
-		// (transitorias de la ejecucion en curso) ni locales de bloque (que nunca
-		// llegan a la tabla por construccion del parser/interprete).
+		// Enumerator of the actor's real globals — used by IActorIntrospection
+		// to emit 'show symbols' / 'show symbol <name>'. Does NOT include cacheVariables
+		// (transient to the in-progress execution) nor block locals (which never
+		// reach the table by construction of the parser/interpreter).
 		internal IEnumerable<VariableSymbol> EnumerateGlobalSymbols()
 		{
 			return variablesByName.Values;

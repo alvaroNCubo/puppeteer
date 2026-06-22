@@ -4,18 +4,18 @@ using Puppeteer.EventSourcing.Playbill;
 
 namespace Choreography.Theater
 {
-	// Fase 4.5 backward compat: equivalente V1 de ActorV2Invocation, pero
-	// preservando la semantica V1 de ip/user como domain globals concatenados
-	// al script (no como system parameters en una symbol table). El Playbill
-	// se agrega como capa de audit ortogonal — el dev decide si los ip/user
-	// que usa para el script Y los valores que pone en .WithPlaybill son los
-	// mismos o no.
+	// Phase 4.5 backward compat: V1 equivalent of ActorV2Invocation, but
+	// preserving the V1 semantics of ip/user as domain globals concatenated
+	// into the script (not as system parameters in a symbol table). The Playbill
+	// is added as an orthogonal audit layer — the dev decides whether the ip/user
+	// used for the script AND the values placed in .WithPlaybill are the
+	// same or not.
 	//
-	// Nota: V1 no tiene un Parameters fluent (solo string ip/user). Para reusar
-	// la maquinaria de validacion del Playbill, .WithPlaybill recibe un
-	// configure<Parameters> identico al de V2 — la unica diferencia entre las
-	// dos APIs es que V1.Using exige ip/user explicitos (necesarios para
-	// concatenar al script) mientras V2.Using los toma del symbol table.
+	// Note: V1 has no fluent Parameters (only string ip/user). To reuse
+	// the Playbill validation machinery, .WithPlaybill receives a
+	// configure<Parameters> identical to V2's — the only difference between the
+	// two APIs is that V1.Using requires explicit ip/user (needed to
+	// concatenate into the script) while V2.Using takes them from the symbol table.
 	public readonly ref struct PerformanceV1Invocation
 	{
 		private readonly PerformanceV1 _performance;
@@ -88,7 +88,7 @@ namespace Choreography.Theater
 		{
 			foreach (var p in values)
 			{
-				// Playbill final refactor: ya no hay SystemParameter (incluido Now) — todo es user.
+				// Playbill final refactor: there is no longer a SystemParameter (including Now) — everything is user.
 				var t = p.ParameterType;
 				if (t == typeof(string)) values[p.Name, typeof(string)] = string.Empty;
 				else if (t == typeof(int)) values[p.Name, typeof(int)] = 0;

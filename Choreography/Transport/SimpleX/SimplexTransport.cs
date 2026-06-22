@@ -8,52 +8,52 @@ using Puppeteer.EventSourcing;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Envelope flow bidireccional para 2-Stage E2E con KEY simetrico.
+    // Bidirectional envelope flow for 2-Stage E2E with symmetric KEY.
     //
-    // El modelo SMP v6 requiere que cada queue se "secure" con KEY antes de aceptar SEND
-    // firmados. Como hay DOS queues por par (forward del creator, reverse del joiner),
-    // ambos lados necesitan el senderSignPubKey + senderDhPubKey del otro out-of-band.
+    // The SMP v6 model requires each queue to be "secured" with KEY before accepting signed
+    // SENDs. Since there are TWO queues per pair (forward from the creator, reverse from the joiner),
+    // both sides need the other's senderSignPubKey + senderDhPubKey out-of-band.
     //
-    // Secuencia:
+    // Sequence:
     //
     //   1. Creator: NEW(forwardQueue) -> IDS. (CreateInvitationAsync)
     //
     //   2. Joiner (AcceptInvitationAsync):
-    //      - Parse invitation URI -> forwardQueue (rol Sender).
-    //      - Genera (senderSign + senderDh) propias para la forward queue.
-    //      - NEW(reverseQueue) -> joiner es Recipient.
+    //      - Parse invitation URI -> forwardQueue (Sender role).
+    //      - Generates its own (senderSign + senderDh) for the forward queue.
+    //      - NEW(reverseQueue) -> joiner is Recipient.
     //      - SUB(reverseQueue).
-    //      - SEND_unsigned_plaintext(forwardQueue, ReverseQueueEnvelope) con reverseUri +
+    //      - SEND_unsigned_plaintext(forwardQueue, ReverseQueueEnvelope) with reverseUri +
     //        joiner.senderSignPub_F + joiner.senderDhPub_F.
-    //      - Espera ForwardKeyEnvelope en reverseQueue (plaintext).
+    //      - Waits for ForwardKeyEnvelope on reverseQueue (plaintext).
     //      - SecureQueueAsync(reverseQueue, creator.senderSignPub_R) [KEY].
     //      - reverseQueue.PeerSenderDhPublicKey = creator.senderDhPub_R.
-    //      - Devuelve channel (outbound=forward, inbound=reverse).
+    //      - Returns channel (outbound=forward, inbound=reverse).
     //
     //   3. Creator (WaitForConnectionAsync):
-    //      - SUB(forwardQueue). Espera MSG con ReverseQueueEnvelope (plaintext).
+    //      - SUB(forwardQueue). Waits for MSG with ReverseQueueEnvelope (plaintext).
     //      - SecureQueueAsync(forwardQueue, envelope.SenderSignPub_F) [KEY].
     //      - forwardQueue.PeerSenderDhPublicKey = envelope.SenderDhPub_F.
-    //      - Parse reverseQueue desde reverseUri (rol Sender).
-    //      - Genera (senderSign + senderDh) propias para reverseQueue.
+    //      - Parse reverseQueue from reverseUri (Sender role).
+    //      - Generates its own (senderSign + senderDh) for reverseQueue.
     //      - SEND_unsigned_plaintext(reverseQueue, ForwardKeyEnvelope).
-    //      - Devuelve channel (outbound=reverse, inbound=forward).
+    //      - Returns channel (outbound=reverse, inbound=forward).
     //
-    //   4. Ambas queues quedan secured. SENDs posteriores van firmados con crypto_box y
-    //      se decryptan con el PeerSenderDhPublicKey registrado en cada inbound queue.
+    //   4. Both queues end up secured. Subsequent SENDs are signed with crypto_box and
+    //      are decrypted with the PeerSenderDhPublicKey registered in each inbound queue.
     //
-    // Por que los envelopes van plaintext: el chicken-and-egg de crypto_box hace imposible
-    // cifrar el primer mensaje (necesitarias la pubkey que precisamente vas a transportar).
-    // Los envelopes solo contienen pubkeys publicas + queue URIs publicas, asi que un
-    // observador pasivo no aprende secretos. Post-handshake, todos los SENDs usan crypto_box.
+    // Why the envelopes go plaintext: the crypto_box chicken-and-egg makes it impossible
+    // to encrypt the first message (you would need the pubkey you are precisely about to transport).
+    // The envelopes only contain public pubkeys + public queue URIs, so a
+    // passive observer learns no secrets. Post-handshake, all SENDs use crypto_box.
     internal sealed class SimplexTransport : IStageTransport
     {
         private readonly PerformerId _localId;
         private readonly string _smpServer;
         private readonly int _smpPort;
-        // serverFingerprint = SHA-256(idCert) que el Stage conoce a-priori (TOFU).
-        // Para creator (Stage que crea invitaciones via Ushier) viene del config.
-        // Para joiner-only (solo acepta invitaciones), puede ser null y se extrae del URI.
+        // serverFingerprint = SHA-256(idCert) that the Stage knows a-priori (TOFU).
+        // For the creator (Stage that creates invitations via the invitation issuer) it comes from the config.
+        // For joiner-only (only accepts invitations), it may be null and is extracted from the URI.
         private readonly byte[] _configuredFingerprint;
         private readonly IPuppeteerLogger _logger;
         private SmpClient _client;
@@ -107,7 +107,7 @@ namespace Choreography.Transport.SimpleX
         }
 
         // Stage1 creates a queue on the SMP server and returns the invitation.
-        // Requiere que el config del Stage haya provisto serverFingerprint (rol del Ushier).
+        // Requires that the Stage config provided serverFingerprint (invitation-issuer role).
         public async Task<ConnectionInvitation> CreateInvitationAsync(ChannelPurpose purpose)
         {
             if (_configuredFingerprint == null)
@@ -131,14 +131,14 @@ namespace Choreography.Transport.SimpleX
             return new ConnectionInvitation(_localId, purpose, uri);
         }
 
-        // Stage2 (joiner): parsea la invitation URI, genera sus claves de Sender sobre la
-        // forward queue, crea la reverse queue, envia ReverseQueueEnvelope unsigned plaintext,
-        // y espera el ForwardKeyEnvelope del creator. Devuelve channel bidireccional.
+        // Stage2 (joiner): parses the invitation URI, generates its Sender keys over the
+        // forward queue, creates the reverse queue, sends ReverseQueueEnvelope unsigned plaintext,
+        // and waits for the creator's ForwardKeyEnvelope. Returns a bidirectional channel.
         public async Task<IStageChannel> AcceptInvitationAsync(ConnectionInvitation invitation)
         {
             if (invitation == null) throw new ArgumentNullException(nameof(invitation));
 
-            // 1. Parse invitation URI (incluye serverFingerprint TOFU).
+            // 1. Parse invitation URI (includes serverFingerprint TOFU).
             var forwardQueue = SmpQueue.FromInvitationUri(invitation.Address);
             byte[] keyHash = forwardQueue.ServerFingerprint
                 ?? _configuredFingerprint
@@ -148,8 +148,8 @@ namespace Choreography.Transport.SimpleX
 
             await EnsureConnectedAsync(keyHash, CancellationToken.None);
 
-            // 2. Generar par senderSign + senderDh ephemeral para la forward queue
-            //    (joiner es Sender ahi).
+            // 2. Generate an ephemeral senderSign + senderDh pair for the forward queue
+            //    (joiner is Sender there).
             var (senderSignPub_F, senderSignSec_F) = SmpCrypto.GenerateSigningKeyPair();
             var (senderDhPub_F, senderDhSec_F) = SmpCrypto.GenerateDhKeyPair();
             forwardQueue.SenderSignPublicKey = senderSignPub_F;
@@ -157,17 +157,17 @@ namespace Choreography.Transport.SimpleX
             forwardQueue.SenderDhPublicKey = senderDhPub_F;
             forwardQueue.SenderDhSecretKey = senderDhSec_F;
 
-            // 3. Crear reverse queue (joiner es Recipient ahi).
+            // 3. Create the reverse queue (joiner is Recipient there).
             var reverseQueue = new SmpQueue(_smpServer, _smpPort) { ServerFingerprint = keyHash };
             await _client.CreateQueueAsync(reverseQueue);
 
-            // 4. SUB a la reverse queue (necesitamos recibir el ForwardKeyEnvelope).
+            // 4. SUB to the reverse queue (we need to receive the ForwardKeyEnvelope).
             await _client.SubscribeAsync(reverseQueue, CancellationToken.None);
             var reverseReader = _client.GetSubscription(reverseQueue.RecipientId);
 
-            // 5. Construir y enviar ReverseQueueEnvelope (unsigned plaintext: la forward
-            //    queue aun no esta secured con KEY y el chicken-and-egg de crypto_box
-            //    impide cifrar el primer mensaje).
+            // 5. Build and send ReverseQueueEnvelope (unsigned plaintext: the forward
+            //    queue is not yet secured with KEY and the crypto_box chicken-and-egg
+            //    prevents encrypting the first message).
             var envelope = new ReverseQueueEnvelope
             {
                 ReverseQueueUri = reverseQueue.ToInvitationUri(),
@@ -178,8 +178,8 @@ namespace Choreography.Transport.SimpleX
             byte[] envelopeBytes = envelope.Serialize();
             await _client.SendMessageUnsignedAsync(forwardQueue, envelopeBytes, CancellationToken.None);
 
-            // 6. Esperar ForwardKeyEnvelope del creator en la reverse queue.
-            //    Mismo unwrap server-encryption + paddedString.
+            // 6. Wait for the creator's ForwardKeyEnvelope on the reverse queue.
+            //    Same server-encryption + paddedString unwrap.
             ForwardKeyEnvelope forwardKey;
             using (var awaitCts = new CancellationTokenSource(TimeSpan.FromSeconds(60)))
             {
@@ -189,12 +189,12 @@ namespace Choreography.Transport.SimpleX
                 await _client.AcknowledgeAsync(reverseQueue, msg.MsgId, CancellationToken.None);
             }
 
-            // 7. KEY sobre la reverse queue: registrar creator.senderSignPub_R.
+            // 7. KEY over the reverse queue: register creator.senderSignPub_R.
             await _client.SecureQueueAsync(reverseQueue, forwardKey.SenderSignPubKey, CancellationToken.None);
             reverseQueue.PeerSenderDhPublicKey = forwardKey.SenderDhPubKey;
 
-            // 8. Channel bidireccional: outbound=forward (joiner envia ahi), inbound=reverse
-            //    (joiner recibe ahi).
+            // 8. Bidirectional channel: outbound=forward (joiner sends there), inbound=reverse
+            //    (joiner receives there).
             var channel = new SimplexChannel(_client, forwardQueue, reverseQueue,
                 invitation.InviterId, invitation.Purpose, _logger);
             await channel.StartAsync(CancellationToken.None);
@@ -202,9 +202,9 @@ namespace Choreography.Transport.SimpleX
             return channel;
         }
 
-        // Stage1 (creator): espera el ReverseQueueEnvelope en la forward queue, hace KEY de
-        // esa queue con las pubkeys del joiner, genera sus claves para la reverse queue, y
-        // envia ForwardKeyEnvelope unsigned. Devuelve channel bidireccional.
+        // Stage1 (creator): waits for the ReverseQueueEnvelope on the forward queue, does KEY on
+        // that queue with the joiner's pubkeys, generates its keys for the reverse queue, and
+        // sends ForwardKeyEnvelope unsigned. Returns a bidirectional channel.
         public async Task<IStageChannel> WaitForConnectionAsync(ConnectionInvitation invitation, CancellationToken ct)
         {
             if (invitation == null) throw new ArgumentNullException(nameof(invitation));
@@ -212,13 +212,13 @@ namespace Choreography.Transport.SimpleX
             if (!_pending.TryGetValue(invitation.Address, out var pending))
                 throw new InvalidOperationException($"No pending invitation for {invitation.Address}");
 
-            // En este path el Stage es el creator (ya creo invitacion previamente),
-            // entonces siempre tenemos _configuredFingerprint disponible.
+            // On this path the Stage is the creator (it already created the invitation previously),
+            // so we always have _configuredFingerprint available.
             await EnsureConnectedAsync(_configuredFingerprint, ct);
 
             var forwardQueue = pending.Queue;
 
-            // 1. SUB la forward queue para recibir el ReverseQueueEnvelope.
+            // 1. SUB the forward queue to receive the ReverseQueueEnvelope.
             await _client.SubscribeAsync(forwardQueue, ct);
             var reader = _client.GetSubscription(forwardQueue.RecipientId);
 
@@ -229,11 +229,11 @@ namespace Choreography.Transport.SimpleX
                 firstMsg = await reader.ReadAsync(timeoutCts.Token);
             }
 
-            // 2. C2S decryption + paddedString unwrap. El SMP server encripta MSG bodies en
-            //    delivery con NaCl crypto_box (X25519(srvDhSec,rcvDhPub) + HSalsa20-zero-nonce)
-            //    y msgId padded-a-24 como nonce. El recipient decripta con la misma derivacion
-            //    sobre su rcvDhSec + serverDhPub, luego unpad del paddedString y skip del meta
-            //    block (SystemTime + MsgFlags + ' ') para recuperar el msgBody original.
+            // 2. C2S decryption + paddedString unwrap. The SMP server encrypts MSG bodies on
+            //    delivery with NaCl crypto_box (X25519(srvDhSec,rcvDhPub) + HSalsa20-zero-nonce)
+            //    and msgId padded-to-24 as the nonce. The recipient decrypts with the same derivation
+            //    over its rcvDhSec + serverDhPub, then unpads the paddedString and skips the meta
+            //    block (SystemTime + MsgFlags + ' ') to recover the original msgBody.
             byte[] envelopeBytes = DecryptServerEnvelope(firstMsg, forwardQueue);
             var envelope = ReverseQueueEnvelope.Deserialize(envelopeBytes);
 
@@ -244,14 +244,14 @@ namespace Choreography.Transport.SimpleX
 
             await _client.AcknowledgeAsync(forwardQueue, firstMsg.MsgId, ct);
 
-            // 3. KEY sobre forward queue con la senderSignPubKey del joiner.
+            // 3. KEY over the forward queue with the joiner's senderSignPubKey.
             await _client.SecureQueueAsync(forwardQueue, envelope.SenderSignPubKey, ct);
             forwardQueue.PeerSenderDhPublicKey = envelope.SenderDhPubKey;
 
-            // 4. Parse reverse queue (creator se vuelve Sender ahi).
+            // 4. Parse reverse queue (creator becomes Sender there).
             var reverseQueue = SmpQueue.FromInvitationUri(envelope.ReverseQueueUri);
 
-            // 5. Generar par senderSign + senderDh ephemeral para la reverse queue.
+            // 5. Generate an ephemeral senderSign + senderDh pair for the reverse queue.
             var (senderSignPub_R, senderSignSec_R) = SmpCrypto.GenerateSigningKeyPair();
             var (senderDhPub_R, senderDhSec_R) = SmpCrypto.GenerateDhKeyPair();
             reverseQueue.SenderSignPublicKey = senderSignPub_R;
@@ -259,7 +259,7 @@ namespace Choreography.Transport.SimpleX
             reverseQueue.SenderDhPublicKey = senderDhPub_R;
             reverseQueue.SenderDhSecretKey = senderDhSec_R;
 
-            // 6. ForwardKeyEnvelope sobre la reverse queue (unsigned plaintext).
+            // 6. ForwardKeyEnvelope over the reverse queue (unsigned plaintext).
             var fkEnvelope = new ForwardKeyEnvelope
             {
                 SenderSignPubKey = senderSignPub_R,
@@ -269,8 +269,8 @@ namespace Choreography.Transport.SimpleX
 
             _pending.TryRemove(invitation.Address, out _);
 
-            // 7. Channel bidireccional: outbound=reverse (creator envia ahi), inbound=forward
-            //    (creator recibe ahi).
+            // 7. Bidirectional channel: outbound=reverse (creator sends there), inbound=forward
+            //    (creator receives there).
             var channel = new SimplexChannel(_client, reverseQueue, forwardQueue,
                 envelope.PerformerId, pending.Purpose, _logger);
             await channel.StartAsync(ct);
@@ -281,17 +281,17 @@ namespace Choreography.Transport.SimpleX
         // Decrypt + unwrap MSG body (C2S server-to-recipient layer).
         //
         // simplexmq Server.hs:2030-2036 — encryptMsg = cbEncryptMaxLenBS rcvDhSecret (cbNonce msgId).
-        // El server toma RcvMsgBody { msgTs, msgFlags, msgBody }, lo encodea como paddedString
-        // de tamano fijo y lo encripta con NaCl crypto_box. La key del shared es el X25519 entre
-        // serverDhSec_per_queue y recipientDhPub_per_queue (con el HSalsa20-zero-nonce wrap de
-        // NaCl crypto_box_beforenm; ver SmpCrypto.DecryptC2SEnvelope). El nonce es el msgId
-        // padeado a 24 bytes con ceros a la derecha. Wire layout:
+        // The server takes RcvMsgBody { msgTs, msgFlags, msgBody }, encodes it as a fixed-size
+        // paddedString and encrypts it with NaCl crypto_box. The shared key is the X25519 between
+        // serverDhSec_per_queue and recipientDhPub_per_queue (with the HSalsa20-zero-nonce wrap of
+        // NaCl crypto_box_beforenm; see SmpCrypto.DecryptC2SEnvelope). The nonce is the msgId
+        // padded to 24 bytes with trailing zeros. Wire layout:
         //
         //   EncryptedBody = [16-byte Poly1305 tag][16106-byte ciphertext]   (16122B total)
         //   plaintext     = [Word16 BE bodyLen][rcvMsgBody bytes]['#' padding to 16106]
         //   rcvMsgBody    = [SystemTime 8B][MsgFlags 1B + extras][' '][... msgBody ...]
         //
-        // Devuelve el msgBody (lo que el sender envio originalmente al SMP server).
+        // Returns the msgBody (what the sender originally sent to the SMP server).
         internal static byte[] DecryptServerEnvelope(SmpMsg msg, SmpQueue receivingQueue)
         {
             if (msg == null) throw new ArgumentNullException(nameof(msg));

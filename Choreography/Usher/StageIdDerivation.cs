@@ -4,14 +4,14 @@ using Choreography.StageManager;
 
 namespace Choreography.Usher
 {
-    // Decision D5: StageId determinista derivado del StagePublicKey.
-    // - Self-certifying: el Usher recompoone el mismo Id desde el pubkey recibido sin
-    //   tener que pedirle al Stage "como te llamas"; cualquier peer que despues vea el
-    //   pubkey en el journal puede verificar que el Id corresponde.
-    // - Permite que el Usher escriba el MembershipRecord con el StageId y descarte el
-    //   pubkey en memoria (el pubkey vive en el journal, no en el estado del Usher).
-    //   Asi se mantiene el invariante "Usher desconoce la lista exacta de pubkeys de
-    //   StageManagers" tras el handshake.
+    // Decision D5: StageId is deterministically derived from the StagePublicKey.
+    // - Self-certifying: the Usher recomposes the same Id from the received pubkey without
+    //   having to ask the Stage "what is your name"; any peer that later sees the
+    //   pubkey in the journal can verify that the Id corresponds.
+    // - Lets the Usher write the MembershipRecord with the StageId and discard the
+    //   pubkey from memory (the pubkey lives in the journal, not in the Usher's state).
+    //   This preserves the invariant "Usher does not know the exact list of pubkeys of
+    //   StageManagers" after the handshake.
     public static class StageIdDerivation
     {
         public static PerformerId FromPublicKey(byte[] stagePublicKey)

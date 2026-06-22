@@ -57,10 +57,10 @@ namespace Puppeteer.EventSourcing
 
 		private void IngestAssembly(Assembly assembly)
 		{
-			// Registramos el nombre del assembly ingerido para el diagnostico de
-			// NewInstance: cuando una clase no se encuentra, listar los assemblies
-			// que SI se cargaron es el dato que hace obvia una mala configuracion de
-			// librerias (p.ej. follower que pasa el assembly de la app en vez del del dominio).
+			// Record the name of the ingested assembly for NewInstance diagnostics:
+			// when a class is not found, listing the assemblies that DID load is the
+			// detail that makes a bad library configuration obvious (e.g. a follower
+			// that passes the host Performance assembly instead of the domain one).
 			string assemblyName = assembly.GetName().Name ?? assembly.FullName ?? assembly.ToString();
 			if (!ingestedAssemblyNames.Contains(assemblyName))
 			{
@@ -78,8 +78,8 @@ namespace Puppeteer.EventSourcing
 				}
 				classList.Add(classInfo);
 
-				// Si dos assemblies declaran un Type con el mismo Name, gana el primero (estable y predecible).
-				// FindClassesByName devuelve ambos via classesByName si el caller necesita resolver ambig�edad.
+				// If two assemblies declare a Type with the same Name, the first one wins (stable and predictable).
+				// FindClassesByName returns both via classesByName if the caller needs to resolve the ambiguity.
 				if (!typesByName.ContainsKey(type.Name))
 				{
 					typesByName.Add(type.Name, type);
@@ -144,10 +144,10 @@ namespace Puppeteer.EventSourcing
 			}
 			foreach (Type t in types)
 			{
-				// Incluye clases y ENUMS del dominio. Los enums se indexan por nombre para que el
-				// cast explicito (MiEnum)'Valor' los resuelva via GetTypeOrThrow. El path por
-				// defecto (parametro/literal/simbolo en slot enum) NO depende de esto: alli el tipo
-				// del enum se descubre de la firma del metodo/constructor.
+				// Includes domain classes and ENUMS. Enums are indexed by name so that the
+				// explicit cast (MyEnum)'Value' resolves them via GetTypeOrThrow. The default
+				// path (parameter/literal/symbol in an enum slot) does NOT depend on this: there
+				// the enum type is discovered from the method/constructor signature.
 				if ((t.IsPublic || t.IsNestedPublic || (t.IsNotPublic && !t.IsNestedPrivate)) && ((t.IsClass && t.IsSubclassOf(typeof(object))) || t.IsEnum))
 				{
 					result.Add(t);
@@ -198,12 +198,12 @@ namespace Puppeteer.EventSourcing
 
 		internal int TypeCount => typesByName.Count;
 
-		// Nombres (simples) de los assemblies ingeridos en esta libreria. Usado solo
-		// por el diagnostico de NewInstance al reportar una clase ausente.
+		// Simple names of the assemblies ingested into this library. Used only by
+		// NewInstance diagnostics when reporting a missing class.
 		internal IReadOnlyList<string> LoadedAssemblyNames => ingestedAssemblyNames;
 
-		// Nombres simples de las clases conocidas por la libreria. Usado solo por el
-		// diagnostico de NewInstance (preview acotado) para sugerir lo que SI esta cargado.
+		// Simple names of the classes known to the library. Used only by NewInstance
+		// diagnostics (bounded preview) to suggest what IS loaded.
 		internal IEnumerable<string> KnownClassNames => classesByName.Keys;
 	}
 }

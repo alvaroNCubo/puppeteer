@@ -72,15 +72,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else
 			{
 				object valorDeLaExpresionDerecha = rValue.Execute();
-				// Pasar el tipo DECLARADO del rValue, no el runtime concreto. El
-				// declarado es el que el setter de ForcedType habria fijado durante
-				// ValidateStatically; si se almacena el concreto en symbol.type, una
-				// PerformCmd posterior que reasigne la misma global ve ese tipo como
-				// ForcedType del lValue y rechaza reasignaciones legitimas con un
-				// tipo mas general (sintoma: "Type X does not inherit from Y" donde X
-				// es el declarado y Y el concreto). Disparado cuando la PerformCmd
-				// actual saltea ValidateStatically (p.ej. contiene Eval); el
-				// runtime sigue inspeccionable via symbol.value.GetType().
+				// Pass the DECLARED type of the rValue, not the concrete runtime one. The
+				// declared type is the one the ForcedType setter would have fixed during
+				// ValidateStatically; if the concrete one is stored in symbol.type, a
+				// later PerformCmd that reassigns the same global sees that type as the
+				// lValue's ForcedType and rejects legitimate reassignments with a
+				// more general type (symptom: "Type X does not inherit from Y" where X
+				// is the declared and Y the concrete). Triggered when the current
+				// PerformCmd skips ValidateStatically (e.g. it contains Eval); the
+				// runtime value stays inspectable via symbol.value.GetType().
 				Type rightExpressionType = rValue.ComputeType();
 				if (rightExpressionType == null && valorDeLaExpresionDerecha != null)
 				{
@@ -297,13 +297,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// return type is not. Two distinct shapes are covered:
 				//   (a) The receiver is abstract/interface (or non-sealed) and a
 				//       concrete subclass overrides the method with a more refined
-				//       return type. Documentado en
-				//       BUG_StaticValidationBaseTypeReassign §6.1.
+				//       return type.
 				//   (b) The receiver is concrete and the method's declared return
 				//       type is a strict BASE of ForcedType — typically a body that
 				//       returns its own caller-supplied argument (identity-return /
-				//       accumulator). Documentado en
-				//       BUG_StaticValidationCovariantReturnReassign §6.1.
+				//       accumulator).
 				// Mirrors the polymorphic resolution already applied in
 				// DotAccess.ComputeCallExpressionType and DotAccess.InvokeMethodExpression
 				// for the symmetric "member only on subclass" pattern.

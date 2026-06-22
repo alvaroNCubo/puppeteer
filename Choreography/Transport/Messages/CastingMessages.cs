@@ -3,43 +3,44 @@ using System.IO;
 using Choreography.StageManager;
 
 // ============================================================================
-// Casting election protocol — implementacion en progreso.
+// Casting election protocol — implementation in progress.
 //
-// Estado por fase (origen: scaffold reservado en este archivo previo al fix de
-// bug 12, ver commit 6d7f342 para el modo legacy "force-promote + tiebreaker"):
+// State by phase (origin: scaffold reserved in this file prior to the fix of
+// bug 12, see commit 6d7f342 for the legacy "force-promote + tiebreaker" mode):
 //
-//   FASE (a) Heartbeat loop — IMPLEMENTADO (commit 73f5313).
-//     Director-down detection sin intervencion del operador. El Director emite
-//     Heartbeat(senderId, currentEntryId) periodicamente; el Cast lleva un
-//     lastSeenDirector dict y un DirectorWatchdog que dispara OnDirectorLost
-//     cuando supera DirectorTimeout. Por si solo no recupera — solo detecta.
+//   PHASE (a) Heartbeat loop — IMPLEMENTED (commit 73f5313).
+//     Director-down detection without operator intervention. The Director emits
+//     Heartbeat(senderId, currentEntryId) periodically; the Cast keeps a
+//     lastSeenDirector dict and a DirectorWatchdog that fires OnDirectorLost
+//     when DirectorTimeout is exceeded. On its own it does not recover — it
+//     only detects.
 //
-//   FASE (b) CastingPropose/Accept/Reject + Quorum — EN PROGRESO.
-//     Cuando OnDirectorLost dispara, el Cast pasa a Candidate: bumpea
-//     currentTerm (TermStore.cs lo persiste a {StageStateDir}/term.bin),
-//     vota por si mismo y broadcastea CastingPropose con (Term,
-//     ProposerEntryCount, ElectionId). Peers responden con CastingAccept
-//     o CastingReject segun reglas Raft:
+//   PHASE (b) CastingPropose/Accept/Reject + Quorum — IN PROGRESS.
+//     When OnDirectorLost fires, the Cast transitions to Candidate: it bumps
+//     currentTerm (TermStore.cs persists it to {StageStateDir}/term.bin),
+//     votes for itself and broadcasts CastingPropose with (Term,
+//     ProposerEntryCount, ElectionId). Peers respond with CastingAccept
+//     or CastingReject following Raft rules:
 //       - propose.Term < myTerm  → CastingReject(myTerm).
-//       - propose.Term > myTerm  → adopt term, reset votedFor, evaluar
-//                                  EntryCount: accept si proposer >= mio.
-//       - propose.Term == myTerm → reject si ya vote en este term, sino
-//                                  mismo check de EntryCount.
-//     Quorum: floor(N/2)+1 incluyendo self. Excepcion declarada para N=2
-//     (apps Stage 2-peer): weak quorum, self-vote alcanza. Para N>=3, strict.
-//     On win: DirectorAnnounce con term nuevo. HandleDirectorAnnounce
-//     evolucionado a term-first: term mayor gana siempre; empate de term
-//     cae al tiebreaker bug-12 (entries desc, performerId asc).
+//       - propose.Term > myTerm  → adopt term, reset votedFor, evaluate
+//                                  EntryCount: accept if proposer >= mine.
+//       - propose.Term == myTerm → reject if already voted in this term, else
+//                                  same EntryCount check.
+//     Quorum: floor(N/2)+1 including self. Declared exception for N=2
+//     (2-peer Stage apps): weak quorum, self-vote suffices. For N>=3, strict.
+//     On win: DirectorAnnounce with the new term. HandleDirectorAnnounce
+//     evolved to term-first: higher term always wins; a term tie
+//     falls back to the bug-12 tiebreaker (entries desc, performerId asc).
 //
-//   FASE (d) Randomized backoff — PENDIENTE.
-//     Tras perder eleccion o timeout, esperar Random(0..CastingElectionTimeout/2)
-//     antes del retry. Evita livelock en split votes 3+ peers.
+//   PHASE (d) Randomized backoff — PENDING.
+//     After losing an election or timing out, wait Random(0..CastingElectionTimeout/2)
+//     before retrying. Avoids livelock on split votes across 3+ peers.
 //
-// PromoteToDirector(force:true) — sin bumpeo de term (decision firmada
-// 2026-05-27 para entorno Stage end-user). Force-promote queda como escape-hatch
-// devops/bootstrap; el protocolo es source-of-truth via term-first, y un
-// force-promote en lado minoritario sera demoted silenciosamente cuando el
-// cluster reconverja con un term superior.
+// PromoteToDirector(force:true) — without bumping the term (decision signed
+// 2026-05-27 for the end-user Stage environment). Force-promote remains a
+// devops/bootstrap escape-hatch; the protocol is the source-of-truth via
+// term-first, and a force-promote on the minority side will be silently
+// demoted when the cluster reconverges with a higher term.
 // ============================================================================
 
 namespace Choreography.Transport
@@ -48,20 +49,20 @@ namespace Choreography.Transport
     {
         public override StageMessageType MessageType => StageMessageType.CastingPropose;
 
-        // Term del proposer en el momento de proponer. Voter lo compara con su
-        // propio term: si proposer.Term > voter.Term, voter adopta el term superior
-        // (reset de votedFor) antes de evaluar; si menor, reject inmediato.
+        // Proposer's term at the time of proposing. The voter compares it with its
+        // own term: if proposer.Term > voter.Term, the voter adopts the higher term
+        // (reset of votedFor) before evaluating; if lower, immediate reject.
         public long Term { get; private set; }
 
-        // EntryId mas alto del journal del proposer en el momento de proponer.
-        // Voter solo acepta si proposer.EntryCount >= voter.EntryCount — garantia
-        // de que el Director electo no perdera entries committed (Raft completeness).
+        // Highest journal EntryId of the proposer at the time of proposing.
+        // The voter only accepts if proposer.EntryCount >= voter.EntryCount — a guarantee
+        // that the elected Director will not lose committed entries (Raft completeness).
         public long ProposerEntryCount { get; private set; }
 
-        // Identificador del round de eleccion. El Candidate genera uno nuevo al
-        // empezar; lo incluye en cada CastingPropose; los Accept/Reject lo devuelven
-        // para que el Candidate los correlacione con su round actual (evita contar
-        // votos de rounds previos del mismo term).
+        // Identifier of the election round. The Candidate generates a new one when
+        // it starts; it includes it in every CastingPropose; the Accept/Reject return
+        // it so the Candidate can correlate them with its current round (avoids counting
+        // votes from previous rounds of the same term).
         public Guid ElectionId { get; private set; }
 
         public CastingPropose(PerformerId senderId, long term, long proposerEntryCount, Guid electionId) : base(senderId)
@@ -92,9 +93,9 @@ namespace Choreography.Transport
     {
         public override StageMessageType MessageType => StageMessageType.CastingAccept;
 
-        // Term del voter en el momento del voto (==proposer.Term despues de adopt).
-        // El Candidate descarta accepts con term != su term actual (votos de
-        // rounds previos quedan obsoletos cuando el Candidate avanza de term).
+        // Voter's term at the time of the vote (==proposer.Term after adopt).
+        // The Candidate discards accepts with term != its current term (votes from
+        // previous rounds become stale when the Candidate advances its term).
         public long Term { get; private set; }
         public Guid ElectionId { get; private set; }
 
@@ -123,10 +124,10 @@ namespace Choreography.Transport
     {
         public override StageMessageType MessageType => StageMessageType.CastingReject;
 
-        // Term del voter al rechazar. Si voter.Term > proposer.Term, el proposer
-        // aprende del reject que esta atrasado y adopta el term superior pasando
-        // a Follower. Si voter.Term == proposer.Term el reject indica "ya vote por
-        // otro" o "tus entries son insuficientes".
+        // Voter's term when rejecting. If voter.Term > proposer.Term, the proposer
+        // learns from the reject that it is behind and adopts the higher term,
+        // transitioning to Follower. If voter.Term == proposer.Term the reject indicates
+        // "already voted for another" or "your entries are insufficient".
         public long Term { get; private set; }
         public Guid ElectionId { get; private set; }
 
@@ -157,21 +158,21 @@ namespace Choreography.Transport
 
         public PerformerId DirectorId { get; private set; }
 
-        // MaxEntryId del Director-anunciante al momento del announce. El receiver
-        // lo usa como tiebreaker determinista cuando detecta conflicto
-        // Director-vs-Director con EL MISMO term (caso bug 12: ambos peers en
-        // estado IsDirector tras force-promote concurrente). Quien tiene mas
-        // entries journaled gana; empate se rompe por PerformerId.CompareTo.
-        // Cuando los terms difieren, el term gana siempre (term-first) y este
-        // MaxEntryId solo es informativo.
+        // MaxEntryId of the announcing Director at the time of the announce. The receiver
+        // uses it as a deterministic tiebreaker when it detects a
+        // Director-vs-Director conflict with THE SAME term (bug 12 case: both peers in
+        // IsDirector state after a concurrent force-promote). Whoever has more
+        // journaled entries wins; a tie is broken by PerformerId.CompareTo.
+        // When the terms differ, the term always wins (term-first) and this
+        // MaxEntryId is only informational.
         public long MaxEntryId { get; private set; }
 
-        // Term del Director anunciante. Fase b: comparacion primaria en
-        // HandleDirectorAnnounce. announce.Term > myTerm → adopto term y peer
-        // como Director; announce.Term < myTerm → ignoro (stale); igual term →
-        // tiebreaker MaxEntryId. Stages legacy (pre-fase-b) usan term=0 — un
-        // peer que despues corra eleccion legitima a term>=1 los reemplazara
-        // silenciosamente cuando announce.
+        // Term of the announcing Director. Phase b: primary comparison in
+        // HandleDirectorAnnounce. announce.Term > myTerm → adopt term and peer
+        // as Director; announce.Term < myTerm → ignore (stale); equal term →
+        // MaxEntryId tiebreaker. Legacy Stages (pre-phase-b) use term=0 — a
+        // peer that later runs a legitimate election to term>=1 will replace them
+        // silently when it announces.
         public long Term { get; private set; }
 
         public DirectorAnnounce(PerformerId senderId, PerformerId directorId, long maxEntryId, long term) : base(senderId)

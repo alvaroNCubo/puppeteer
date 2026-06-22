@@ -3,34 +3,34 @@ using System.IO;
 
 namespace Choreography.StageManager
 {
-    // Casting election protocol fase (b) — Persistencia de currentTerm + votedFor.
+    // Casting election protocol phase (b) — Persistence of currentTerm + votedFor.
     //
-    // Por que en un archivo dedicado y no en el journal del actor:
-    //   - El term y el voto son state OPERACIONAL del Stage (eleccion, membership),
-    //     no business-data del actor. Mezclarlos en el journal acoplaria semanticamente
-    //     dos planos que el resto del sistema ya mantiene separados (mismo argumento
-    //     que motivo separar PlaybillStore del journal en Paper 5).
-    //   - Son 25 bytes, write infrequente (solo en bump de term o cambio de voto —
-    //     ordenes de magnitud menos frecuente que journal appends). Un archivo
-    //     dedicado es mas barato y mas simple que pagar el costo de un nuevo
-    //     record type en el journal.
+    // Why in a dedicated file and not in the actor journal:
+    //   - The term and the vote are OPERATIONAL state of the Stage (election, membership),
+    //     not business-data of the actor. Mixing them into the journal would semantically
+    //     couple two planes that the rest of the system already keeps separate (same argument
+    //     that motivated separating PlaybillStore from the journal in Paper 5).
+    //   - They are 25 bytes, written infrequently (only on term bump or vote change —
+    //     orders of magnitude less frequent than journal appends). A dedicated file
+    //     is cheaper and simpler than paying the cost of a new
+    //     record type in the journal.
     //
-    // Atomicidad: write-temp + rename atomico. En NTFS (Windows) y ext4 (Linux) el
-    // rename es atomico a nivel filesystem; la unica brecha es fsync del directorio
-    // ante power-loss, brecha que tampoco cubre el FileSystem Journal hoy. Si en el
-    // futuro el journal layer upgrada a fsync robusto, TermStore replica el mismo
-    // patron sin cambiar el on-wire del protocolo de eleccion.
+    // Atomicity: write-temp + atomic rename. On NTFS (Windows) and ext4 (Linux) the
+    // rename is atomic at the filesystem level; the only gap is directory fsync
+    // on power-loss, a gap that the FileSystem Journal does not cover today either. If in the
+    // future the journal layer upgrades to robust fsync, TermStore replicates the same
+    // pattern without changing the on-wire of the election protocol.
     //
-    // Layout disco (25 bytes, little-endian):
+    // Disk layout (25 bytes, little-endian):
     //   [00..07] currentTerm: int64
-    //   [08..08] hasVotedFor: byte (0 o 1)
-    //   [09..24] votedForBytes: 16 bytes (PerformerId, ceros si !hasVotedFor)
+    //   [08..08] hasVotedFor: byte (0 or 1)
+    //   [09..24] votedForBytes: 16 bytes (PerformerId, zeros if !hasVotedFor)
     //
-    // Sin version header: si cambia el formato, bumpear el path (term.bin → term-v2.bin).
+    // No version header: if the format changes, bump the path (term.bin → term-v2.bin).
     //
-    // Thread-safety: todas las operaciones bajo lock. El Stage llama a este store
-    // desde varios listeners/coroutines (ListenCoordination, watchdog timeout
-    // disparando StartElection, HandleDirectorAnnounce adoptando term superior).
+    // Thread-safety: all operations under lock. The Stage calls this store
+    // from several listeners/coroutines (ListenCoordination, watchdog timeout
+    // triggering StartElection, HandleDirectorAnnounce adopting a higher term).
     internal sealed class TermStore
     {
         private const int FileSize = 25;
@@ -58,10 +58,10 @@ namespace Choreography.StageManager
             get { lock (writeLock) return votedFor; }
         }
 
-        // Avanza al nuevo term y resetea votedFor (Raft estandar: cada term es un
-        // ciclo de votacion fresco). Rechaza newTerm <= currentTerm para preservar
-        // la monotonicidad — un term que retrocede romperia las garantias de
-        // safety del protocolo.
+        // Advances to the new term and resets votedFor (standard Raft: each term is a
+        // fresh voting cycle). Rejects newTerm <= currentTerm to preserve
+        // monotonicity — a term that goes backwards would break the
+        // safety guarantees of the protocol.
         public void BumpTerm(long newTerm)
         {
             lock (writeLock)
@@ -75,11 +75,11 @@ namespace Choreography.StageManager
             }
         }
 
-        // Adopta un term observado en mensajeria de un peer (CastingPropose,
-        // CastingReject o DirectorAnnounce con term mayor). Idempotente si
-        // observedTerm == currentTerm (no-op, votedFor preservado); avanza
-        // y resetea votedFor si observedTerm > currentTerm; rechaza si menor
-        // (ese caller venia con term stale, ignorarlo).
+        // Adopts a term observed in messaging from a peer (CastingPropose,
+        // CastingReject or DirectorAnnounce with a higher term). Idempotent if
+        // observedTerm == currentTerm (no-op, votedFor preserved); advances
+        // and resets votedFor if observedTerm > currentTerm; rejects if lower
+        // (that caller came with a stale term, ignore it).
         public void AdoptTermIfHigher(long observedTerm)
         {
             lock (writeLock)
@@ -91,9 +91,9 @@ namespace Choreography.StageManager
             }
         }
 
-        // Registra un voto para el current term. Rechaza si ya hay un voto
-        // en este term (one-vote-per-term: invariante critica de Raft safety).
-        // Para votar en un nuevo term, primero invocar BumpTerm o AdoptTermIfHigher.
+        // Records a vote for the current term. Rejects if there is already a vote
+        // in this term (one-vote-per-term: critical Raft safety invariant).
+        // To vote in a new term, first invoke BumpTerm or AdoptTermIfHigher.
         public void RecordVote(PerformerId candidateId)
         {
             lock (writeLock)

@@ -21,7 +21,7 @@ namespace Choreography.Formatters
 	/// <list type="bullet">
 	/// <item>Root: <c>&lt;root&gt;...&lt;/root&gt;</c>. No XML declaration
 	/// (caller can prepend <c>&lt;?xml ...?&gt;</c> if needed).</item>
-	/// <item>Field (escalar): <c>&lt;key&gt;value&lt;/key&gt;</c>.</item>
+	/// <item>Field (scalar): <c>&lt;key&gt;value&lt;/key&gt;</c>.</item>
 	/// <item>Null: empty element <c>&lt;key/&gt;</c>.</item>
 	/// <item>Inline arrays of primitives: repeated elements with the field
 	/// name as tag. <c>&lt;nums&gt;1&lt;/nums&gt;&lt;nums&gt;2&lt;/nums&gt;</c>.</item>
@@ -258,7 +258,7 @@ namespace Choreography.Formatters
 			for (int i = 0; i < level; i++) sink.Append("  ");
 		}
 
-		// ── Field (escalar) ────────────────────────────────────────────────
+		// ── Field (scalar) ────────────────────────────────────────────────
 
 		public void Field(ReadOnlySpan<char> name, bool value)
 		{

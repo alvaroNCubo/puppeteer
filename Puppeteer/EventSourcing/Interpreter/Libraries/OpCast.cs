@@ -173,7 +173,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (nonNullableSource == typeof(bool) || nonNullableTarget == typeof(bool))
 				return nonNullableSource == nonNullableTarget;
 
-			// Enum: permite string<->enum (parse por nombre / ToString) y enum<->enum identico.
+			// Enum: allows string<->enum (parse by name / ToString) and identical enum<->enum.
 			if (nonNullableTarget.IsEnum)
 				return nonNullableSource == typeof(string) || nonNullableSource == nonNullableTarget;
 

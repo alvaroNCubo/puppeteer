@@ -7,20 +7,20 @@ using System.Text;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Backend FileSystem del Playbill. Vive en path/ActorName/playbill/ —
-	// hermano del directorio journal/ del Diary. Tres archivos:
+	// FileSystem backend of the Playbill. Lives in path/ActorName/playbill/ —
+	// sibling of the Diary's journal/ directory. Three files:
 	//
-	//   playbill/schemas.bin  — registro append-only de schemas (header + entries)
-	//   playbill/records.bin  — registro append-only de records (header + entries)
-	//   playbill/index.bin    — indice EntryId -> offset (mapa denso por simplicidad)
+	//   playbill/schemas.bin  — append-only log of schemas (header + entries)
+	//   playbill/records.bin  — append-only log of records (header + entries)
+	//   playbill/index.bin    — EntryId -> offset index (dense map for simplicity)
 	//
-	// Formato propio (NO reusa BinaryEventCodec del journal): mas simple, sin
-	// compression/encryption — el playbill es evidencia operacional, no carga
-	// transaccional, no necesita las mismas optimizaciones.
+	// Own format (does NOT reuse the journal's BinaryEventCodec): simpler, without
+	// compression/encryption — the playbill is operational evidence, not transactional
+	// load, so it does not need the same optimizations.
 	//
-	// Distill: lee los EntryIds vivos directamente desde los archivos del journal
-	// (path/ActorName/journal/journal_NNNNNN.bin), shadow-swap atomico de records.bin
-	// y rebuild del indice.
+	// Distill: reads the live EntryIds directly from the actor's journal files
+	// (path/ActorName/journal/journal_NNNNNN.bin), atomic shadow-swap of records.bin
+	// and rebuild of the index.
 	internal sealed class PlaybillStoreFileSystem : PlaybillStore
 	{
 		private static readonly byte[] SCHEMAS_MAGIC = new byte[] { (byte)'P', (byte)'B', (byte)'S', (byte)'C' };
@@ -89,10 +89,10 @@ namespace Puppeteer.EventSourcing.Playbill
 					AppendSchemaEntry(schemaName, declarations, DateTime.UtcNow);
 				}
 			}
-			// Invocar OUTSIDE el lock para evitar deadlock si el subscriber
-			// (ej. Stage) hace callback al store en el mismo thread. Se invoca
-			// tanto en re-registro idempotente como en registro nuevo — el
-			// receptor del cue tambien es idempotent.
+			// Invoke OUTSIDE the lock to avoid deadlock if the subscriber
+			// (e.g. Stage) calls back into the store on the same thread. It fires
+			// both on an idempotent re-register and on a new register — the
+			// cue receiver is also idempotent.
 			OnSchemaRegistered?.Invoke(schemaName, declarations);
 		}
 
@@ -233,8 +233,8 @@ namespace Puppeteer.EventSourcing.Playbill
 				long appendedOffset = AppendRecordEntry(entryId, schemaName, serializedParameters);
 				AppendIndexEntry(entryId, appendedOffset);
 			}
-			// Invocar OUTSIDE el lock para evitar deadlock si el subscriber
-			// (ej. Stage) hace callback al store en el mismo thread.
+			// Invoke OUTSIDE the lock to avoid deadlock if the subscriber
+			// (e.g. Stage) calls back into the store on the same thread.
 			OnRecordWritten?.Invoke(entryId, schemaName, serializedParameters);
 		}
 
@@ -478,11 +478,11 @@ namespace Puppeteer.EventSourcing.Playbill
 
 		// === Distill ===
 		//
-		// Lee los EntryIds vivos directamente desde los archivos del journal del
-		// actor — escanea cada journal_NNNNNN.bin saltando el header de 32 bytes
-		// y extrayendo el EntryId de cada record (4-byte length prefix + 1-byte
-		// typeByte + 8-byte EntryId). No deserializa payloads — solo headers.
-		// Luego reescribe records.bin omitiendo huerfanos y reconstruye index.bin.
+		// Reads the live EntryIds directly from the actor's journal files —
+		// scans each journal_NNNNNN.bin skipping the 32-byte header
+		// and extracting the EntryId of each record (4-byte length prefix + 1-byte
+		// typeByte + 8-byte EntryId). Does not deserialize payloads — only headers.
+		// Then rewrites records.bin omitting orphans and rebuilds index.bin.
 		internal override void Distill()
 		{
 			lock (gate)
@@ -492,7 +492,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				string newRecordsFile = recordsFile + ".new";
 				string newIndexFile = indexFile + ".new";
 
-				// Limpieza defensiva de archivos sombra de un Distill abortado.
+				// Defensive cleanup of shadow files from an aborted Distill.
 				if (File.Exists(newRecordsFile)) File.Delete(newRecordsFile);
 				if (File.Exists(newIndexFile)) File.Delete(newIndexFile);
 
@@ -519,8 +519,8 @@ namespace Puppeteer.EventSourcing.Playbill
 					idxOut.Flush(flushToDisk: true);
 				}
 
-				// Reemplazo atomico — el rename de Windows requiere que el destino
-				// no exista. File.Replace garantiza atomicidad cuando ambos existen.
+				// Atomic replacement — the Windows rename requires the destination
+				// not to exist. File.Replace guarantees atomicity when both exist.
 				File.Replace(newRecordsFile, recordsFile, destinationBackupFileName: null);
 				File.Replace(newIndexFile, indexFile, destinationBackupFileName: null);
 			}
@@ -550,13 +550,13 @@ namespace Puppeteer.EventSourcing.Playbill
 			return buffer;
 		}
 
-		// Escanea los archivos del journal del actor y extrae el set de EntryIds
-		// vivos. Cada archivo tiene un header de 32 bytes (JournalWriter.HEADER_SIZE)
-		// seguido de records con layout:
-		//   [4 bytes length-after-prefix (incluye CRC)]
+		// Scans the actor's journal files and extracts the set of live EntryIds.
+		// Each file has a 32-byte header (JournalWriter.HEADER_SIZE)
+		// followed by records with layout:
+		//   [4 bytes length-after-prefix (includes CRC)]
 		//   [1 byte typeByte][8 bytes EntryId][...payload...][4 bytes CRC]
-		// Solo se leen los primeros 13 bytes de cada record (4 prefix + 1 type +
-		// 8 entryId) para construir el set — no se decodifica el payload.
+		// Only the first 13 bytes of each record are read (4 prefix + 1 type +
+		// 8 entryId) to build the set — the payload is not decoded.
 		private HashSet<long> LoadAliveJournalEntries()
 		{
 			var alive = new HashSet<long>();
@@ -595,7 +595,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						long entryId = BitConverter.ToInt64(head, 1);
 						alive.Add(entryId);
 
-						// Avanzar al siguiente record: saltar el resto del body + CRC.
+						// Advance to the next record: skip the rest of the body + CRC.
 						long nextRecord = recordStart + 4 + recordLen;
 						fs.Seek(nextRecord, SeekOrigin.Begin);
 					}

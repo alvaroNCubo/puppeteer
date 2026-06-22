@@ -10,23 +10,23 @@ using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Adapter Stream que envuelve BC.Tls TlsClientProtocol en non-blocking mode para
-    // resolver el deadlock concurrent read+write (Bug A) que tiene la API blocking
-    // de TlsStream.
+    // Adapter Stream that wraps BC.Tls TlsClientProtocol in non-blocking mode to
+    // resolve the concurrent read+write deadlock (Bug A) of the blocking TlsStream
+    // API.
     //
-    // Arquitectura:
-    //   - 1 background reader task: lee bytes encrypted del TCP socket -> OfferInput.
-    //     Extrae plaintext de la internal queue de TLS via ReadInput y lo mete a un
+    // Architecture:
+    //   - 1 background reader task: reads encrypted bytes from the TCP socket -> OfferInput.
+    //     Extracts plaintext from the internal TLS queue via ReadInput and feeds it into a
     //     System.IO.Pipelines.Pipe.
-    //   - WriteAsync (publico): toma _tlsLock, llama WriteApplicationData (encripta),
-    //     drena output al socket bajo _socketWriteLock. Suelta _tlsLock.
-    //   - ReadAsync (publico): lee del Pipe (no toca TlsProtocol). El reader task lo
-    //     llena en background.
-    //   - Drain de output ocurre tanto despues de WriteApplicationData (en el writer)
-    //     como despues de OfferInput (en el reader, por si genero alerts/handshake).
+    //   - WriteAsync (public): takes _tlsLock, calls WriteApplicationData (encrypts),
+    //     drains output to the socket under _socketWriteLock. Releases _tlsLock.
+    //   - ReadAsync (public): reads from the Pipe (does not touch TlsProtocol). The reader task
+    //     fills it in the background.
+    //   - Output draining happens both after WriteApplicationData (in the writer)
+    //     and after OfferInput (in the reader, in case it produced alerts/handshake).
     //
-    // Single _tlsLock serializa mutaciones del TlsProtocol; permite read+write de la
-    // app concurrentes porque la app-read solo toca el Pipe (no TLS).
+    // A single _tlsLock serializes TlsProtocol mutations; it allows concurrent app
+    // read+write because the app-read only touches the Pipe (not TLS).
     internal sealed class TlsAdapterStream : Stream
     {
         private const int IoBufferSize = 16384;
@@ -46,8 +46,8 @@ namespace Choreography.Transport.SimpleX
             _tlsProtocol = new TlsClientProtocol(); // non-blocking mode
         }
 
-        // Drive el handshake TLS hasta que el flag NotifyHandshakeComplete sea true
-        // (capturado en ISmpTlsClient.HandshakeComplete). Despues arranca el reader task.
+        // Drive the TLS handshake until the NotifyHandshakeComplete flag is true
+        // (captured in ISmpTlsClient.HandshakeComplete). Then start the reader task.
         public async Task PerformHandshakeAsync(ISmpTlsClient tlsClient, CancellationToken ct)
         {
             if (tlsClient == null) throw new ArgumentNullException(nameof(tlsClient));
@@ -128,9 +128,9 @@ namespace Choreography.Transport.SimpleX
             }
         }
 
-        // Llamada con _tlsLock tomado o durante el handshake (single-threaded). Drena todo
-        // el output pending del TlsProtocol al socket. Toma _socketWriteLock por si alguna
-        // futura task externa escribe al socket directamente (no aplica hoy, defensivo).
+        // Called with _tlsLock held or during the handshake (single-threaded). Drains all
+        // pending TlsProtocol output to the socket. Takes _socketWriteLock in case some
+        // future external task writes to the socket directly (not the case today, defensive).
         private async Task DrainTlsOutputAsync(CancellationToken ct)
         {
             int avail;
@@ -231,8 +231,8 @@ namespace Choreography.Transport.SimpleX
         }
     }
 
-    // Marker interface para que TlsAdapterStream consulte el flag de handshake completo
-    // capturado por NotifyHandshakeComplete callback.
+    // Marker interface so TlsAdapterStream can query the handshake-complete flag
+    // captured by the NotifyHandshakeComplete callback.
     internal interface ISmpTlsClient
     {
         bool HandshakeComplete { get; }

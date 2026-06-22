@@ -3,12 +3,12 @@ using System.Collections.Generic;
 
 namespace Puppeteer
 {
-	// Shadow Replay — S4. Resultado del elision-impact diff: comparacion de las salidas
-	// observables (queries) entre rehidratar el journal SIN elision vs CON la elision
-	// candidata. IsSafe == true significa que elidir el set candidato NO cambia ninguna
-	// observacion provista. Caveat honesto: seguro respecto a los observadores ACTUALES
-	// que se pasan, NO frente a observadores futuros ni externos — ese "alguien lo
-	// necesitara alguna vez" sigue siendo juicio de dominio.
+	// Shadow Replay — S4. Result of the elision-impact diff: comparison of the
+	// observable outputs (queries) between rehydrating the journal WITHOUT elision vs WITH the
+	// candidate elision. IsSafe == true means that eliding the candidate set does NOT change any
+	// provided observation. Honest caveat: safe with respect to the CURRENT observers
+	// that are passed in, NOT against future or external observers — that "someone will
+	// need it someday" remains a domain judgment.
 	public sealed class ElisionImpactResult
 	{
 		public bool IsSafe => Differences.Count == 0;
@@ -21,8 +21,8 @@ namespace Puppeteer
 		}
 	}
 
-	// Una observacion (query) cuya salida difiere entre el replay sin-elision y el replay
-	// con-elision: evidencia de que algo observable dependia de los eventos elididos.
+	// An observation (query) whose output differs between the without-elision replay and the
+	// with-elision replay: evidence that something observable depended on the elided events.
 	public sealed class ElisionObservationDiff
 	{
 		public string Observation { get; }

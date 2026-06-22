@@ -12,6 +12,8 @@
     <GenerateDocumentationFile>False</GenerateDocumentationFile>
     <VersionPrefix>0.1.0</VersionPrefix>
     <AssemblyVersion>0.1.0</AssemblyVersion>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\UnitTestPuppeteer\UnitTestPuppeteerKey.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,13 +34,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="UnitTestChoreography" />
-    <InternalsVisibleTo Include="Choreography.Observability.ElasticApm" />
+    <InternalsVisibleTo Include="UnitTestChoreography" Key="0024000004800000940000000602000000240000525341310004000001000100c9efb1ed5758ad7c1aa44617eb81a8325fd88f8a25c95e553a1b7d25aadaddb545e31e3a878a13c2e6972c507eac7b0cf9e710251d8721d301e5dba6548e05107d352d2c65f4069529435b37e6ae81befe0b309c9ed5222b2fe2ac1e21859bdcc841f16729f30a3d8561b80aa62a724199e54e7a4041f748bf26803e667613da" />
+    <InternalsVisibleTo Include="Choreography.Observability.ElasticApm" Key="0024000004800000940000000602000000240000525341310004000001000100c9efb1ed5758ad7c1aa44617eb81a8325fd88f8a25c95e553a1b7d25aadaddb545e31e3a878a13c2e6972c507eac7b0cf9e710251d8721d301e5dba6548e05107d352d2c65f4069529435b37e6ae81befe0b309c9ed5222b2fe2ac1e21859bdcc841f16729f30a3d8561b80aa62a724199e54e7a4041f748bf26803e667613da" />
     <!-- Paper 7 Phase 1 existence-proof harness needs the same access to
          InMemoryTransport (sealed internal, exposes the ClearRegistry test
          helper) that UnitTestChoreography uses. The harness lives outside
          Puppeteer.sln by design — see UnitTestPaper7EShop/UnitTestPaper7EShop.csproj. -->
-    <InternalsVisibleTo Include="UnitTestPaper7EShop" />
+    <InternalsVisibleTo Include="UnitTestPaper7EShop" Key="0024000004800000940000000602000000240000525341310004000001000100c9efb1ed5758ad7c1aa44617eb81a8325fd88f8a25c95e553a1b7d25aadaddb545e31e3a878a13c2e6972c507eac7b0cf9e710251d8721d301e5dba6548e05107d352d2c65f4069529435b37e6ae81befe0b309c9ed5222b2fe2ac1e21859bdcc841f16729f30a3d8561b80aa62a724199e54e7a4041f748bf26803e667613da" />
   </ItemGroup>
 
 </Project>

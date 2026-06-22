@@ -4,20 +4,20 @@ using System.Threading.Tasks;
 
 namespace Puppeteer.EventSourcing.DB
 {
-	// Paper 5 / claim 4 (firmado 2026-05-12 PM). El verbo DSL
-	// .Metadata.Materialize(destination) escribe filas
-	// (DiaryId, ReactionId, Destination, Timestamp) en este storage. El runtime
-	// no entrega — la operacion vive fuera (delivery worker external que
-	// escucha OnRecordWritten o que consulta esta tabla para recuperar tras un
-	// reinicio). Por-actor-por-construccion: cross-ref
-	// project_actor_per_db_principle.md — no requiere particion porque cada
-	// actor vive en su propia DB.
+	// Paper 5 / claim 4 (signed 2026-05-12 PM). The DSL verb
+	// .Metadata.Materialize(destination) writes rows
+	// (DiaryId, ReactionId, Destination, Timestamp) into this storage. The runtime
+	// does not deliver — the operation lives outside (an external delivery worker
+	// that listens to OnRecordWritten or queries this table to recover after a
+	// restart). Per-actor-by-construction: cross-ref
+	// project_actor_per_db_principle.md — no partition required because each
+	// actor lives in its own DB.
 	//
-	// Diferencia ontologica vs EventElisionStorage: este storage acumula
-	// markers asimetricos (el actor primary los produce; un consumidor
-	// external los consume). EventElision es simetrico al mismo actor que
-	// produce el marker. Por eso la API es mas chica: write + read-by-destination
-	// + check; sin range queries (Distill las usa, aqui no aplica).
+	// Ontological difference vs EventElisionStorage: this storage accumulates
+	// asymmetric markers (the primary actor produces them; an external consumer
+	// consumes them). EventElision is symmetric to the same actor that
+	// produces the marker. That is why the API is smaller: write + read-by-destination
+	// + check; no range queries (Distill uses those, not applicable here).
 	internal abstract class EventMaterializationStorage
 	{
 		protected readonly string ConnectionString;

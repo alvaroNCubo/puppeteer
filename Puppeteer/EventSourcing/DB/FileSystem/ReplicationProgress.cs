@@ -27,9 +27,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
-			// Mismo contrato: file-missing es valido (replicacion nueva), pero
-			// corrupcion debe lanzar. Si silenciaramos, el agent reescribiria
-			// progreso a 0 y re-enviaria records ya replicados al storage remoto.
+			// Same contract: a missing file is valid (new replication), but
+			// corruption must throw. If we silenced it, the agent would rewrite
+			// progress to 0 and re-send already-replicated records to the remote storage.
 			if (!File.Exists(filePath))
 				return false;
 

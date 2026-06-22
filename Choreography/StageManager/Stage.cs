@@ -20,12 +20,12 @@ namespace Choreography.StageManager
         Connected
     }
 
-    // Bug 15 — Casting election channel rewire (Opcion B firmada 2026-05-28):
-    // un host externo necesita observar la rotacion de rol para re-establecer
-    // Replication/Command channels. Stage no maneja el handshake automaticamente
-    // — solo expone OnRoleChanged y el host decide que hacer. Enum publico para
-    // que el subscriber pueda discriminar Leader/Candidate/Follower sin reflectar
-    // el state machine interno.
+    // Bug 15 — Casting election channel rewire (Option B):
+    // an external host needs to observe the role rotation to re-establish
+    // Replication/Command channels. Stage does not handle the handshake
+    // automatically — it only exposes OnRoleChanged and the host decides what to
+    // do. Public enum so the subscriber can discriminate Leader/Candidate/Follower
+    // without reflecting the internal state machine.
     public enum StageRole
     {
         Follower,
@@ -52,79 +52,80 @@ namespace Choreography.StageManager
         protected readonly ConcurrentDictionary<Guid, TaskCompletionSource<CommandResult>> pendingCommands = new();
         private readonly ConcurrentDictionary<long, BufferedEntry> entryBuffer = new();
 
-        // Casting election protocol fase (a) — Heartbeat loop.
-        // lastSeenDirector: timestamp del ultimo Heartbeat (o DirectorAnnounce) recibido
-        // del Director actual. Lo lee el DirectorWatchdog para decidir si el Director
-        // dejo de emitir y hay que limpiar directorId. Solo se popula para el peer que
-        // este Stage considera Director — heartbeats de otros peers se ignoran.
+        // Casting election protocol phase (a) — Heartbeat loop.
+        // lastSeenDirector: timestamp of the last Heartbeat (or DirectorAnnounce)
+        // received from the current Director. The DirectorWatchdog reads it to decide
+        // whether the Director stopped emitting and directorId must be cleared. Only
+        // populated for the peer this Stage considers Director — heartbeats from other
+        // peers are ignored.
         private readonly ConcurrentDictionary<PerformerId, DateTime> lastSeenDirector = new();
-        // heartbeatSenderCts: lifecycle por sesion-de-Director (creado en PromoteToDirector,
-        // cancelado en StepDownAsync y en la rama loser de HandleDirectorAnnounce). NO va
-        // en backgroundTasks porque su vida no coincide con la del Stage.
+        // heartbeatSenderCts: lifecycle per Director-session (created in PromoteToDirector,
+        // cancelled in StepDownAsync and in the loser branch of HandleDirectorAnnounce). NOT
+        // added to backgroundTasks because its lifetime does not match the Stage's.
         private CancellationTokenSource heartbeatSenderCts;
-        // Bug 16 — Diagnostics del HeartbeatSenderLoop. heartbeatsEmitted cuenta cada
-        // Heartbeat dispatched (no por-peer; cuenta el tick exitoso post-IsDirector).
-        // heartbeatSenderRunning refleja si el loop esta vivo (true entre StartHeartbeatSender
-        // y exit del loop). Ambos son volatile para que tests/host lo lean sin lock.
-        // Sirven para reduccion del reporte device 2026-05-27 PM3: heartbeats observados
-        // 20s post-CatchUp y luego silencio 16s. Sin contadores no se distingue
-        // "sender muerto" de "sender vivo pero send falla silenciosamente".
+        // Bug 16 — Diagnostics for the HeartbeatSenderLoop. heartbeatsEmitted counts each
+        // Heartbeat dispatched (not per-peer; counts the successful tick after IsDirector).
+        // heartbeatSenderRunning reflects whether the loop is alive (true between
+        // StartHeartbeatSender and the loop exit). Both are volatile so tests/host can read
+        // them without a lock. They serve to diagnose the symptom where heartbeats are
+        // observed shortly after CatchUp and then fall silent: without counters there is no
+        // way to distinguish "sender dead" from "sender alive but send fails silently".
         private long heartbeatsEmittedCount;
         private volatile bool heartbeatSenderRunning;
 
-        // Bug 17 — Diagnostics del path de replicacion ListenReplication. Cuenta
-        // cuantos CueEvent fueron silently-dropped por colision de EntryId (caso
-        // cue.EntryId <= localMax: el Cast ya tenia una entry en esa posicion,
-        // probablemente porque escribio localmente antes del join). El reporte
-        // device 2026-05-27 PM5 atribuye este sintoma a "asimetria catch-up vs
-        // rehydration" pero el codigo lo muestra mas crudo: el Director envia
-        // entry N y el Cast la descarta porque ya hay algo distinto en N.
-        // the host Performance setea livesyncNotifier locally pre-join, lo que genera la
-        // colision en EntryId=1 con el seed del Director.
+        // Bug 17 — Diagnostics for the ListenReplication replication path. Counts how
+        // many CueEvent were silently dropped due to an EntryId collision (case
+        // cue.EntryId <= localMax: the Cast already had an entry at that position,
+        // probably because it wrote locally before joining). The symptom can be
+        // attributed to "catch-up vs rehydration asymmetry", but the code shows it more
+        // bluntly: the Director sends entry N and the Cast discards it because there is
+        // already something different at N. When the host writes locally before the
+        // join, it occupies a low EntryId, which produces the collision with the
+        // Director's seed.
         private long replicationDroppedOlderCount;
-        // directorWatchdogCts: lifecycle por sesion-de-Stage (creado en StartAsync,
-        // cancelado en StopAsync via backgroundTasks).
+        // directorWatchdogCts: lifecycle per Stage-session (created in StartAsync,
+        // cancelled in StopAsync via backgroundTasks).
         private CancellationTokenSource directorWatchdogCts;
 
-        // Casting election protocol fase (b) — state machine + persistencia.
-        // Role: Follower (default) / Candidate (election en curso, vote-for-self
-        // emitido, esperando accepts) / Leader (this Stage is Director con quorum).
-        // El campo legacy directorId sigue siendo source-of-truth para
-        // "quien es el Director del cluster" desde el punto de vista de este peer;
-        // role agrega la dimension "que estoy haciendo yo dentro del protocolo".
-        // El state machine interno reusa el enum publico StageRole — antes era
-        // un nested private Role, pero la firma del evento OnRoleChanged necesita
-        // un tipo publico y mantener dos enums paralelos era ruido. Las semanticas
-        // (Follower default, Candidate durante eleccion, Leader con quorum) son
-        // las mismas.
+        // Casting election protocol phase (b) — state machine + persistence.
+        // Role: Follower (default) / Candidate (election in progress, vote-for-self
+        // emitted, awaiting accepts) / Leader (this Stage is Director with quorum).
+        // The legacy directorId field is still the source-of-truth for
+        // "who is the Director of the cluster" from this peer's point of view;
+        // role adds the dimension "what am I doing inside the protocol".
+        // The internal state machine reuses the public StageRole enum — it used to be
+        // a nested private Role, but the OnRoleChanged event signature needs a public
+        // type and keeping two parallel enums was noise. The semantics
+        // (Follower default, Candidate during election, Leader with quorum) are
+        // the same.
         private StageRole role = StageRole.Follower;
-        // TermStore se construye en StartAsync (necesita StageStateDirectory creado).
+        // TermStore is built in StartAsync (it needs StageStateDirectory created).
         private TermStore termStore;
-        // KnownPeersStore (bug 19): membresia persistida de peers de Coordination, para
-        // que el host pueda reabrir Coordination tras un process-death sin importar el
-        // rol previo del nodo. Se construye en StartAsync junto con TermStore.
+        // KnownPeersStore (bug 19): persisted membership of Coordination peers, so
+        // the host can reopen Coordination after a process-death regardless of the
+        // node's previous role. Built in StartAsync along with TermStore.
         private KnownPeersStore knownPeersStore;
-        // Election state. currentElectionId distinto de null indica role==Candidate.
-        // votesReceived incluye self-vote desde el momento de StartElection.
-        // neededVotes captura el quorum al inicio del round (no recalcular: si peers
-        // entran/salen mid-eleccion, el round actual sigue con el quorum original).
+        // Election state. currentElectionId different from null indicates role==Candidate.
+        // votesReceived includes the self-vote from the moment of StartElection.
+        // neededVotes captures the quorum at the start of the round (do not recalculate: if
+        // peers join/leave mid-election, the current round continues with the original quorum).
         private Guid? currentElectionId;
         private HashSet<PerformerId> votesReceived;
         private int neededVotes;
-        // Protege role, currentElectionId, votesReceived, directorId del state
-        // machine. ListenCoordination corre en un task por peer — sin el lock,
-        // un CastingAccept y un DirectorAnnounce concurrentes podrian dejar el
-        // state inconsistente. termStore tiene su propio lock interno; no se
-        // anida (las llamadas a termStore desde dentro de electionLock son ok).
+        // Protects role, currentElectionId, votesReceived, directorId of the state
+        // machine. ListenCoordination runs in one task per peer — without the lock,
+        // a concurrent CastingAccept and DirectorAnnounce could leave the
+        // state inconsistent. termStore has its own internal lock; it is not
+        // nested (calls to termStore from inside electionLock are ok).
         private readonly object electionLock = new object();
-        // Casting election protocol fase (d) — Randomized backoff.
-        // electionRoundCts: lifecycle por round-de-eleccion. Se crea en cada
-        // StartElection (despues del broadcast) para gatillar el ElectionRoundTimerLoop.
-        // Se cancela cuando el round termina (BecomeDirector, term-adopt en cualquiera
-        // de los handlers, StepDown, shutdown).
+        // Casting election protocol phase (d) — Randomized backoff.
+        // electionRoundCts: lifecycle per election-round. Created in each
+        // StartElection (after the broadcast) to trigger the ElectionRoundTimerLoop.
+        // Cancelled when the round ends (BecomeDirector, term-adopt in any of the
+        // handlers, StepDown, shutdown).
         private CancellationTokenSource electionRoundCts;
-        // Contador observable de cuantas veces el round timer disparo abort+backoff+retry.
-        // Util para tests que validan que el camino de backoff fue ejercitado.
+        // Observable counter of how many times the round timer fired abort+backoff+retry.
+        // Useful for tests that validate that the backoff path was exercised.
         private int electionRoundTimeoutCount;
 
         private PerformerId? directorId;
@@ -145,70 +146,70 @@ namespace Choreography.StageManager
 
         public event Action<PerformerId> OnDirectorChanged;
 
-        // Bug 12 — Casting election (split-brain recovery): cuando este Stage,
-        // siendo Director, recibe un DirectorAnnounce de otro peer que tambien
-        // se declara Director (situacion tipica tras un force-promote durante
-        // particion), un tiebreaker determinista por (MaxEntryId desc, PerformerId
-        // asc) decide el ganador. Si este Stage pierde, demote silenciosamente
-        // y dispara este evento con el detalle de la divergencia para que la
-        // aplicacion pueda reconciliar journals (SendCatchUpAsync, alerta a
-        // operacion, descartar data dir, etc.). Si HasDivergentTail==true el
-        // loser tiene entries propias que el winner nunca vio — esas se
-        // perderian en una rehidratacion-desde-winner (no hay primitiva de
-        // truncate en el journal layer); la decision queda en la aplicacion.
+        // Bug 12 — Casting election (split-brain recovery): when this Stage,
+        // while Director, receives a DirectorAnnounce from another peer that also
+        // declares itself Director (typical situation after a force-promote during
+        // a partition), a deterministic tiebreaker by (MaxEntryId desc, PerformerId
+        // asc) decides the winner. If this Stage loses, it demotes silently
+        // and fires this event with the divergence detail so the
+        // application can reconcile journals (SendCatchUpAsync, operator alert,
+        // discard data dir, etc.). If HasDivergentTail==true the
+        // loser has its own entries the winner never saw — those would be
+        // lost in a rehydration-from-winner (there is no truncate primitive
+        // in the journal layer); the decision is left to the application.
         public event Action<SplitBrainDetected> OnDirectorElectionLost;
 
-        // Casting election protocol fase (a) — Director-down detection.
-        // El DirectorWatchdog dispara este evento cuando no se reciben heartbeats del
-        // Director actual dentro de DirectorTimeout. Despues de invocarlo, directorId
-        // queda en null y EnsureCanWrite bloquea escrituras hasta que algo reasigne
-        // Director (operador via PromoteToDirector, o etapa b: eleccion automatica).
-        // El argumento es el Id del Director que se perdio.
+        // Casting election protocol phase (a) — Director-down detection.
+        // The DirectorWatchdog fires this event when no heartbeats are received from the
+        // current Director within DirectorTimeout. After it is invoked, directorId
+        // is left at null and EnsureCanWrite blocks writes until something reassigns
+        // Director (operator via PromoteToDirector, or phase b: automatic election).
+        // The argument is the Id of the Director that was lost.
         public event Action<PerformerId> OnDirectorLost;
 
-        // Bug 15 — Casting election channel rewire (Opcion B). Se dispara cada vez
-        // que el state machine de Casting election cambia de rol (Follower ↔
-        // Candidate ↔ Leader), DESPUES de actualizar role/directorId/heartbeat
-        // sender, FUERA del electionLock. El subscriber recibe (newRole, directorId)
-        // y puede reaccionar — tipicamente para abrir/cerrar Replication/Command
-        // channels hacia los peers que estan en el bus de Coordination.
+        // Bug 15 — Casting election channel rewire (Option B). Fired every time
+        // the Casting election state machine changes role (Follower ↔
+        // Candidate ↔ Leader), AFTER updating role/directorId/heartbeat
+        // sender, OUTSIDE the electionLock. The subscriber receives (newRole, directorId)
+        // and can react — typically to open/close Replication/Command
+        // channels toward the peers on the Coordination bus.
         //
-        // - Leader: el host deberia iterar coordinationPeers y AcceptCastConnection
-        //   contra cada uno (la otra punta debe estar lista para recibir el
+        // - Leader: the host should iterate coordinationPeers and AcceptCastConnection
+        //   against each one (the other end must be ready to receive the
         //   handshake).
-        // - Follower con directorId!=null: el host deberia hacer
-        //   ConnectToDirector contra ese directorId.
-        // - Follower con directorId==null o Candidate: usualmente no-op
-        //   (transicion intermedia; otro evento llegara cuando la convergencia
-        //   complete).
+        // - Follower with directorId!=null: the host should do
+        //   ConnectToDirector against that directorId.
+        // - Follower with directorId==null or Candidate: usually a no-op
+        //   (intermediate transition; another event will arrive when convergence
+        //   completes).
         //
-        // Solo se dispara cuando newRole != previousRole (cambios de directorId
-        // sin cambio de rol siguen yendo por OnDirectorChanged). El subscriber
-        // corre en el thread que disparo la transicion — puede ser un
-        // task del bus de Coordination (HandleDirectorAnnounce, HandleCastingPropose,
-        // BecomeDirector via HandleCastingAccept) o el thread del watchdog
-        // (StartElection -> selfQuorum -> BecomeDirector). No bloquear el handler:
-        // si el handshake es asincrono lanzarlo con Task.Run.
+        // Fired only when newRole != previousRole (directorId changes
+        // without a role change still go through OnDirectorChanged). The subscriber
+        // runs on the thread that fired the transition — it may be a
+        // Coordination bus task (HandleDirectorAnnounce, HandleCastingPropose,
+        // BecomeDirector via HandleCastingAccept) or the watchdog thread
+        // (StartElection -> selfQuorum -> BecomeDirector). Do not block the handler:
+        // if the handshake is asynchronous, launch it with Task.Run.
         public event Action<StageRole, PerformerId?> OnRoleChanged;
 
         protected abstract Actor CreateActor(string actorName);
 
-        // Hook legacy: corre una sola vez cuando el actor es brand-new (journal vacio
-        // al momento de promoverse a Director). Se mantiene como muleta de backward-compat
-        // para Stages cuyo seed esta acoplado al path de ItsANewOne. Codigo nuevo prefiere
-        // OnHydrated() con un PerformCmd que contenga 'upgrade('init') { ... }'.
+        // Legacy hook: runs once when the actor is brand-new (empty journal
+        // at the moment of promoting to Director). Kept as a backward-compat crutch
+        // for Stages whose seed is coupled to the ItsANewOne path. New code prefers
+        // OnHydrated() with a PerformCmd that contains 'upgrade('init') { ... }'.
         protected virtual void OnFirstHydration() { }
 
-        // Hook nuevo: corre cada vez que este Stage se promueve a Director, ANTES de
-        // marcar IsDirector=true y antes de aceptar PerformCmds (locales o forwarded).
-        // Pensado para invocar hook.PerformCmd con un script que contiene una secuencia
-        // de 'upgrade('X') { ... }' — los ya aplicados se saltan silenciosamente, los
-        // nuevos se journalizan localmente y luego se replican a los Casts via catch-up
-        // tras el DirectorAnnounce.
+        // New hook: runs every time this Stage promotes to Director, BEFORE
+        // marking IsDirector=true and before accepting PerformCmds (local or forwarded).
+        // Intended to invoke hook.PerformCmd with a script that contains a sequence
+        // of 'upgrade('X') { ... }' — the already-applied ones are skipped silently, the
+        // new ones are journaled locally and then replicated to the Casts via catch-up
+        // after the DirectorAnnounce.
         //
-        // En Cast nunca se invoca: los upgrades llegan al Cast por replicacion del
-        // Director, no por hidratacion propia. Si tu subclase necesita reaccionar al
-        // estar sincronizada como Cast, ese es un hook distinto (no implementado aun).
+        // Never invoked on a Cast: upgrades reach the Cast through replication from the
+        // Director, not through its own hydration. If your subclass needs to react when
+        // synchronized as a Cast, that is a different hook (not implemented yet).
         protected virtual void OnHydrated() { }
 
         internal Stage(PerformerId id, string actorName)
@@ -268,16 +269,16 @@ namespace Choreography.StageManager
             throw new ArgumentException("connectionString must contain a 'path' key");
         }
 
-        // Logger seam (fluent, aplica a V1 y V2): el sink es per-actor. Esta
-        // fachada propaga la impl inyectada por el host (Serilog, Microsoft.Extensions
-        // .Logging, NLog, etc.) al Actor que vive bajo este Stage. Sin inyeccion,
-        // Puppeteer usa un ConsoleLogger default (Error -> stderr, Debug -> stdout).
-        // V1/V2 hacen `new` shadow para preservar el tipo concreto en la cadena.
+        // Logger seam (fluent, applies to V1 and V2): the sink is per-actor. This
+        // facade propagates the impl injected by the host (Serilog, Microsoft.Extensions
+        // .Logging, NLog, etc.) to the Actor that lives under this Stage. Without injection,
+        // Puppeteer uses a default ConsoleLogger (Error -> stderr, Debug -> stdout).
+        // V1/V2 use a `new` shadow to preserve the concrete type in the chain.
         //
-        // Ordering: .Logger() DEBE ir antes de ConfigureTransport. El transport
-        // recibe el sink por ctor y queda fijado en ese instante; cambiar logger
-        // despues no propagaria al transport ya construido. El throw temprano
-        // hace el contrato visible en lugar de fallar en silencio.
+        // Ordering: .Logger() MUST come before ConfigureTransport. The transport
+        // receives the sink via ctor and is fixed at that instant; changing the logger
+        // afterwards would not propagate to the already-built transport. The early throw
+        // makes the contract visible instead of failing silently.
         public Stage Logger(IPuppeteerLogger logger)
         {
             if (logger == null) throw new ArgumentNullException(nameof(logger));
@@ -295,10 +296,10 @@ namespace Choreography.StageManager
         {
             if (isRunning) throw new InvalidOperationException("Cannot configure transport while running");
 
-            // El transport recibe el logger por ctor (snapshot del sink configurado
-            // por el host via .Logger(x) o el ConsoleLogger default del Actor). Una
-            // vez construido el transport queda fijado al sink elegido; cambiar
-            // .Logger() despues no propaga (ver F9: ordering rule).
+            // The transport receives the logger via ctor (snapshot of the sink configured
+            // by the host via .Logger(x) or the Actor's default ConsoleLogger). Once
+            // built, the transport is fixed to the chosen sink; changing
+            // .Logger() afterwards does not propagate (see F9: ordering rule).
             var loggerForTransport = hook.Logger;
             this.transport = transportType switch
             {
@@ -356,15 +357,16 @@ namespace Choreography.StageManager
             return new Transport.Https.HttpsTransport(Id, listenUrl, cert, advertiseUrl, logger);
         }
 
-        // SimpleX transport carga crypto/TLS managed pero la app target es mobile (Android/iOS).
-        // En Windows desktop (maquina de dev) hacemos fallback a InMemoryTransport para que
-        // tests y la app puedan correr sin emulador. Para el path real desde Windows, usar
-        // emulador Android o WSL Linux. Ver DEVELOPMENT-WINDOWS.md.
+        // SimpleX transport loads managed crypto/TLS but the target app is mobile (Android/iOS).
+        // On Windows desktop (dev machine) we fall back to InMemoryTransport so that
+        // tests and the app can run without an emulator. For the real path from Windows, use
+        // an Android emulator or WSL Linux. See DEVELOPMENT-WINDOWS.md.
         //
-        // serverFingerprint (TOFU): SHA-256 del idCert del SMP server. Lo conoce el Stage
-        // a-priori porque el Ushier (app tercera que arma invitaciones via QR) emite URIs
-        // smp://HASH@host:port/... con el hash incluido. Para el creator viene del config;
-        // para joiner-only puede ser null y SimplexTransport lo extrae del URI al accept.
+        // serverFingerprint (TOFU): SHA-256 of the SMP server's idCert. The Stage knows it
+        // a-priori because the Usher (a separate component that builds invitations via QR)
+        // emits URIs smp://HASH@host:port/... with the hash included. For the creator it
+        // comes from config; for joiner-only it can be null and SimplexTransport extracts it
+        // from the URI on accept.
         private IStageTransport CreateSimplexTransport(string url, byte[] serverFingerprint, IPuppeteerLogger logger)
         {
             if (OperatingSystem.IsWindows())
@@ -390,21 +392,21 @@ namespace Choreography.StageManager
 
             Directory.CreateDirectory(config.StageStateDirectory);
 
-            // Casting election fase (b): persistencia de term/votedFor. Cargar antes
-            // que hook para que cualquier eleccion gatillada durante hidratacion
-            // (no deberia, pero defensive) vea el term correcto.
+            // Casting election phase (b): persistence of term/votedFor. Load before
+            // hook so that any election triggered during hydration
+            // (should not happen, but defensive) sees the correct term.
             termStore = new TermStore(config.StageStateDirectory);
             knownPeersStore = new KnownPeersStore(config.StageStateDirectory);
 
             hook.InitializeStorage(dbType, storageConnectionString);
             hook.OnRecordWritten = OnRecordWritten;
-            // Gate de ReactionActivation: el rol vivo del Stage P2P es su
-            // IsDirector (cambia con la eleccion). DirectorOnly corre solo en el
-            // director; CastOnly solo en los Casts; Company en ambos.
+            // ReactionActivation gate: the live role of the P2P Stage is its
+            // IsDirector (changes with the election). DirectorOnly runs only on the
+            // director; CastOnly only on the Casts; Company on both.
             hook.SetActingAsDirectorProvider(() => IsDirector);
             // Phase 5 of the Action refactor: dropped hook.OnNewActionDefined wiring.
             // Define entries are journal records and replicate via OnRecordWritten →
-            // CueEvent like any other record (firmado: cross-stage atomicity is
+            // CueEvent like any other record (signed: cross-stage atomicity is
             // unnecessary — the director's journal already persisted the pair
             // transactionally). The follower applies the Define record via
             // ApplyReplicatedEvent which dispatches to AddKnownActionFromDefine.
@@ -475,18 +477,20 @@ namespace Choreography.StageManager
         //  Messages: DirectorAnnounce, MemberLeave, MemberJoin, Heartbeat, Casting
         // =====================================================================
 
-        // Bug 19 — Peers de Coordination conocidos, persistidos a traves de process-death.
+        // Bug 19 — Known Coordination peers, persisted across process-death.
         //
-        // Disponible inmediatamente despues de StartAsync (lee de StageStateDirectory/peers.bin),
-        // ANTES de que exista ningun canal de Coordination vivo. El host la consulta al
-        // arrancar para reabrir Coordination con cada peer conocido — independientemente
-        // del rol previo del nodo. Eso cierra el caso del ex-Director que muere y vuelve:
-        // su KnownPeersStore recuerda al nuevo Director (que antes era su Cast), el host
-        // reabre Coordination, llega el DirectorAnnounce y el camino term-first + (si hay
-        // rotacion vigente) el re-handshake in-band de bug 18 completan la reconciliacion.
+        // Available immediately after StartAsync (reads from StageStateDirectory/peers.bin),
+        // BEFORE any live Coordination channel exists. The host queries it on
+        // startup to reopen Coordination with each known peer — regardless of
+        // the node's previous role. That closes the case of the ex-Director that dies and
+        // returns: its KnownPeersStore remembers the new Director (which used to be its Cast),
+        // the host reopens Coordination, the DirectorAnnounce arrives and the term-first path
+        // + (if there is an active rotation) the in-band re-handshake of bug 18 complete the
+        // reconciliation.
         //
-        // El Stage solo aporta a QUIENES reconectar; las Address de reconexion las posee el
-        // host (modelo invitation-based: el Stage nunca las ve en JoinCoordination).
+        // The Stage only contributes WHO to reconnect; the reconnection Address values are
+        // owned by the host (invitation-based model: the Stage never sees them in
+        // JoinCoordination).
         public IReadOnlyList<PerformerId> RecallKnownPeers()
             => knownPeersStore?.All ?? Array.Empty<PerformerId>();
 
@@ -495,9 +499,9 @@ namespace Choreography.StageManager
             if (channel == null) throw new ArgumentNullException(nameof(channel));
 
             coordinationPeers[peerId] = channel;
-            // Bug 19: recordar la membresia para que el host pueda reabrir Coordination
-            // con este peer tras un process-death (ver KnownPeersStore / RecallKnownPeers).
-            // Idempotente: solo toca disco la primera vez que se conoce el peer.
+            // Bug 19: remember the membership so the host can reopen Coordination
+            // with this peer after a process-death (see KnownPeersStore / RecallKnownPeers).
+            // Idempotent: only touches disk the first time the peer is known.
             knownPeersStore?.Remember(peerId);
             RefreshConnectivity();
 
@@ -507,14 +511,14 @@ namespace Choreography.StageManager
 
             if (IsDirector)
             {
-                // Fire-and-forget: el announce sale ya. El canal de Coordination
-                // es buffered (unbounded), asi que aun si el listener del Cast no
-                // arranco todavia el mensaje queda en queue y se procesa cuando
-                // arranca. Quitamos el Task.Delay(50) que era defensivo sin razon
-                // documentada — con WaitForDirectorAsync en ConnectToDirector el
-                // race del consumer ya esta cerrado por contrato del API, no por
-                // timing. Eliminar el delay tambien acelera el join del Cast en
-                // ~50ms en el caso the host Performance (Director ya activo cuando aparece Cast).
+                // Fire-and-forget: the announce goes out now. The Coordination channel
+                // is buffered (unbounded), so even if the Cast's listener has not
+                // started yet the message stays queued and is processed when it
+                // starts. We removed the Task.Delay(50) that was defensive without a
+                // documented reason — with WaitForDirectorAsync in ConnectToDirector the
+                // consumer race is already closed by the API contract, not by
+                // timing. Removing the delay also speeds up the Cast join by
+                // ~50ms in the host case (Director already active when the Cast appears).
                 long maxAtAnnounce = hook.CurrentEntryId;
                 long termAtAnnounce = termStore?.CurrentTerm ?? 0L;
                 _ = Task.Run(async () =>
@@ -549,33 +553,33 @@ namespace Choreography.StageManager
             if (commandChannel != null)
                 _ = Task.Run(async () => await ListenCommand(directorId, commandChannel, cts.Token), cts.Token);
 
-            // Cierra el race con EnsureCanWrite SOLO si el Cast tiene canal de
-            // comandos (intencion de forward de PerformCmd al Director). Sin
-            // commandChannel el Cast es replication-only — no escribe, no necesita
-            // directorId asignado, y forzar la espera bloquearia los setups que
-            // no usan el bus de Coordination (ej. HttpsTransportTests usa el data
-            // star directo sin coordination membership).
+            // Closes the race with EnsureCanWrite ONLY if the Cast has a command
+            // channel (intent to forward PerformCmd to the Director). Without a
+            // commandChannel the Cast is replication-only — it does not write, does not need
+            // directorId assigned, and forcing the wait would block setups that
+            // do not use the Coordination bus (e.g. HttpsTransportTests uses the data
+            // star directly without coordination membership).
             //
-            // Con commandChannel: el caller declarara `cast.PerformCmd(...)` despues,
-            // que entra a EnsureCanWrite y exige directorId.HasValue. Esperar al
-            // DirectorAnnounce del bus de Coordination cierra el race documentado en
-            // PromoteToDirector (linea ~430) y workaround-eado en the host Performance con
-            // Task.Delay(5s). Pre-requisito: JoinCoordination debe haber sido
-            // invocado antes — sin coordination membership, este await bloquea hasta
-            // que el CT cancele (politica del caller).
+            // With commandChannel: the caller will declare `cast.PerformCmd(...)` afterwards,
+            // which enters EnsureCanWrite and requires directorId.HasValue. Waiting for the
+            // DirectorAnnounce on the Coordination bus closes the race documented in
+            // PromoteToDirector (line ~430) and worked around on the host side with
+            // Task.Delay(5s). Pre-requisite: JoinCoordination must have been
+            // invoked before — without coordination membership, this await blocks until
+            // the CT cancels (caller's policy).
             if (commandChannel != null)
                 await WaitForDirectorAsync(ct);
         }
 
-        // Espera bloqueante hasta que el state machine local registra un Director
-        // activo (this.directorId tiene valor). El registro ocurre cuando:
-        //   - llega un DirectorAnnounce via el bus de Coordination (Cast), o
-        //   - este Stage se promueve a si mismo (PromoteToDirector).
+        // Blocking wait until the local state machine registers an active Director
+        // (this.directorId has a value). The registration happens when:
+        //   - a DirectorAnnounce arrives via the Coordination bus (Cast), or
+        //   - this Stage promotes itself (PromoteToDirector).
         //
-        // Suscribe al evento OnDirectorChanged ANTES del segundo chequeo de
-        // directorId para evitar lost-wakeup: si el announce llega entre la
-        // suscripcion y el chequeo, el TaskCompletionSource captura la transicion;
-        // si llego antes de la suscripcion, el chequeo post-subscribe lo detecta.
+        // Subscribes to the OnDirectorChanged event BEFORE the second check of
+        // directorId to avoid a lost-wakeup: if the announce arrives between the
+        // subscription and the check, the TaskCompletionSource captures the transition;
+        // if it arrived before the subscription, the post-subscribe check detects it.
         public async Task WaitForDirectorAsync(CancellationToken ct = default)
         {
             if (directorId.HasValue) return;
@@ -656,12 +660,12 @@ namespace Choreography.StageManager
             if (force && connectivity == ConnectivityStatus.Isolated)
                 connectivity = ConnectivityStatus.Connected;
 
-            // Hooks de hidratacion del Director: corren ANTES de marcar IsDirector=true.
-            // Mientras corren, las escrituras del hook entran al journal local pero NO
-            // se broadcastean (OnRecordWritten chequea IsDirector). PerformCmds locales
-            // que entren en esta ventana fallan en EnsureCanWrite con "No Director
-            // available" — la app reintentara. Los Casts (si los hubiese) recibiran las
-            // entradas del upgrade en el catch-up posterior al DirectorAnnounce.
+            // Director hydration hooks: run BEFORE marking IsDirector=true.
+            // While they run, the hook's writes enter the local journal but are NOT
+            // broadcast (OnRecordWritten checks IsDirector). Local PerformCmds
+            // that fall in this window fail in EnsureCanWrite with "No Director
+            // available" — the app will retry. The Casts (if any) will receive the
+            // upgrade entries in the catch-up after the DirectorAnnounce.
             if (hook.IsNew) OnFirstHydration();
             OnHydrated();
 
@@ -672,18 +676,18 @@ namespace Choreography.StageManager
                 previousRole = role;
                 directorId = Id;
                 role = StageRole.Leader;
-                // Si veniamos de Candidate en otra eleccion, abortamos ese round.
+                // If we came from Candidate in another election, we abort that round.
                 currentElectionId = null;
                 votesReceived = null;
             }
             OnDirectorChanged?.Invoke(Id);
             RaiseRoleChanged(previousRole);
 
-            // PromoteToDirector(force:true) NO bumpea term (decision firmada 2026-05-27,
-            // entorno Stage end-user: el protocolo es source-of-truth; force-promote
-            // queda provisional hasta que el cluster reconverja). Si otro lado de la
-            // particion eligio legitimamente con term mayor, su DirectorAnnounce nos
-            // demoteara silenciosamente en HandleDirectorAnnounce term-first.
+            // PromoteToDirector(force:true) does NOT bump the term (in the end-user Stage
+            // environment the protocol is the source-of-truth; force-promote
+            // stays provisional until the cluster reconverges). If another side of the
+            // partition elected legitimately with a higher term, its DirectorAnnounce will
+            // demote us silently in HandleDirectorAnnounce term-first.
             long maxAtPromote = hook.CurrentEntryId;
             long myTerm = termStore?.CurrentTerm ?? 0L;
             foreach (var kvp in coordinationPeers)
@@ -747,14 +751,14 @@ namespace Choreography.StageManager
             long myMax = hook.CurrentEntryId;
             hook.Logger.Debug($"[Stage {Id}] CatchUp for {peerId}: from {peerLastEntryId + 1} to {myMax}");
 
-            // Fase 5 — Playbill catch-up: enviar primero todos los schemas
-            // (idempotente en el Cast) y luego todos los records con EntryId >
-            // peerLastEntryId. Esto debe ir ANTES del catch-up del journal para
-            // que cuando el Cast aplique un CueEvent con un EntryId que tambien
-            // tiene playbill record, el schema ya este registrado. Tracking
-            // separado de last-applied playbill EntryId no existe — usamos el
-            // mismo peerLastEntryId (asumiendo que journal y playbill avanzan
-            // juntos por construccion de Performance.PerformCommand).
+            // Phase 5 — Playbill catch-up: first send all schemas
+            // (idempotent on the Cast) and then all records with EntryId >
+            // peerLastEntryId. This must come BEFORE the journal catch-up so
+            // that when the Cast applies a CueEvent with an EntryId that also
+            // has a playbill record, the schema is already registered. Separate
+            // tracking of the last-applied playbill EntryId does not exist — we use the
+            // same peerLastEntryId (assuming journal and playbill advance
+            // together by construction of Performance.PerformCommand).
             if (hook.Playbill != null)
             {
                 foreach (var (name, declarations) in hook.Playbill.ListSchemas())
@@ -812,9 +816,9 @@ namespace Choreography.StageManager
                             break;
 
                         case Heartbeat hb:
-                            // Solo registra evidencia de vida del Director ACTUAL. Heartbeats
-                            // de otros peers (no Director, o de un ex-Director cuyo rol ya
-                            // perdimos) se ignoran. lastSeenDirector lo lee el watchdog.
+                            // Only records liveness evidence for the CURRENT Director. Heartbeats
+                            // from other peers (non-Director, or from an ex-Director whose role
+                            // we already lost) are ignored. The watchdog reads lastSeenDirector.
                             if (directorId.HasValue && directorId.Value == hb.SenderId)
                                 lastSeenDirector[hb.SenderId] = DateTime.UtcNow;
                             break;
@@ -844,9 +848,9 @@ namespace Choreography.StageManager
                         case MemberJoinAck ack:
                             break;
 
-                        // Bug 18 — re-handshake in-band de los data channels tras
-                        // una rotacion de roles. El Cast pide (Request) y el Director
-                        // responde con las Address de las nuevas invitaciones (Proposal).
+                        // Bug 18 — in-band re-handshake of the data channels after
+                        // a role rotation. The Cast asks (Request) and the Director
+                        // responds with the Address values of the new invitations (Proposal).
                         case RehandshakeRequest rehReq:
                             HandleRehandshakeRequest(rehReq, channel);
                             break;
@@ -863,35 +867,35 @@ namespace Choreography.StageManager
 
         // Casting election protocol — HandleDirectorAnnounce TERM-FIRST.
         //
-        // Tres reglas en orden:
+        // Three rules in order:
         //
         // 1) announce.Term < myTerm:
-        //    Stale announcement (peer Director de un term viejo). Lo ignoro
-        //    silenciosamente. No re-anuncio nada — el peer aprendera que esta
-        //    atrasado en el proximo propose round o por algun mensaje subsiguiente.
+        //    Stale announcement (peer Director of an old term). Ignored
+        //    silently. We re-announce nothing — the peer will learn it is
+        //    behind in the next propose round or via some subsequent message.
         //
         // 2) announce.Term > myTerm:
-        //    El peer Director es legitimamente mas reciente. Adopto el term
-        //    superior (reset de votedFor), paso a Follower (cancelo eleccion en
-        //    curso si era Candidate, cancelo heartbeat si era Leader), y acepto
-        //    al peer como Director. Esto es lo que demoteara silenciosamente a
-        //    un force-promoted local si el cluster reconverge con term mayor —
-        //    la garantia que el entorno Stage pide (decision 2026-05-27).
+        //    The peer Director is legitimately more recent. We adopt the higher
+        //    term (reset votedFor), move to Follower (cancel the in-progress
+        //    election if Candidate, cancel heartbeat if Leader), and accept
+        //    the peer as Director. This is what will silently demote a
+        //    locally force-promoted node if the cluster reconverges with a higher term —
+        //    the guarantee the Stage environment requires.
         //
         // 3) announce.Term == myTerm:
-        //    Mismo term que el mio. Sub-casos:
-        //      3a) no soy Director, o el peer anuncia mi propio Id: acepto.
-        //          Comportamiento legacy (el Cast obedece al announce).
-        //      3b) ambos creemos ser Director con MISMO term: caso bug-12.
-        //          Tiebreaker (MaxEntryId desc, PerformerId asc). Si pierdo,
-        //          demote + OnDirectorElectionLost; si gano, rebut. Term-empate
-        //          solo ocurre por force-promote concurrente o bug en persistencia;
-        //          el tiebreaker preserva convergencia determinista en ese caso.
+        //    Same term as mine. Sub-cases:
+        //      3a) I am not Director, or the peer announces my own Id: accept.
+        //          Legacy behavior (the Cast obeys the announce).
+        //      3b) both believe we are Director with the SAME term: bug-12 case.
+        //          Tiebreaker (MaxEntryId desc, PerformerId asc). If I lose,
+        //          demote + OnDirectorElectionLost; if I win, rebut. Term-tie
+        //          only happens by concurrent force-promote or a persistence bug;
+        //          the tiebreaker preserves deterministic convergence in that case.
         private void HandleDirectorAnnounce(DirectorAnnounce announce, IStageChannel channel)
         {
             long myTerm = termStore?.CurrentTerm ?? 0L;
 
-            // Regla 1: stale announce — ignoro.
+            // Rule 1: stale announce — ignore.
             if (announce.Term < myTerm)
             {
                 hook.Logger.Debug(
@@ -900,7 +904,7 @@ namespace Choreography.StageManager
                 return;
             }
 
-            // Regla 2: term superior — adopt + accept.
+            // Rule 2: higher term — adopt + accept.
             if (announce.Term > myTerm)
             {
                 hook.Logger.Debug(
@@ -925,14 +929,14 @@ namespace Choreography.StageManager
                 lastSeenDirector[announce.DirectorId] = DateTime.UtcNow;
                 OnDirectorChanged?.Invoke(announce.DirectorId);
                 RaiseRoleChanged(previousRole);
-                // Bug 18 — failover por term-upgrade: si esto es una rotacion (ya
-                // conociamos otro Director, o eramos el Director), los data channels
-                // viejos quedaron muertos. Pedir re-handshake in-band al nuevo Director.
+                // Bug 18 — failover by term-upgrade: if this is a rotation (we already
+                // knew another Director, or we were the Director), the old data channels
+                // are dead. Request an in-band re-handshake from the new Director.
                 RequestRehandshakeIfRotated(oldDirector, announce.DirectorId);
                 return;
             }
 
-            // Regla 3: announce.Term == myTerm.
+            // Rule 3: announce.Term == myTerm.
             bool iAmDirector;
             lock (electionLock)
             {
@@ -950,7 +954,7 @@ namespace Choreography.StageManager
                     oldDirector = directorId;
                     directorId = announce.DirectorId;
                     wasCandidate = role == StageRole.Candidate;
-                    // Si yo era Candidate del mismo term, abortamos: alguien ya gano.
+                    // If I was Candidate of the same term, we abort: someone already won.
                     if (wasCandidate)
                     {
                         role = StageRole.Follower;
@@ -962,14 +966,14 @@ namespace Choreography.StageManager
                 lastSeenDirector[announce.DirectorId] = DateTime.UtcNow;
                 OnDirectorChanged?.Invoke(announce.DirectorId);
                 if (wasCandidate) RaiseRoleChanged(previousRole);
-                // Bug 18 — same-term: si el Director cambio de identidad (rotacion),
-                // re-cablear data channels in-band. El join inicial (oldDirector==null)
-                // se excluye: ese pairing es out-of-band por contrato.
+                // Bug 18 — same-term: if the Director changed identity (rotation),
+                // re-wire data channels in-band. The initial join (oldDirector==null)
+                // is excluded: that pairing is out-of-band by contract.
                 RequestRehandshakeIfRotated(oldDirector, announce.DirectorId);
                 return;
             }
 
-            // Sub-caso 3b: ambos Directors con mismo term — tiebreaker bug-12.
+            // Sub-case 3b: both Directors with the same term — bug-12 tiebreaker.
             long myMax = hook.CurrentEntryId;
             long peerMax = announce.MaxEntryId;
 
@@ -1047,16 +1051,16 @@ namespace Choreography.StageManager
                             }
                             else
                             {
-                                // Bug 17 — silently-dropped por colision de EntryId. El Cast
-                                // ya tiene algo en cue.EntryId, distinto de lo que el Director
-                                // esta enviando. Path tipico: el Cast escribio localmente con
-                                // PerformCmdLocal antes del join, ocupando EntryIds bajos que
-                                // el seed del Director tambien quiere usar. La entry del Director
-                                // se pierde. No throw para preservar el contrato del protocolo
-                                // (catch-up debe ser tolerante a re-sends), pero logueamos cada
-                                // drop e incrementamos un counter para que el host detecte que
-                                // tiene un journal incoherente. Si replicationDroppedOlderCount
-                                // > 0 post-pairing, el Cast NO recibio el seed completo.
+                                // Bug 17 — silently dropped due to an EntryId collision. The Cast
+                                // already has something at cue.EntryId, different from what the
+                                // Director is sending. Typical path: the Cast wrote locally with
+                                // PerformCmdLocal before the join, occupying low EntryIds that
+                                // the Director's seed also wants to use. The Director's entry
+                                // is lost. No throw, to preserve the protocol contract
+                                // (catch-up must tolerate re-sends), but we log each
+                                // drop and increment a counter so the host detects that
+                                // it has an incoherent journal. If replicationDroppedOlderCount
+                                // > 0 after pairing, the Cast did NOT receive the full seed.
                                 System.Threading.Interlocked.Increment(ref replicationDroppedOlderCount);
                                 hook.Logger.Debug(
                                     $"[Stage {Id}] DROP older CueEvent EntryId={cue.EntryId} (localMax={localMax} from peer={peerId}). " +
@@ -1064,11 +1068,11 @@ namespace Choreography.StageManager
                             }
                             break;
 
-                        // Fase 5 — Playbill replication apply path.
-                        // Si el Cast no tiene Playbill configurado, los cues se ignoran
-                        // (Playbill es audit-off legitimo). Si lo tiene, se aplican
-                        // idempotentemente: RegisterSchema es idempotente por contrato;
-                        // WriteRecord lanza LanguageException en duplicado, que se traga.
+                        // Phase 5 — Playbill replication apply path.
+                        // If the Cast has no Playbill configured, the cues are ignored
+                        // (Playbill is legitimately audit-off). If it has one, they are applied
+                        // idempotently: RegisterSchema is idempotent by contract;
+                        // WriteRecord throws LanguageException on a duplicate, which is swallowed.
                         case PlaybillSchemaCue schemaCue:
                             if (hook.Playbill != null)
                             {
@@ -1092,8 +1096,8 @@ namespace Choreography.StageManager
                                 }
                                 catch (LanguageException)
                                 {
-                                    // Duplicate EntryId (idempotent apply) o schema desconocido —
-                                    // log debug y continuar para no bloquear la replicacion.
+                                    // Duplicate EntryId (idempotent apply) or unknown schema —
+                                    // log debug and continue so replication is not blocked.
                                     hook.Logger.Debug($"[Stage {Id}] PlaybillCue apply skip for EntryId={recordCue.EntryId} schema='{recordCue.SchemaName}' (duplicate or unknown schema)");
                                 }
                             }
@@ -1162,27 +1166,27 @@ namespace Choreography.StageManager
             catch (Exception ex) { hook.Logger.Error($"[Stage {Id}] ListenCommand error", ex); }
         }
 
-        // --- Playbill attachment (Fase 5 — cross-pod replication) ---
+        // --- Playbill attachment (Phase 5 — cross-pod replication) ---
         //
-        // Anuda un Playbill instance a este Stage. Despues de esto:
-        //   - Como Director: cada RegisterSchema/WriteRecord sobre el Playbill
-        //     dispara un PlaybillSchemaCue/PlaybillCue broadcast a las Casts.
-        //   - Como Cast: los cues entrantes se aplican a este Playbill via
-        //     RegisterSchemaRaw / WriteRecordRaw (ver ListenReplication).
+        // Binds a Playbill instance to this Stage. After this:
+        //   - As Director: each RegisterSchema/WriteRecord on the Playbill
+        //     fires a PlaybillSchemaCue/PlaybillCue broadcast to the Casts.
+        //   - As Cast: incoming cues are applied to this Playbill via
+        //     RegisterSchemaRaw / WriteRecordRaw (see ListenReplication).
         //
-        // Ambos roles necesitan attach — el Director para emitir, el Cast para
-        // recibir. Una vez attached, no se puede desatachar (no implementado;
-        // dispose del Stage suficiente).
+        // Both roles need attach — the Director to emit, the Cast to
+        // receive. Once attached, it cannot be detached (not implemented;
+        // disposing the Stage is sufficient).
         //
-        // Llamar despues de ConfigureStorage y antes de StartAsync para que
-        // el Director-mode pueda emitir desde el primer momento.
+        // Call after ConfigureStorage and before StartAsync so that
+        // Director-mode can emit from the first moment.
         public void AttachPlaybill(Playbill playbill)
         {
             if (playbill == null) throw new ArgumentNullException(nameof(playbill));
             if (hook.Playbill != null && !ReferenceEquals(hook.Playbill, playbill))
                 throw new InvalidOperationException("A different Playbill is already attached to this Stage.");
 
-            // Idempotent re-attach: no duplicar suscripcion si es el mismo instance.
+            // Idempotent re-attach: do not duplicate the subscription if it is the same instance.
             if (hook.Playbill != null) return;
 
             hook.Playbill = playbill;
@@ -1209,7 +1213,7 @@ namespace Choreography.StageManager
                 {
                     // Phase 5 of the Action refactor: dropped the ActionDefinition
                     // pre-broadcast. Define records are journal records and ride
-                    // CueEvent like any other record (firmado: cross-stage atomicity
+                    // CueEvent like any other record (signed: cross-stage atomicity
                     // is unnecessary because the director's journal already
                     // persisted the Define + Invocation pair transactionally —
                     // followers receive them as separate CueEvents and apply them
@@ -1231,9 +1235,9 @@ namespace Choreography.StageManager
             }
         }
 
-        // Fase 5 — Playbill schema registration broadcast. Solo el Director
-        // emite; los Casts ignoran el callback (su Playbill local registra
-        // schemas via apply path en ListenReplication).
+        // Phase 5 — Playbill schema registration broadcast. Only the Director
+        // emits; the Casts ignore the callback (their local Playbill registers
+        // schemas via the apply path in ListenReplication).
         private void OnPlaybillSchemaRegistered(string schemaName, string declarations)
         {
             if (!IsDirector) return;
@@ -1249,9 +1253,9 @@ namespace Choreography.StageManager
             }
         }
 
-        // Fase 5 — Playbill record write broadcast. Mismo patron que
-        // OnRecordWritten del journal: enqueue al per-link worker para preservar
-        // FIFO con respecto al journal record del mismo EntryId.
+        // Phase 5 — Playbill record write broadcast. Same pattern as
+        // the journal's OnRecordWritten: enqueue to the per-link worker to preserve
+        // FIFO with respect to the journal record of the same EntryId.
         private void OnPlaybillRecordWritten(long entryId, string schemaName, string serializedParameters)
         {
             if (!IsDirector) return;
@@ -1268,15 +1272,15 @@ namespace Choreography.StageManager
         }
 
         // =====================================================================
-        //  Casting election protocol fase (a) — Heartbeat sender + watchdog
+        //  Casting election protocol phase (a) — Heartbeat sender + watchdog
         // =====================================================================
 
-        // Bug 15 — dispara OnRoleChanged si el rol actual difiere de previousRole.
-        // Se llama FUERA del electionLock y DESPUES de actualizar heartbeatSenderCts
-        // / electionRoundCts / directorId, asi el subscriber ve estado consistente
-        // (IsDirector, CurrentDirectorId) cuando inspecciona el Stage. Captura un
-        // snapshot atomico del rol+directorId actuales bajo el lock para que dos
-        // eventos disparados en rapida sucesion no se entrecrucen visiblemente.
+        // Bug 15 — fires OnRoleChanged if the current role differs from previousRole.
+        // Called OUTSIDE the electionLock and AFTER updating heartbeatSenderCts
+        // / electionRoundCts / directorId, so the subscriber sees consistent state
+        // (IsDirector, CurrentDirectorId) when it inspects the Stage. Captures an
+        // atomic snapshot of the current role+directorId under the lock so that two
+        // events fired in rapid succession do not visibly interleave.
         private void RaiseRoleChanged(StageRole previousRole)
         {
             StageRole currentSnapshot;
@@ -1296,8 +1300,8 @@ namespace Choreography.StageManager
             }
         }
 
-        // Arranca/reinicia el sender loop. Llamado al final de PromoteToDirector.
-        // Cancelar el CTS previo cubre el caso re-promote sin StepDown intermedio.
+        // Starts/restarts the sender loop. Called at the end of PromoteToDirector.
+        // Cancelling the previous CTS covers the re-promote case without an intervening StepDown.
         private void StartHeartbeatSender()
         {
             heartbeatSenderCts?.Cancel();
@@ -1306,17 +1310,17 @@ namespace Choreography.StageManager
             _ = Task.Run(async () => await HeartbeatSenderLoop(ct));
         }
 
-        // Loop del Director: cada HeartbeatInterval envia un Heartbeat a cada peer
-        // del bus de coordination con su CurrentEntryId como evidencia de actividad.
-        // Sale silenciosamente si IsDirector se vuelve false (por StepDown, split-brain
-        // loss, o aislamiento) o si el CTS se cancela.
+        // Director loop: every HeartbeatInterval it sends a Heartbeat to each peer
+        // on the coordination bus with its CurrentEntryId as activity evidence.
+        // Exits silently if IsDirector becomes false (due to StepDown, split-brain
+        // loss, or isolation) or if the CTS is cancelled.
         //
-        // Bug 16 diagnostics: cada tick loguea (IsDirector, peers_connected, sent_now,
-        // total) y la salida loguea su razon — el reporte 2026-05-27 PM3 muestra ~33s
-        // de silencio del Director sin pistas para discriminar "loop muerto" de "loop
-        // vivo emite pero el transport descarta". El contador heartbeatsEmittedCount
-        // permite a tests asertar que el tick funciona aun cuando el transport no
-        // confirme entrega.
+        // Bug 16 diagnostics: each tick logs (IsDirector, peers_connected, sent_now,
+        // total) and the exit logs its reason — a symptom was observed where the
+        // Director fell silent for tens of seconds with no clue to discriminate "loop
+        // dead" from "loop alive emitting but the transport drops". The
+        // heartbeatsEmittedCount counter lets tests assert that the tick works even when
+        // the transport does not confirm delivery.
         private async Task HeartbeatSenderLoop(CancellationToken ct)
         {
             heartbeatSenderRunning = true;
@@ -1367,8 +1371,8 @@ namespace Choreography.StageManager
             }
         }
 
-        // Arranca el watchdog del lado Cast. Lifecycle por Stage: se crea en StartAsync
-        // y se cancela en StopAsync/DisposeAsync via backgroundTasks.
+        // Starts the Cast-side watchdog. Lifecycle per Stage: created in StartAsync
+        // and cancelled in StopAsync/DisposeAsync via backgroundTasks.
         private void StartDirectorWatchdog()
         {
             directorWatchdogCts = new CancellationTokenSource();
@@ -1377,17 +1381,17 @@ namespace Choreography.StageManager
             _ = Task.Run(async () => await DirectorWatchdogLoop(ct));
         }
 
-        // Loop del watchdog: cada HeartbeatInterval evalua si el Director registrado
-        // dejo de enviar heartbeats. Solo cuenta si:
-        //   1) Tenemos un directorId asignado.
-        //   2) Ese directorId no soy yo (no me chequeo).
-        //   3) Hay un lastSeen registrado (DirectorAnnounce o Heartbeat previos).
-        // Si ahora-lastSeen > DirectorTimeout, limpia directorId, remueve el lastSeen
-        // y dispara OnDirectorLost. EnsureCanWrite bloqueara escrituras a partir de
-        // este punto hasta que algo reasigne Director.
+        // Watchdog loop: every HeartbeatInterval it evaluates whether the registered
+        // Director stopped sending heartbeats. Only counts if:
+        //   1) We have a directorId assigned.
+        //   2) That directorId is not me (I do not check myself).
+        //   3) There is a recorded lastSeen (previous DirectorAnnounce or Heartbeat).
+        // If now-lastSeen > DirectorTimeout, it clears directorId, removes the lastSeen
+        // and fires OnDirectorLost. EnsureCanWrite will block writes from
+        // this point until something reassigns Director.
         //
-        // Etapa b: el handler de OnDirectorLost (o codigo equivalente aqui mismo)
-        // arrancara una CastingPropose para auto-eleccion.
+        // Phase b: the OnDirectorLost handler (or equivalent code right here)
+        // will start a CastingPropose for auto-election.
         private async Task DirectorWatchdogLoop(CancellationToken ct)
         {
             try
@@ -1412,8 +1416,8 @@ namespace Choreography.StageManager
                         lastSeenDirector.TryRemove(dirId, out _);
                         OnDirectorLost?.Invoke(dirId);
 
-                        // Fase b: auto-iniciar eleccion. Si connectivity == Isolated
-                        // o ya somos Candidate de otro round, StartElection es no-op.
+                        // Phase b: auto-start election. If connectivity == Isolated
+                        // or we are already Candidate of another round, StartElection is a no-op.
                         StartElection();
                     }
                 }
@@ -1423,16 +1427,16 @@ namespace Choreography.StageManager
         }
 
         // =====================================================================
-        //  Casting election protocol fase (b) — state machine + voter logic
+        //  Casting election protocol phase (b) — state machine + voter logic
         // =====================================================================
 
-        // Arranca un round de eleccion como Candidate. Llamado desde DirectorWatchdog
-        // tras Director-down. Idempotente con guards: no-op si ya somos Candidate o
-        // Leader, o si estamos Isolated (sin peers no se puede elegir).
+        // Starts an election round as Candidate. Called from DirectorWatchdog
+        // after Director-down. Idempotent with guards: no-op if we are already Candidate or
+        // Leader, or if we are Isolated (with no peers an election is impossible).
         //
-        // Quorum: floor(N/2)+1 incluyendo self, donde N = peers + 1. Excepcion
-        // declarada: si N<=2 (apps Stage 2-peer), 1 voto basta — weak quorum aprobado
-        // 2026-05-27. Para N=1 (alone, sin peers) el guard de Isolated atrapa antes.
+        // Quorum: floor(N/2)+1 including self, where N = peers + 1. Declared
+        // exception: if N<=2 (2-peer Stage apps), 1 vote suffices — weak quorum.
+        // For N=1 (alone, no peers) the Isolated guard catches earlier.
         private void StartElection()
         {
             if (connectivity == ConnectivityStatus.Isolated)
@@ -1441,14 +1445,14 @@ namespace Choreography.StageManager
                 return;
             }
 
-            // Fase (d) refinement: el backoff retry no debe correr si ya conocemos
-            // un Director (peer ganador ya anuncio mientras nosotros esperabamos
-            // backoff, o nosotros mismos ganamos). Sin este guard, un retry tardio
-            // bumpea term y demote injustamente al Director recien electo, generando
-            // un loop entre Candidates atrasados que vuelven a hacer split-vote.
-            // El watchdog sigue siendo la fuente unica de "Director caido"; el
-            // backoff retry asume que esa decision ya fue tomada y solo continua
-            // si sigue siendo cierta.
+            // Phase (d) refinement: the backoff retry must not run if we already know
+            // a Director (the winning peer already announced while we were waiting on
+            // backoff, or we won ourselves). Without this guard, a late retry
+            // bumps the term and unfairly demotes the just-elected Director, generating
+            // a loop between lagging Candidates that split-vote again.
+            // The watchdog remains the single source of "Director down"; the
+            // backoff retry assumes that decision was already made and only continues
+            // if it is still true.
             if (directorId.HasValue)
             {
                 hook.Logger.Debug($"[Stage {Id}] StartElection: skipping (director already known: {directorId.Value}).");
@@ -1473,7 +1477,7 @@ namespace Choreography.StageManager
                 previousRole = role;
 
                 newTerm = termStore.CurrentTerm + 1;
-                termStore.BumpTerm(newTerm);   // resetea votedFor
+                termStore.BumpTerm(newTerm);   // resets votedFor
                 termStore.RecordVote(Id);       // self-vote
 
                 electionId = Guid.NewGuid();
@@ -1496,24 +1500,24 @@ namespace Choreography.StageManager
 
             hook.Logger.Debug($"[Stage {Id}] StartElection term={newTerm} electionId={electionId} neededVotes={neededVotes}.");
 
-            // Si el quorum se cumple solo con self-vote (weak 2-peer con peer caido,
-            // o N=1 pero connectivity Connected — no deberia pasar), promovemos ya.
-            // No notificamos Candidate intermedio en esta rama: el evento Leader
-            // que dispara BecomeDirector hace el role-change visible al subscriber
-            // sin pasar por una transicion fantasma.
+            // If quorum is met with the self-vote alone (weak 2-peer with a downed peer,
+            // or N=1 but connectivity Connected — should not happen), we promote now.
+            // We do not notify an intermediate Candidate in this branch: the Leader
+            // event that BecomeDirector fires makes the role-change visible to the subscriber
+            // without going through a phantom transition.
             if (selfQuorum)
             {
                 BecomeDirector();
                 return;
             }
 
-            // Notificacion de transicion a Candidate (no hubo self-quorum). El host
-            // raramente actua sobre Candidate, pero la simetria del API exige
-            // dispararlo: el subscriber puede usarlo para UI (esperando eleccion).
+            // Notification of the transition to Candidate (no self-quorum). The host
+            // rarely acts on Candidate, but the API symmetry requires
+            // firing it: the subscriber can use it for UI (awaiting election).
             RaiseRoleChanged(previousRole);
 
-            // Broadcast a todos los peers conectados. Fire-and-forget; los accepts
-            // (o rejects con term superior) llegaran via ListenCoordination.
+            // Broadcast to all connected peers. Fire-and-forget; the accepts
+            // (or rejects with a higher term) will arrive via ListenCoordination.
             foreach (var ch in peerChannels)
             {
                 if (!ch.IsConnected) continue;
@@ -1525,16 +1529,16 @@ namespace Choreography.StageManager
                 });
             }
 
-            // Fase (d): arranca round-timer. Si tras CastingElectionTimeout
-            // seguimos Candidate sin alcanzar quorum (split-vote, perdidas en la
-            // red, etc.), OnElectionRoundTimeout aborta este round, espera un
-            // backoff aleatorio y reintenta con term bumpeado.
+            // Phase (d): start the round-timer. If after CastingElectionTimeout
+            // we remain Candidate without reaching quorum (split-vote, network
+            // losses, etc.), OnElectionRoundTimeout aborts this round, waits a
+            // random backoff and retries with a bumped term.
             StartElectionRoundTimer(electionId);
         }
 
-        // Arranca el timer del round actual. Cancela el CTS previo (si quedo
-        // colgado por race con otro retry) y crea uno nuevo. Task ejecuta en
-        // background, no bloquea StartElection.
+        // Starts the timer for the current round. Cancels the previous CTS (if it was
+        // left dangling by a race with another retry) and creates a new one. The task runs in
+        // the background, it does not block StartElection.
         private void StartElectionRoundTimer(Guid forElectionId)
         {
             electionRoundCts?.Cancel();
@@ -1551,11 +1555,11 @@ namespace Choreography.StageManager
             OnElectionRoundTimeout(forElectionId);
         }
 
-        // Llamado por el round timer (o por test seam) cuando el round expira.
-        // Verifica que seguimos siendo Candidate de ESE round especifico antes
-        // de actuar — si entre tanto recibimos DirectorAnnounce o adoptamos
-        // term superior, currentElectionId apunta a otro round o es null, y
-        // este timeout debe ser silenciosamente ignorado.
+        // Called by the round timer (or by a test seam) when the round expires.
+        // Verifies that we are still Candidate of THAT specific round before
+        // acting — if in the meantime we received a DirectorAnnounce or adopted
+        // a higher term, currentElectionId points to another round or is null, and
+        // this timeout must be silently ignored.
         private void OnElectionRoundTimeout(Guid forElectionId)
         {
             bool shouldRetry;
@@ -1577,11 +1581,11 @@ namespace Choreography.StageManager
             if (!shouldRetry) return;
             RaiseRoleChanged(previousRole);
 
-            // Backoff aleatorio uniforme en [0, CastingElectionTimeout/2].
-            // El maximo asegura que dos candidatos con timeouts iguales tengan
-            // una probabilidad alta de divergir tras 1-2 rounds. Mas grande
-            // hace la convergencia mas lenta; mas chico aumenta el riesgo de
-            // re-split. Half es el sweet spot que el plan original cito (Raft
+            // Uniform random backoff in [0, CastingElectionTimeout/2].
+            // The maximum ensures that two candidates with equal timeouts have
+            // a high probability of diverging after 1-2 rounds. Larger
+            // makes convergence slower; smaller increases the risk of
+            // re-split. Half is the sweet spot the original plan cited (Raft
             // canon).
             int maxBackoffMs = Math.Max(1, (int)(config.CastingElectionTimeout.TotalMilliseconds / 2));
             int backoffMs = Random.Shared.Next(0, maxBackoffMs + 1);
@@ -1593,23 +1597,23 @@ namespace Choreography.StageManager
             {
                 try { await Task.Delay(backoffMs); }
                 catch { }
-                // Retry. StartElection re-guard: si entre tanto otro round
-                // arranco (term-adopt, force-promote), el role!=Follower y
-                // skip; sino bumpea term y arranca round nuevo.
+                // Retry. StartElection re-guard: if in the meantime another round
+                // started (term-adopt, force-promote), role!=Follower and it
+                // skips; otherwise it bumps the term and starts a new round.
                 StartElection();
             });
         }
 
-        // Transicion Candidate → Leader: quorum alcanzado en el round actual.
-        // Corre OnFirstHydration/OnHydrated (igual que PromoteToDirector), broadcastea
-        // DirectorAnnounce con term ganador, arranca heartbeat sender. Despues de
-        // esto, IsDirector == true y EnsureCanWrite permite escrituras.
+        // Candidate → Leader transition: quorum reached in the current round.
+        // Runs OnFirstHydration/OnHydrated (same as PromoteToDirector), broadcasts
+        // DirectorAnnounce with the winning term, starts the heartbeat sender. After
+        // this, IsDirector == true and EnsureCanWrite permits writes.
         private void BecomeDirector()
         {
             if (hook.IsNew) OnFirstHydration();
             OnHydrated();
 
-            // Round ganado — cancelar timer del round actual.
+            // Round won — cancel the current round timer.
             electionRoundCts?.Cancel();
 
             long myTerm;
@@ -1651,14 +1655,14 @@ namespace Choreography.StageManager
             StartHeartbeatSender();
         }
 
-        // Voter side. Reglas Raft con el ajuste term-first ya descrito:
+        // Voter side. Raft rules with the term-first adjustment already described:
         //   - propose.Term < myTerm           → reject(myTerm).
-        //   - propose.Term > myTerm           → adopt term + reset vote + evaluar.
+        //   - propose.Term > myTerm           → adopt term + reset vote + evaluate.
         //   - propose.Term == myTerm:
-        //       - ya vote a otro candidato     → reject.
-        //       - ya vote a este candidato     → re-accept idempotente.
-        //       - sin voto previo:
-        //           - proposer.EntryCount < mio → reject (Raft completeness).
+        //       - already voted for another candidate → reject.
+        //       - already voted for this candidate    → idempotent re-accept.
+        //       - no previous vote:
+        //           - proposer.EntryCount < mine → reject (Raft completeness).
         //           - else                       → accept + persist vote.
         private void HandleCastingPropose(CastingPropose propose, IStageChannel channel)
         {
@@ -1684,8 +1688,8 @@ namespace Choreography.StageManager
                     currentElectionId = null;
                     votesReceived = null;
                     if (wasLeader)
-                        // No limpiar directorId aun — el ganador del nuevo term enviara
-                        // DirectorAnnounce y ahi se actualiza.
+                        // Do not clear directorId yet — the winner of the new term will send
+                        // DirectorAnnounce and it is updated there.
                         ;
                 }
                 if (heartbeatSenderCts != null) heartbeatSenderCts.Cancel();
@@ -1693,13 +1697,13 @@ namespace Choreography.StageManager
                 if (roleChanged) RaiseRoleChanged(previousRole);
             }
 
-            // Tras posible adopt, propose.Term == termStore.CurrentTerm.
+            // After a possible adopt, propose.Term == termStore.CurrentTerm.
             var prevVote = termStore.VotedFor;
             if (prevVote.HasValue)
             {
                 if (prevVote.Value == propose.SenderId)
                 {
-                    // Re-vote idempotente.
+                    // Idempotent re-vote.
                     SendAccept(channel, termStore.CurrentTerm, propose.ElectionId);
                 }
                 else
@@ -1722,8 +1726,8 @@ namespace Choreography.StageManager
             SendAccept(channel, termStore.CurrentTerm, propose.ElectionId);
         }
 
-        // Candidate side, recibe un accept. Si el round/term coinciden con el
-        // actual, registra el voto; si llega a quorum, transiciona a Leader.
+        // Candidate side, receives an accept. If the round/term match the
+        // current one, it records the vote; if it reaches quorum, it transitions to Leader.
         private void HandleCastingAccept(CastingAccept accept)
         {
             bool reachedQuorum = false;
@@ -1745,11 +1749,11 @@ namespace Choreography.StageManager
             if (reachedQuorum) BecomeDirector();
         }
 
-        // Recibe un reject. Si el voter aprende que tenemos un term inferior
-        // (reject.Term > myTerm), adoptamos el term y pasamos a Follower (step
-        // down silencioso). Si term igual, fase d agregara retry con backoff;
-        // por ahora ignoramos el voto negativo (Candidate sigue esperando quorum
-        // o un term-update via reject/announce posterior).
+        // Receives a reject. If the voter learns that we have a lower term
+        // (reject.Term > myTerm), we adopt the term and move to Follower (silent step
+        // down). If the term is equal, phase d adds retry with backoff;
+        // for now we ignore the negative vote (the Candidate keeps awaiting quorum
+        // or a term-update via a later reject/announce).
         private void HandleCastingReject(CastingReject reject)
         {
             if (reject.Term <= termStore.CurrentTerm) return;
@@ -1791,29 +1795,29 @@ namespace Choreography.StageManager
         }
 
         // =====================================================================
-        //  Bug 18 — Failover replication gap: re-handshake in-band de data channels
+        //  Bug 18 — Failover replication gap: in-band re-handshake of data channels
         //
-        //  Tras una rotacion de roles el bus de Coordination sobrevive pero los
-        //  data channels (Replication/Command) quedan muertos: el nuevo Director no
-        //  tiene CastLink hacia el nuevo Cast y el nuevo Cast no tiene DirectorLink
-        //  hacia el nuevo Director. En produccion cada Stage corre en un proceso
-        //  distinto, asi que el host NO puede repetir el pairing out-of-band (no
-        //  tiene como cruzar las nuevas ConnectionInvitation entre procesos).
+        //  After a role rotation the Coordination bus survives but the
+        //  data channels (Replication/Command) are dead: the new Director has no
+        //  CastLink toward the new Cast and the new Cast has no DirectorLink
+        //  toward the new Director. In production each Stage runs in a separate
+        //  process, so the host CANNOT repeat the out-of-band pairing (it has
+        //  no way to cross the new ConnectionInvitation between processes).
         //
-        //  La reconexion viaja in-band sobre el unico canal vivo (Coordination):
-        //  el Cast pide (RehandshakeRequest con su lastEntryId), el Director crea
-        //  las invitaciones y responde con sus Address (RehandshakeProposal), el
-        //  Cast las acepta y conecta. El Director cierra con un catch-up desde el
-        //  lastEntryId del Cast — asi la entry que el nuevo Director escriba durante
-        //  la ventana de reconexion no se pierde.
+        //  The reconnection travels in-band over the only live channel (Coordination):
+        //  the Cast asks (RehandshakeRequest with its lastEntryId), the Director creates
+        //  the invitations and responds with their Address values (RehandshakeProposal), the
+        //  Cast accepts and connects. The Director closes with a catch-up from the
+        //  Cast's lastEntryId — so the entry the new Director writes during
+        //  the reconnection window is not lost.
         // =====================================================================
 
-        // Disparado por el Cast cuando adopta un Director. Solo pide re-handshake si
-        // esto es una ROTACION: ya conociamos un Director distinto (o eramos nosotros
-        // el Director). El primer aprendizaje (oldDirector == null) es el join inicial
-        // y se cablea out-of-band por contrato de pairing — no auto-rehandshake ahi,
-        // para no duplicar el ConnectToDirector que el host hara. Tampoco si el nuevo
-        // Director soy yo (soy Director, no Cast).
+        // Fired by the Cast when it adopts a Director. Only requests re-handshake if
+        // this is a ROTATION: we already knew a different Director (or we were
+        // the Director ourselves). The first learning (oldDirector == null) is the initial
+        // join and is wired out-of-band by the pairing contract — no auto-rehandshake there,
+        // to avoid duplicating the ConnectToDirector the host will do. Nor if the new
+        // Director is me (I am Director, not Cast).
         private void RequestRehandshakeIfRotated(PerformerId? oldDirector, PerformerId newDirector)
         {
             if (newDirector == Id) return;
@@ -1835,11 +1839,11 @@ namespace Choreography.StageManager
             _ = Task.Run(async () => { try { await coordChannel.SendAsync(req); } catch { } });
         }
 
-        // Director side: el Cast pide reconexion. Creo invitaciones Replication+Command,
-        // respondo con sus Address sobre el mismo canal de Coordination, espero a que
-        // el Cast las acepte, hago AcceptCastConnection y un catch-up desde el
-        // lastEntryId del Cast. Todo en un Task aparte: NO bloquear el listener de
-        // Coordination (heartbeats, announces, votos siguen fluyendo).
+        // Director side: the Cast requests reconnection. I create Replication+Command
+        // invitations, respond with their Address values over the same Coordination channel,
+        // wait for the Cast to accept them, do AcceptCastConnection and a catch-up from the
+        // Cast's lastEntryId. All in a separate Task: do NOT block the Coordination
+        // listener (heartbeats, announces, votes keep flowing).
         private void HandleRehandshakeRequest(RehandshakeRequest req, IStageChannel channel)
         {
             if (!IsDirector)
@@ -1869,8 +1873,8 @@ namespace Choreography.StageManager
                     var dirCmd = await waitCmd;
                     await AcceptCastConnection(castId, dirRep, dirCmd);
 
-                    // Catch-up desde el lastEntryId del Cast. Cubre las entries escritas
-                    // por este Director entre la rotacion y el cierre del re-handshake.
+                    // Catch-up from the Cast's lastEntryId. Covers the entries written
+                    // by this Director between the rotation and the close of the re-handshake.
                     await SendCatchUpAsync(castId, castLast, cts.Token);
 
                     hook.Logger.Debug(
@@ -1883,9 +1887,9 @@ namespace Choreography.StageManager
             });
         }
 
-        // Cast side: el Director respondio con las Address de las nuevas invitaciones.
-        // Las acepto y conecto. ConnectionInvitation es reconstruible por completo
-        // desde (InviterId, Purpose, Address) — InviterId es el SenderId del proposal.
+        // Cast side: the Director responded with the Address values of the new invitations.
+        // I accept and connect. ConnectionInvitation is fully reconstructible
+        // from (InviterId, Purpose, Address) — InviterId is the proposal's SenderId.
         private void HandleRehandshakeProposal(RehandshakeProposal proposal)
         {
             var dir = proposal.SenderId;
@@ -1920,10 +1924,10 @@ namespace Choreography.StageManager
         // =====================================================================
         //  Internal test seams (InternalsVisibleTo UnitTestChoreography)
         //
-        //  Estos miembros existen para que los tests del Casting election protocol
-        //  puedan (1) acortar los timeouts a escala de ms, (2) leer el estado
-        //  observable del watchdog, y (3) simular "Director silent sin StepDown"
-        //  cancelando el sender sin tocar coordination channels.
+        //  These members exist so that the Casting election protocol tests
+        //  can (1) shorten the timeouts to ms scale, (2) read the observable
+        //  state of the watchdog, and (3) simulate "Director silent without StepDown"
+        //  by cancelling the sender without touching coordination channels.
         // =====================================================================
 
         internal StageConfiguration ConfigurationForTesting => config;
@@ -1934,25 +1938,25 @@ namespace Choreography.StageManager
         internal void StopHeartbeatSenderForTesting()
             => heartbeatSenderCts?.Cancel();
 
-        // Bug 16 diagnostics — los tests aserta que el loop esta vivo y emitiendo
-        // sin depender del transport (que en device InMemory != PortableHttps).
+        // Bug 16 diagnostics — the tests assert that the loop is alive and emitting
+        // without depending on the transport (where InMemory != PortableHttps).
         internal long HeartbeatsEmittedCountForTesting => System.Threading.Interlocked.Read(ref heartbeatsEmittedCount);
         internal bool HeartbeatSenderRunningForTesting => heartbeatSenderRunning;
 
-        // Bug 17 diagnostics — counter de CueEvent silently-dropped por colision.
-        // Tests asertan que el counter sube cuando hay colision pre-existente, y
-        // se queda en 0 en el path feliz.
+        // Bug 17 diagnostics — counter of CueEvent silently dropped due to a collision.
+        // Tests assert that the counter rises when there is a pre-existing collision, and
+        // stays at 0 on the happy path.
         internal long ReplicationDroppedOlderCountForTesting => System.Threading.Interlocked.Read(ref replicationDroppedOlderCount);
 
-        // Snapshot del state machine de eleccion para tests E2E.
+        // Snapshot of the election state machine for E2E tests.
         internal long CurrentTermForTesting => termStore?.CurrentTerm ?? 0L;
         internal PerformerId? VotedForForTesting => termStore?.VotedFor;
         internal string RoleForTesting { get { lock (electionLock) return role.ToString(); } }
-        // Fase (d) — instrumentacion para tests del backoff path.
+        // Phase (d) — instrumentation for tests of the backoff path.
         internal int ElectionRoundTimeoutCountForTesting => electionRoundTimeoutCount;
-        // Disparar eleccion explicitamente desde tests sin pasar por watchdog/timeout.
-        // El guard de StartElection (isolated, role!=Follower) sigue activo, asi que
-        // dos llamadas paralelas con el mismo stage no producen 2 elecciones.
+        // Trigger an election explicitly from tests without going through watchdog/timeout.
+        // The StartElection guard (isolated, role!=Follower) stays active, so
+        // two parallel calls on the same stage do not produce 2 elections.
         internal void StartElectionForTesting() => StartElection();
 
         public async ValueTask DisposeAsync()
@@ -2009,13 +2013,13 @@ namespace Choreography.StageManager
         // would head-of-line block other Casts. Each link has its own queue
         // and worker, so a stall on one Cast does not affect the others.
         //
-        // Fase 5 — generalizado a StageMessage para permitir tambien Playbill
-        // cues (PlaybillSchemaCue / PlaybillCue) por el mismo canal y con la
-        // misma garantia de FIFO. La ordenacion journal-vs-playbill se preserva
-        // dentro del link: el writer thread del Director invoca primero el
-        // callback del journal y luego el callback del playbill (orden de
-        // Performance.PerformCommand), asi que los cues entran al queue en ese
-        // orden.
+        // Phase 5 — generalized to StageMessage to also allow Playbill
+        // cues (PlaybillSchemaCue / PlaybillCue) over the same channel and with the
+        // same FIFO guarantee. The journal-vs-playbill ordering is preserved
+        // within the link: the Director's writer thread invokes the journal
+        // callback first and then the playbill callback (Performance.PerformCommand
+        // order), so the cues enter the queue in that
+        // order.
         private class CastLink : IAsyncDisposable
         {
             public IStageChannel Replication;
@@ -2044,8 +2048,8 @@ namespace Choreography.StageManager
             }
 
             // Non-blocking enqueue for the writer thread. Returns false only if
-            // the queue has been completed (the link is shutting down). Acepta
-            // cualquier StageMessage (CueEvent, PlaybillSchemaCue, PlaybillCue).
+            // the queue has been completed (the link is shutting down). Accepts
+            // any StageMessage (CueEvent, PlaybillSchemaCue, PlaybillCue).
             public bool EnqueueReplication(StageMessage msg) => outboundQueue.Writer.TryWrite(msg);
 
             // Async enqueue for callers that want backpressure-friendly

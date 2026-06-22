@@ -4,10 +4,10 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Cola que muestra los JoinRequest pendientes en la UI de ContactSecret y devuelve la
-    // decision del operador (D4: approval manual siempre en v1). El handoff real es
-    // una cola persistida + UI web + signalR/websocket para que el operador vea los
-    // requests entrar; aqui solo nos importa el contrato.
+    // Queue that shows the pending JoinRequests in the ContactSecret UI and returns the
+    // operator's decision (D4: manual approval always in v1). The real handoff is
+    // a persisted queue + web UI + signalR/websocket so the operator sees the
+    // requests come in; here we only care about the contract.
     public interface IUsherApprovalQueue
     {
         Task<UsherApprovalDecision> RequestApprovalAsync(

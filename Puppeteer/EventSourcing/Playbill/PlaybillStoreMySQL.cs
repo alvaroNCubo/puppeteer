@@ -6,15 +6,15 @@ using System.IO;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Backend MySQL del Playbill. Vive en la misma DB que el journal del actor
-	// (one-actor-per-database). Auto-provision: el constructor crea las dos
-	// tablas (PlaybillSchemas, PlaybillRecords) via CREATE TABLE IF NOT EXISTS.
+	// MySQL backend of the Playbill. Lives in the same DB as the actor's journal
+	// (one-actor-per-database). Auto-provision: the constructor creates the two
+	// tables (PlaybillSchemas, PlaybillRecords) via CREATE TABLE IF NOT EXISTS.
 	//
-	// Distill via rebuild-via-shadow-swap: filtra los records que apuntan a
-	// EntryIds que ya no existen en el journal `{ActorName}` y atomicamente
-	// reemplaza la tabla. La consulta JOIN con la tabla del actor materializa
-	// la "consulta al journal" descrita en PlaybillStore — no se mezcla con la
-	// estrategia del Diary; cada storage Distill el suyo.
+	// Distill via rebuild-via-shadow-swap: filters out records that point to
+	// EntryIds no longer existing in the `{ActorName}` journal and atomically
+	// replaces the table. The JOIN query against the actor's table materializes
+	// the "journal query" described in PlaybillStore — it does not mix with the
+	// Diary's strategy; each storage Distills its own.
 	internal sealed class PlaybillStoreMySQL : PlaybillStore
 	{
 		private const string SCHEMAS_TABLE = "PlaybillSchemas";
@@ -209,7 +209,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				}
 				catch (MySqlException e)
 				{
-					// Duplicate key (PK violation) — segunda escritura del mismo EntryId.
+					// Duplicate key (PK violation) — second write of the same EntryId.
 					if (e.Number == 1062)
 					{
 						throw new LanguageException($"Playbill record for EntryId {entryId} already exists (expected at most one per entry).");
@@ -327,11 +327,11 @@ namespace Puppeteer.EventSourcing.Playbill
 			}
 		}
 
-		// Rebuild-via-shadow-swap: clona la tabla con la estructura completa
-		// (incluyendo indices) via CREATE TABLE LIKE, inserta solo records cuyo
-		// EntryId siga vivo en el journal del actor, y reemplaza atomicamente.
-		// RENAME TABLE multi-step en MySQL es atomico — no necesita transaccion
-		// explicita; ningun cliente ve un estado intermedio.
+		// Rebuild-via-shadow-swap: clones the table with the full structure
+		// (including indexes) via CREATE TABLE LIKE, inserts only records whose
+		// EntryId is still alive in the actor's journal, and replaces atomically.
+		// A multi-step RENAME TABLE in MySQL is atomic — it needs no explicit
+		// transaction; no client sees an intermediate state.
 		internal override void Distill()
 		{
 			string newTable = RECORDS_TABLE + "_new";
@@ -343,8 +343,8 @@ namespace Puppeteer.EventSourcing.Playbill
 				{
 					connection.Open();
 
-					// Limpieza defensiva por si un Distill previo aborto a media
-					// faena y dejo tablas sombra.
+					// Defensive cleanup in case a previous Distill aborted mid-way
+					// and left shadow tables behind.
 					ExecuteNonQuery(connection, $"DROP TABLE IF EXISTS `{newTable}`");
 					ExecuteNonQuery(connection, $"DROP TABLE IF EXISTS `{oldTable}`");
 

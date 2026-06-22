@@ -2,14 +2,14 @@ using System;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Schema tipado de un Playbill. Internal — el dev no construye PlaybillSchema
-	// directamente; lo declara via Performance.Playbill(name, s => s.Required<T>(...))
-	// y el builder produce el declarations text canonico (mismo formato que V2
-	// actions usan en sus define statements).
+	// Typed schema of a Playbill. Internal — the dev does not construct PlaybillSchema
+	// directly; they declare it via Performance.Playbill(name, s => s.Required<T>(...))
+	// and the builder produces the canonical declarations text (same format that V2
+	// actions use in their define statements).
 	//
-	// Wraps una instancia de Parameters parseada desde el declarations text. Sirve
-	// como template para validacion al setear values via WithPlaybill — verifica
-	// que cada field setteado existe en el schema y que el tipo coincide.
+	// Wraps a Parameters instance parsed from the declarations text. Serves
+	// as a template for validation when setting values via WithPlaybill — verifies
+	// that each field set exists in the schema and that the type matches.
 	internal sealed class PlaybillSchema
 	{
 		internal string Name { get; }

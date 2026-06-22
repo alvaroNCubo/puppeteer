@@ -9,9 +9,9 @@ namespace Puppeteer.EventSourcing.DB
 	{
 		private readonly HashSet<long> elidedEvents = new HashSet<long>();
 		private readonly Dictionary<int, HashSet<long>> eventsByReaction = new Dictionary<int, HashSet<long>>();
-		// Materialize v2 / Fase 3: per-marker (reactionId, timestamp) para soportar
-		// wire verb (d) DameElidedRange con orden temporal. Re-mark del mismo EntryId
-		// pisa el valor (equivalente a UPDATE en SQL).
+		// Materialize v2 / Fase 3: per-marker (reactionId, timestamp) to support
+		// wire verb (d) DameElidedRange with temporal ordering. Re-marking the same EntryId
+		// overwrites the value (equivalent to an UPDATE in SQL).
 		private readonly Dictionary<long, (int ReactionId, DateTime Timestamp)> markerMetadata
 			= new Dictionary<long, (int, DateTime)>();
 		private readonly object lockObject = new object();
@@ -54,8 +54,8 @@ namespace Puppeteer.EventSourcing.DB
 					}
 					eventsByReaction[reactionId].Add(dairyId);
 
-					// Materialize v2 / Fase 3: registrar (reactionId, timestamp) para
-					// reconstruir orden de marcaje en ReadElisionMarkersInRange.
+					// Materialize v2 / Fase 3: record (reactionId, timestamp) to
+					// reconstruct the marking order in ReadElisionMarkersInRange.
 					markerMetadata[dairyId] = (reactionId, timestamp);
 				}
 			}
@@ -116,8 +116,8 @@ namespace Puppeteer.EventSourcing.DB
 			return Task.CompletedTask;
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange. Ordenado por
-		// (Timestamp, EntryId) — el orden de marcaje temporal.
+		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange. Ordered by
+		// (Timestamp, EntryId) — the temporal marking order.
 		protected internal override void ReadElisionMarkersInRange(long fromDairyId, long toDairyId, List<MaterializationElisionMarker> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -164,11 +164,11 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Usado por Distill: una vez que los records elididos se materializaron
-		// fisicamente (fuera del journal), sus EntryIds dejan de ser "logicamente
-		// elididos" para volverse "no existentes". Mantenerlos en elidedEvents seria
-		// inocuo funcionalmente pero crece sin tope. Distill los pasa por aqui para
-		// cleanup.
+		// Used by Distill: once the elided records have been physically
+		// materialized (outside the journal), their EntryIds stop being "logically
+		// elided" and become "non-existent". Keeping them in elidedEvents would be
+		// functionally harmless but grows without bound. Distill routes them through
+		// here for cleanup.
 		internal void RemoveElidedIds(IEnumerable<long> dairyIds)
 		{
 			ArgumentNullException.ThrowIfNull(dairyIds);

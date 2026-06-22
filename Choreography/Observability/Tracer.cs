@@ -4,11 +4,11 @@ namespace Choreography.Observability
 {
     public abstract class Tracer
     {
-        // Cuando es null, Flow se resuelve dinamicamente desde TracerFactory.Current
-        // — esto permite que cambios al adapter (ej: en tests aislados con un
-        // ActivitySource por test) tomen efecto en singletons existentes.
-        // Cuando es no-null (ctor internal con InternalsVisibleTo), el flow queda
-        // congelado — util para tests con FakeFlow inyectado.
+        // When null, Flow is resolved dynamically from TracerFactory.Current
+        // — this allows changes to the adapter (e.g. in isolated tests with an
+        // ActivitySource per test) to take effect on existing singletons.
+        // When non-null (internal ctor with InternalsVisibleTo), the flow is
+        // frozen — useful for tests with an injected FakeFlow.
         private readonly IFlowTrace explicitFlow;
 
         protected Tracer()

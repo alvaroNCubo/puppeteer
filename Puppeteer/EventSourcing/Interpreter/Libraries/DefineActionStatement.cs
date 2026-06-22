@@ -16,7 +16,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	//
 	// The DSL accepts both `name:type` and `@name:type` at parse time (the Lexer drops
 	// '@' as a legibility-only alias); the canonical text on
-	// the journal never contains '@'. Decision (A) firmada al cierre de Fase 1 (2026-05-09).
+	// the journal never contains '@'. Decision (A) signed at the close of Phase 1 (2026-05-09).
 	//
 	// The shape lives in the journal as a parseable sentence so replay can rebuild
 	// the actor's vocabulary by running statements in order — no lateral _ACTION
@@ -52,7 +52,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		// Canonical parameter declaration text exactly as it should appear inside the
 		// parens of `define action <id> (...)`. Format: `name:type` separated by `, `
 		// (no '@' prefix — see class-level docs for option (A) sign-off rationale).
-		// Phase 1 firmado: NO normalization of parameter order — the order is
+		// Phase 1 signed: NO normalization of parameter order — the order is
 		// semantically significant because callsite arguments are positionally bound.
 		// Two declarations with the same set in different orders are different actions
 		// by design.

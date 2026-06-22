@@ -6,12 +6,12 @@ using Puppeteer;
 
 namespace Choreography.Transport
 {
-    // Fase 5 — Playbill cross-pod replication.
+    // Phase 5 — Playbill cross-pod replication.
     //
-    // Paralelo a CueEvent (que replica un journal record). Director broadcastea
-    // un PlaybillSchemaCue cuando se registra un schema nuevo o se re-registra
-    // un schema existente (idempotent), y un PlaybillCue cuando se persiste un
-    // nuevo PlaybillRecord. Cast aplica al PlaybillStore local.
+    // Parallel to CueEvent (which replicates a journal record). The Director broadcasts
+    // a PlaybillSchemaCue when a new schema is registered or an existing schema is
+    // re-registered (idempotent), and a PlaybillCue when a new PlaybillRecord is
+    // persisted. The Cast applies it to the local PlaybillStore.
 
     public sealed class PlaybillSchemaCue : StageMessage
     {

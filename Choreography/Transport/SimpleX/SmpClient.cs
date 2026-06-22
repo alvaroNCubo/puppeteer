@@ -36,11 +36,11 @@ namespace Choreography.Transport.SimpleX
         public event Action OnDisconnected;
         internal IPuppeteerLogger Logger => _logger;
 
-        // knownKeyHash es el SHA-256 del idCert del server (TOFU). Lo conoce el cliente
-        // a-priori: para el creator viene del config del Stage; para el joiner viene
-        // del invitation URI smp://HASH@host:port/... extraido por SmpQueue.FromInvitationUri.
-        // El protocolo SMP cierra la conexion si el cliente no lo envia o no matchea
-        // el del server.
+        // knownKeyHash is the SHA-256 of the server idCert (TOFU). The client knows it
+        // a-priori: for the creator it comes from the Stage config; for the joiner it comes
+        // from the invitation URI smp://HASH@host:port/... extracted by SmpQueue.FromInvitationUri.
+        // The SMP protocol closes the connection if the client does not send it or it does not match
+        // the server's.
         public SmpClient(string host, int port, byte[] knownKeyHash, IPuppeteerLogger logger = null)
         {
             if (string.IsNullOrWhiteSpace(host)) throw new ArgumentNullException(nameof(host));
@@ -52,9 +52,9 @@ namespace Choreography.Transport.SimpleX
             _logger = logger ?? new ConsoleLogger();
         }
 
-        // Test-only: cliente "offline" (sin TCP/TLS) que reporta IsConnected=true y resuelve
-        // SubscribeAsync sin tocar la red. Permite ejercitar el lifecycle del ReceivePump del
-        // SimplexChannel (regresion 21) de forma deterministica y en Windows, sin un SMP server.
+        // Test-only: "offline" client (no TCP/TLS) that reports IsConnected=true and resolves
+        // SubscribeAsync without touching the network. Allows exercising the ReceivePump lifecycle of the
+        // SimplexChannel (regression 21) deterministically and on Windows, without an SMP server.
         internal SmpClient(IPuppeteerLogger logger, bool offlineForTesting)
         {
             if (!offlineForTesting)
@@ -72,20 +72,20 @@ namespace Choreography.Transport.SimpleX
             _tcp = new TcpClient();
             await _tcp.ConnectAsync(_host, _port, ct);
 
-            // Fase 4d: usamos TlsAdapterStream que envuelve BC.Tls TlsClientProtocol
-            // en NON-BLOCKING mode. La adaptacion permite read+write concurrentes sin
-            // deadlock (Bug A) usando un Pipe interno para plaintext y un reader task
-            // dedicado al TCP socket. Ver TlsAdapterStream.cs.
+            // Phase 4d: we use TlsAdapterStream that wraps BC.Tls TlsClientProtocol
+            // in NON-BLOCKING mode. The adaptation allows concurrent read+write without
+            // deadlock (Bug A) using an internal Pipe for plaintext and a reader task
+            // dedicated to the TCP socket. See TlsAdapterStream.cs.
             //
-            // Cipher: TLS 1.3 + CHACHA20-POLY1305 + ALPN smp/1 (igual que antes).
+            // Cipher: TLS 1.3 + CHACHA20-POLY1305 + ALPN smp/1 (same as before).
             var crypto = new BcTlsCrypto(new SecureRandom());
             var client = new SmpTlsClient(crypto, _logger);
             _tlsAdapter = new TlsAdapterStream(_tcp.GetStream());
             await _tlsAdapter.PerformHandshakeAsync(client, ct);
             _tlsStream = _tlsAdapter;
 
-            // El keyHash se conoce a-priori (TOFU); el server lo verifica contra su
-            // propio idCert. Si no matchea, server cierra la conexion ~400ms despues.
+            // The keyHash is known a-priori (TOFU); the server verifies it against its
+            // own idCert. If it does not match, the server closes the connection ~400ms later.
             var handshake = await SmpHandshake.PerformAsync(_tlsStream, _knownKeyHash, _logger, ct);
             _negotiatedVersion = handshake.NegotiatedVersion;
             _sessionId = handshake.SessionId;
@@ -96,10 +96,10 @@ namespace Choreography.Transport.SimpleX
             _receivePumpTask = Task.Run(() => ReceivePumpAsync(_pumpCts.Token));
         }
 
-        // BC.Tls TlsClient para SMP: TLS 1.3 con CHACHA20-POLY1305 y ALPN smp/1.
-        // Sin ALPN el server publico devuelve hello degradado (37 bytes vs 1114 con cert chain).
-        // SimpleX usa certs self-signed a nivel TLS; el anclaje real es el keyHash SMP-layer
-        // que se valida en SmpHandshake. Aqui simplemente trust-all en TLS.
+        // BC.Tls TlsClient for SMP: TLS 1.3 with CHACHA20-POLY1305 and ALPN smp/1.
+        // Without ALPN the public server returns a degraded hello (37 bytes vs 1114 with cert chain).
+        // SimpleX uses self-signed certs at the TLS level; the real anchor is the SMP-layer keyHash
+        // validated in SmpHandshake. Here we simply trust-all at TLS.
         private sealed class SmpTlsClient : DefaultTlsClient, ISmpTlsClient
         {
             private readonly IPuppeteerLogger _logger;
@@ -134,10 +134,10 @@ namespace Choreography.Transport.SimpleX
 
             public override TlsAuthentication GetAuthentication() => new TrustAllAuthentication();
 
-            // Diagnostic hook: TLS alerts del server (close_notify, decode_error,
-            // internal_error, etc). Util para debug; BC.Tls no las surface en exception
-            // hasta el siguiente I/O. Solo log incoming (server-initiated); outgoing
-            // alerts (que nosotros raise al hacer Close) son ruido.
+            // Diagnostic hook: TLS alerts from the server (close_notify, decode_error,
+            // internal_error, etc). Useful for debug; BC.Tls does not surface them in an exception
+            // until the next I/O. Only log incoming (server-initiated); outgoing
+            // alerts (that we raise on Close) are noise.
             public override void NotifyAlertReceived(short alertLevel, short alertDescription)
             {
                 base.NotifyAlertReceived(alertLevel, alertDescription);
@@ -187,10 +187,10 @@ namespace Choreography.Transport.SimpleX
                 queue.State = SmpQueueState.Active;
                 queue.Role = SmpQueueRole.Recipient;
 
-                // NEW v6 usa subMode='S' (SMSubscribe): el server empieza a entregar MSGs
-                // inmediatamente sin esperar un SUB explicito. Registramos el Channel local
-                // ya mismo para evitar la race window donde un MSG temprano se droppea
-                // porque la entrada del diccionario aun no existia.
+                // NEW v6 uses subMode='S' (SMSubscribe): the server starts delivering MSGs
+                // immediately without waiting for an explicit SUB. We register the local Channel
+                // right now to avoid the race window where an early MSG is dropped
+                // because the dictionary entry did not yet exist.
                 string queueKey = SmpCrypto.ToBase64Url(ids.RecipientId);
                 _queueSubscriptions.GetOrAdd(queueKey, _ => Channel.CreateUnbounded<SmpMsg>());
 
@@ -203,9 +203,9 @@ namespace Choreography.Transport.SimpleX
             throw new InvalidOperationException($"Unexpected response to NEW: {response.GetType().Name}");
         }
 
-        // SecureQueue (rol Recipient): registra el sender's signing pub key en la queue
-        // identificada por rcvId. El recipient debe haber obtenido senderSignPubKey
-        // out-of-band (e.g. del envelope de invitation reverso).
+        // SecureQueue (Recipient role): registers the sender's signing pub key in the queue
+        // identified by rcvId. The recipient must have obtained senderSignPubKey
+        // out-of-band (e.g. from the reverse invitation envelope).
         public async Task SecureQueueAsync(SmpQueue queue, byte[] senderSignPubKey, CancellationToken ct = default)
         {
             if (queue == null) throw new ArgumentNullException(nameof(queue));
@@ -238,7 +238,7 @@ namespace Choreography.Transport.SimpleX
             string queueKey = SmpCrypto.ToBase64Url(queue.RecipientId);
             _queueSubscriptions.GetOrAdd(queueKey, _ => Channel.CreateUnbounded<SmpMsg>());
 
-            if (_offline) return; // test-only: subscription registrada, sin SUB de red
+            if (_offline) return; // test-only: subscription registered, without a network SUB
 
             byte[] corrId = SmpCrypto.RandomBytes(SmpCommandBuilder.CorrIdSize);
             byte[] payload = SmpCommandBuilder.BuildSub(_sessionId, corrId, queue.RecipientId,
@@ -284,16 +284,16 @@ namespace Choreography.Transport.SimpleX
                 throw new InvalidOperationException($"SMP SEND failed: {err.ErrorType}");
         }
 
-        // SEND unsigned: usado en handshake bidireccional para los envelopes de bootstrap
-        // antes de que la queue tenga KEY. El sender es anonimo (firma vacia) y el payload
-        // viaja plaintext sin crypto_box.
+        // SEND unsigned: used in the bidirectional handshake for the bootstrap envelopes
+        // before the queue has KEY. The sender is anonymous (empty signature) and the payload
+        // travels plaintext without crypto_box.
         //
-        // Razon del plaintext: el chicken-and-egg de crypto_box durante el handshake. El
-        // receptor necesita la senderDhPub del emisor para decryptar, pero la senderDhPub
-        // es PRECISAMENTE lo que el handshake transporta. Los envelopes solo llevan pubkeys
-        // publicas + queue URIs publicas, por lo que mandarlos plaintext no compromete
-        // secrecy. Una vez completado el handshake, los SENDs subsiguientes usan
-        // SendMessageAsync con crypto_box completo.
+        // Reason for plaintext: the crypto_box chicken-and-egg during the handshake. The
+        // receiver needs the sender's senderDhPub to decrypt, but the senderDhPub
+        // is PRECISELY what the handshake transports. The envelopes only carry public
+        // pubkeys + public queue URIs, so sending them plaintext does not compromise
+        // secrecy. Once the handshake completes, subsequent SENDs use
+        // SendMessageAsync with full crypto_box.
         public async Task SendMessageUnsignedAsync(SmpQueue queue, byte[] payload, CancellationToken ct = default)
         {
             if (queue == null) throw new ArgumentNullException(nameof(queue));
@@ -334,9 +334,9 @@ namespace Choreography.Transport.SimpleX
             throw new InvalidOperationException($"No subscription for queue {key}");
         }
 
-        // Test-only: completa la subscription como lo haria un disconnect real del transport.
-        // Usado por la regresion 21 para probar que el ReceivePump sigue REALMENTE leyendo la
-        // subscription tras cancelar el token del connect (sale limpio al completarla).
+        // Test-only: completes the subscription as a real transport disconnect would.
+        // Used by regression 21 to prove that the ReceivePump keeps REALLY reading the
+        // subscription after cancelling the connect token (it exits cleanly on completion).
         internal void CompleteSubscriptionForTesting(byte[] recipientId)
         {
             string key = SmpCrypto.ToBase64Url(recipientId);
@@ -352,24 +352,24 @@ namespace Choreography.Transport.SimpleX
             var tcs = new TaskCompletionSource<SmpResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pending[corrKey] = tcs;
 
-            // Timeout cubre TODA la operacion (write + wait response). Antes solo cubria
-            // el wait, asi que un write que se atoraba colgaba infinito. Como BC.Tls no
-            // respeta cooperativamente el cancellation token cuando el TLS quedo en estado
-            // "closed esperando ACK" (caso del server que cerro silenciosamente post-handshake),
-            // forzamos cierre del protocolo TLS al expirar el timeout — eso despierta el write.
+            // Timeout covers the WHOLE operation (write + wait response). Before it only covered
+            // the wait, so a write that got stuck hung forever. Since BC.Tls does not
+            // cooperatively respect the cancellation token when the TLS is left in a
+            // "closed waiting for ACK" state (the case of a server that closed silently post-handshake),
+            // we force-close the TLS protocol when the timeout expires — that wakes up the write.
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
             using var reg = timeoutCts.Token.Register(() =>
             {
                 tcs.TrySetCanceled();
-                try { _tlsAdapter?.Dispose(); } catch { /* forzamos despertar de I/O bloqueada */ }
+                try { _tlsAdapter?.Dispose(); } catch { /* force wake-up of blocked I/O */ }
             });
 
             try
             {
-                // Fase 4d: write goes through TlsAdapterStream (non-blocking BC.Tls
-                // bajo el cap), receive es pump-routed via _pending por corrId.
-                // El TlsAdapterStream coordina concurrent read+write sin deadlock.
+                // Phase 4d: write goes through TlsAdapterStream (non-blocking BC.Tls
+                // under the cap), receive is pump-routed via _pending by corrId.
+                // The TlsAdapterStream coordinates concurrent read+write without deadlock.
                 await _writeLock.WaitAsync(timeoutCts.Token);
                 try
                 {
@@ -394,10 +394,10 @@ namespace Choreography.Transport.SimpleX
                 while (!ct.IsCancellationRequested && IsConnected)
                 {
                     byte[] payload = await SmpBlock.ReadBlockAsync(_tlsStream, ct);
-                    // El server puede batchear varias transmissions en un mismo block
-                    // (e.g. OK de un ACK previo + MSG server-push pendiente). Hay que
-                    // rutear TODAS, no solo la primera. Ver SmpResponseParser.ParseAll
-                    // para el detalle del bug historico (#2).
+                    // The server may batch several transmissions in the same block
+                    // (e.g. OK from a previous ACK + pending server-push MSG). We must
+                    // route ALL of them, not just the first. See SmpResponseParser.ParseAll
+                    // for the detail of the historical bug (#2).
                     foreach (var response in SmpResponseParser.ParseAll(payload))
                     {
                         await RouteResponseAsync(response, ct);
@@ -418,34 +418,34 @@ namespace Choreography.Transport.SimpleX
 
         private async Task RouteResponseAsync(SmpResponse response, CancellationToken ct)
         {
-            // Bug #2-CATCHUP fix (2026-05-22): el SMP server "piggyback"-ea
-            // deliveries de MSG sobre la response del comando que las gatilla
-            // (SUB o ACK). Es decir, en lugar de devolver SmpOk al ACK y mandar
-            // el siguiente MSG aparte, devuelve UN solo SmpMsg con el corrId
-            // del ACK que entrega el OK implicito + el siguiente MSG. Ver
+            // Bug #2-CATCHUP fix (2026-05-22): the SMP server "piggyback"s
+            // MSG deliveries on the response of the command that triggers them
+            // (SUB or ACK). That is, instead of returning SmpOk to the ACK and sending
+            // the next MSG separately, it returns ONE single SmpMsg with the corrId
+            // of the ACK that delivers the implicit OK + the next MSG. See
             // simplexmq Server.hs subscribeQueue / acknowledgeMessage:
             //   pure $ case mNextMsg of
-            //     Just msg -> Msg msg   -- piggyback en response del command
+            //     Just msg -> Msg msg   -- piggyback on the command response
             //     Nothing  -> Ok
             //
-            // Bug previo (master): RouteResponseAsync ruteaba SmpMsg a `_pending`
-            // por corrId si matcheaba. El TCS del ACK recibia el SmpMsg, pero
-            // AcknowledgeAsync ignora SmpMsg (espera SmpOk/SmpErr). La queue
-            // subscription nunca veia el MSG → la entrada se perdia y el server
-            // dejaba de delivery-ar (gated por ACK). Sintoma: en catch-up batch,
-            // Cast aplicaba 1-2 entries de N esperadas, despues silencio total.
+            // Previous bug (master): RouteResponseAsync routed SmpMsg to `_pending`
+            // by corrId if it matched. The ACK's TCS received the SmpMsg, but
+            // AcknowledgeAsync ignores SmpMsg (it expects SmpOk/SmpErr). The queue
+            // subscription never saw the MSG → the entry was lost and the server
+            // stopped delivering (gated by ACK). Symptom: in catch-up batch,
+            // Cast applied 1-2 entries out of N expected, then total silence.
             //
-            // Fix: si la response es SmpMsg, SIEMPRE rutearla a la subscription
-            // por queueId. Si encima tiene corrId pendiente, tambien despertamos
-            // al waiter (AcknowledgeAsync) para que el comando complete.
+            // Fix: if the response is SmpMsg, ALWAYS route it to the subscription
+            // by queueId. If it additionally has a pending corrId, we also wake up
+            // the waiter (AcknowledgeAsync) so the command completes.
             if (response is SmpMsg msg && response.QueueId != null)
             {
                 string queueKey = SmpCrypto.ToBase64Url(response.QueueId);
                 if (_queueSubscriptions.TryGetValue(queueKey, out var channel))
                     await channel.Writer.WriteAsync(msg, ct);
 
-                // Piggyback: si el server uso el corrId de un command pendiente,
-                // tambien despertamos al waiter para que el command complete.
+                // Piggyback: if the server used the corrId of a pending command,
+                // we also wake up the waiter so the command completes.
                 if (response.CorrelationId != null && response.CorrelationId.Length > 0)
                 {
                     string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);
@@ -455,7 +455,7 @@ namespace Choreography.Transport.SimpleX
                 return;
             }
 
-            // No-MSG responses (OK/IDS/ERR/END/PONG): solo van por corrId.
+            // No-MSG responses (OK/IDS/ERR/END/PONG): they only go by corrId.
             if (response.CorrelationId != null && response.CorrelationId.Length > 0)
             {
                 string corrKey = SmpCrypto.ToBase64Url(response.CorrelationId);

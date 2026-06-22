@@ -57,15 +57,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// --- Soporte de coercion simbolo->enum ---------------------------------------------
-		// Un argumento puede ligar a un parametro enum de dos formas:
-		//   Symbol      : identificador pelado sin scope (foo(Febrero)). No tiene valor en
-		//                 runtime — su NOMBRE es el miembro del enum. ComputeType() == object/null
-		//                 y no se le puede Execute()/ExecuteExpression() (scope indefinido).
-		//   StringValue : un string con valor (parametro string @mes, variable string, o literal
-		//                 'Febrero'). Su VALOR runtime es el nombre del miembro. ComputeType()==string.
-		// Un OpCast (incluido (string)x) NO es enum-bindable por esta via: respeta el tipo declarado
-		// del cast — eso da el opt-out de desambiguacion cuando coexisten foo(Mes) y foo(string).
+		// --- Symbol->enum coercion support -------------------------------------------------
+		// An argument can bind to an enum parameter in two ways:
+		//   Symbol      : a bare identifier without scope (foo(SomeMember)). It has no value at
+		//                 runtime — its NAME is the enum member. ComputeType() == object/null
+		//                 and it cannot be Execute()/ExecuteExpression()'d (undefined scope).
+		//   StringValue : a string with a value (string parameter @x, string variable, or literal
+		//                 'SomeMember'). Its runtime VALUE is the member name. ComputeType()==string.
+		// An OpCast (including (string)x) is NOT enum-bindable by this path: it respects the declared
+		// type of the cast — that gives the disambiguation opt-out when foo(SomeEnum) and foo(string) coexist.
 		internal enum EnumArgKind { NotEnumBindable, Symbol, StringValue }
 
 		internal static EnumArgKind ClassifyEnumArg(AstExpression arg)
@@ -97,8 +97,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return new LanguageException(string.Format("You are trying to assign a value of type '{0}' but wrote '{1}'; the expected value is one of: {2}.", enumType.Name, written, options));
 		}
 
-		// Llamada en runtime (interpretado y compilado) para convertir el nombre simbolico al
-		// valor del enum. Lanza LanguageException (no ArgumentException) en caso de nombre invalido.
+		// Called at runtime (interpreted and compiled) to convert the symbolic name to the
+		// enum value. Throws LanguageException (not ArgumentException) on an invalid name.
 		internal static object ParseEnumOrThrow(Type enumType, string name)
 		{
 			if (!Enum.TryParse(enumType, name, true, out object value))
@@ -108,9 +108,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return value;
 		}
 
-		// Compatibilidad estatica de un argumento contra un parametro enum.
-		// Symbol/LiteralString: el nombre/valor se conoce en parse -> debe existir en el enum.
-		// StringValue por Id (parametro/variable): el valor es runtime -> compatible, se difiere.
+		// Static compatibility of an argument against an enum parameter.
+		// Symbol/LiteralString: the name/value is known at parse -> it must exist in the enum.
+		// StringValue via Id (parameter/variable): the value is runtime -> compatible, deferred.
 		internal static bool IsEnumArgCompatible(Type enumType, AstExpression arg)
 		{
 			switch (ClassifyEnumArg(arg))
@@ -128,7 +128,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Valor enum (boxed) para modo interpretado.
+		// Enum value (boxed) for interpreted mode.
 		internal static object ParseEnumArgValue(Type enumType, AstExpression arg)
 		{
 			switch (ClassifyEnumArg(arg))
@@ -142,7 +142,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Expression que produce el valor enum para modo compilado.
+		// Expression that produces the enum value for compiled mode.
 		internal static Expression ParseEnumArgExpression(Type enumType, AstExpression arg, ParameterExpression parametersParam)
 		{
 			Expression nameExpr;
@@ -177,9 +177,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			for (int i = 0; i < methodSignature.Length; i++)
 			{
 				ParameterInfo parameterInfo = methodSignature[i];
-				// arguments[i] puede ser un valor ya evaluado (ruta de invocacion de metodo, que
-				// pre-resuelve enums) o un nodo AST crudo (ruta de property-get). Solo coercionamos
-				// cuando aun es un nodo enum-bindable (simbolo pelado o string con valor).
+				// arguments[i] may be an already-evaluated value (method-invocation path, which
+				// pre-resolves enums) or a raw AST node (property-get path). We only coerce
+				// when it is still an enum-bindable node (bare symbol or string with a value).
 				if (parameterInfo.ParameterType.IsEnum && arguments[i] is AstExpression enumArgNode
 					&& ClassifyEnumArg(enumArgNode) != EnumArgKind.NotEnumBindable)
 				{
@@ -222,8 +222,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				var paramType = parameterInfo.ParameterType;
 				Expression argument = arguments[i];
 
-				// Enum handling: argumento que es un Constant envolviendo un Id simbolo pelado.
-				// (Los string-con-valor ya se resolvieron a Expression de tipo enum aguas arriba.)
+				// Enum handling: an argument that is a Constant wrapping a bare-symbol Id.
+				// (The string-with-value ones were already resolved to an enum-typed Expression upstream.)
 				if (paramType.IsEnum && argument is ConstantExpression constExpr && constExpr.Value is Id idArg)
 				{
 					result[i] = Expression.Constant(ParseEnumOrThrow(paramType, idArg.Name), paramType);
@@ -281,9 +281,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
 		}
 
-		// Coercion escalar de UN argumento ya evaluado (modo interpretado). Es la misma escalera
-		// numerica que aplicaba BindValuesToParameters en su rama escalar; extraida para poder
-		// reusarla por-elemento al poblar un arreglo params. enum/coleccion se manejan aparte.
+		// Scalar coercion of ONE already-evaluated argument (interpreted mode). It is the same
+		// numeric ladder that BindValuesToParameters applied in its scalar branch; extracted so it
+		// can be reused per-element when populating a params array. enum/collection are handled separately.
 		protected static object CoerceScalarValue(object evaluatedArgument, Type parameterType)
 		{
 			if (evaluatedArgument == null) return null;
@@ -314,10 +314,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return evaluatedArgument;
 		}
 
-		// Coercion escalar de UN argumento (modo compilado), produciendo la Expression con el
-		// tipo objetivo. Misma escalera numerica + fallback ImplicitCast/boxing que tenia la rama
-		// escalar de BindValueExpressionsToParameters; extraida para reusarla por-elemento al
-		// emitir Expression.NewArrayInit de un parametro params.
+		// Scalar coercion of ONE argument (compiled mode), producing the Expression with the
+		// target type. Same numeric ladder + ImplicitCast/boxing fallback that the scalar branch
+		// of BindValueExpressionsToParameters had; extracted to reuse it per-element when
+		// emitting Expression.NewArrayInit of a params parameter.
 		protected static Expression CoerceScalarExpression(Expression argument, Type parameterType)
 		{
 			if (argument == null) throw new ArgumentNullException(nameof(argument));
@@ -376,8 +376,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return argument;
 		}
 
-		// Un parametro es params (C# params T[]) si lleva ParamArrayAttribute. Siempre es el ultimo
-		// parametro y su tipo es un arreglo unidimensional.
+		// A parameter is params (C# params T[]) if it carries ParamArrayAttribute. It is always the last
+		// parameter and its type is a one-dimensional array.
 		internal static bool IsParamsParameter(ParameterInfo parameter)
 		{
 			if (parameter == null) throw new ArgumentNullException(nameof(parameter));

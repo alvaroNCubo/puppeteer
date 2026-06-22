@@ -5,40 +5,40 @@ using System.Linq;
 
 namespace Choreography.StageManager
 {
-    // Bug 19 — Ex-Director sobreviviendo a process-death no se reincorpora.
+    // Bug 19 — Ex-Director surviving process-death does not rejoin.
     //
-    // El re-handshake in-band (bug 18) presupone un canal de Coordination VIVO para
-    // viajar (el caso "Director silencioso pero proceso vivo"). Cuando el proceso del
-    // Stage muere (force-stop / OOM / crash / reboot del device) y vuelve, todos sus
-    // channels — Coordination incluido — murieron con el. Al rehidratar desde el
-    // journal, coordinationPeers arranca vacio: no llega ningun DirectorAnnounce, asi
-    // que RequestRehandshakeIfRotated nunca se dispara y el nodo queda aislado.
+    // The in-band re-handshake (bug 18) presupposes a LIVE Coordination channel to
+    // travel over (the "silent Director but live process" case). When the Stage
+    // process dies (force-stop / OOM / crash / device reboot) and comes back, all its
+    // channels — Coordination included — died with it. On rehydrating from the
+    // journal, coordinationPeers starts empty: no DirectorAnnounce arrives, so
+    // RequestRehandshakeIfRotated never fires and the node stays isolated.
     //
-    // KnownPeersStore persiste la MEMBRESIA: los PerformerId de los peers con los que
-    // este Stage ha establecido Coordination. Sobrevive al process-death en
-    // StageStateDirectory/peers.bin (analogo a TermStore/term.bin). El host la consulta
-    // al arrancar (Stage.RecallKnownPeers) para reabrir Coordination con cada peer
-    // conocido — sin importar el rol previo del nodo, cerrando el caso del ex-Director.
+    // KnownPeersStore persists the MEMBERSHIP: the PerformerId of the peers with which
+    // this Stage has established Coordination. It survives process-death in
+    // StageStateDirectory/peers.bin (analogous to TermStore/term.bin). The host queries it
+    // on startup (Stage.RecallKnownPeers) to reopen Coordination with each known
+    // peer — regardless of the node's previous role, closing the ex-Director case.
     //
-    // Por que solo IDs y no Address: el modelo de transporte es invitation-based; el
-    // Stage recibe channels ya abiertos en JoinCoordination y NUNCA ve la Address de
-    // reconexion. Las Address viven en el host (que crea/publica las invitaciones). El
-    // Stage aporta a QUIENES reconectar; el host aporta el COMO. Esa division es la que
-    // mantiene al Stage transport-agnostico.
+    // Why only IDs and not Address: the transport model is invitation-based; the
+    // Stage receives already-open channels in JoinCoordination and NEVER sees the
+    // reconnection Address. Addresses live in the host (which creates/publishes the invitations). The
+    // Stage contributes WHO to reconnect to; the host contributes HOW. That division is what
+    // keeps the Stage transport-agnostic.
     //
-    // Por que en archivo dedicado y no en el journal: mismo argumento que TermStore —
-    // es state OPERACIONAL del Stage (membership), no business-data del actor.
+    // Why in a dedicated file and not in the journal: same argument as TermStore —
+    // it is OPERATIONAL state of the Stage (membership), not business-data of the actor.
     //
-    // Atomicidad: write-temp + rename atomico, igual que TermStore.
+    // Atomicity: write-temp + atomic rename, same as TermStore.
     //
-    // Layout disco (little-endian):
+    // Disk layout (little-endian):
     //   [00..03] count: int32
-    //   luego count * 16 bytes: PerformerId (Guid) cada uno
+    //   then count * 16 bytes: PerformerId (Guid) each
     //
-    // Sin version header: si cambia el formato, bumpear el path (peers.bin → peers-v2.bin).
+    // No version header: if the format changes, bump the path (peers.bin → peers-v2.bin).
     //
-    // Thread-safety: todas las operaciones bajo lock. Remember se llama desde
-    // JoinCoordination, que corre desde varios listeners/coroutines.
+    // Thread-safety: all operations under lock. Remember is called from
+    // JoinCoordination, which runs from several listeners/coroutines.
     internal sealed class KnownPeersStore
     {
         private const string FileName = "peers.bin";
@@ -54,8 +54,8 @@ namespace Choreography.StageManager
             Load();
         }
 
-        // Registra un peer conocido. Idempotente: si ya estaba, no reescribe el archivo
-        // (en steady-state, cero I/O — JoinCoordination con peers ya conocidos no toca disco).
+        // Registers a known peer. Idempotent: if it was already present, it does not rewrite the file
+        // (in steady-state, zero I/O — JoinCoordination with already-known peers does not touch disk).
         public void Remember(PerformerId peer)
         {
             lock (writeLock)
@@ -77,9 +77,9 @@ namespace Choreography.StageManager
                 if (!File.Exists(filePath)) return;
 
                 byte[] buffer = File.ReadAllBytes(filePath);
-                // Best-effort: un peers.bin truncado/corrupto (p.ej. crash a mitad de
-                // un write previo a que existiera el temp+rename) no debe impedir el
-                // arranque — el recall es una optimizacion, no un invariante de safety.
+                // Best-effort: a truncated/corrupt peers.bin (e.g. crash in the middle of
+                // a write prior to the temp+rename existing) must not prevent
+                // startup — the recall is an optimization, not a safety invariant.
                 if (buffer.Length < 4) return;
 
                 using var ms = new MemoryStream(buffer);

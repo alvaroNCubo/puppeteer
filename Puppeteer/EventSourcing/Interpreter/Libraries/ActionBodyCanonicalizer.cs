@@ -7,7 +7,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	// Phase 1 of the Action refactor. Canonicalises the body of a DefineActionStatement
 	// into the deterministic string form that the journal stores and replay re-parses.
 	//
-	// Contract (firmado 2026-05-09 al iniciar Fase 1):
+	// Contract (signed 2026-05-09 when starting Phase 1):
 	//   - Render via Statement.Write with DatabaseType.IN_MEMORY — same machinery the
 	//     existing Statement renderers already use to emit themselves canonically.
 	//   - Same logical body with different incoming whitespace / line comments produces
@@ -20,7 +20,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	//     directly by Parser.ParseDefineActionParameterList.
 	//
 	// Phase 4 will use this utility on the live path (compute body signature when first
-	// invocation triggers auto-emit) and on the re-declaration check (detect cuerpo
+	// invocation triggers auto-emit) and on the re-declaration check (detect body
 	// mismatch between an earlier Define entry and a fresher script body).
 	internal static class ActionBodyCanonicalizer
 	{

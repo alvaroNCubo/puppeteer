@@ -40,25 +40,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         internal string Script { get;}
 		internal bool IsCompiledMode { get; private set; } = false;
 
-		// Lo setea el Parser al construir el Program: true sii el parse creo algun
-		// EvalStatement. ValidateStatically lo lee en vez de hacer
-		// Collect<EvalStatement>() (un recorrido completo del
-		// AST por cada entry). En el journal de rehidratacion no hay un solo Eval
-		// (se calcularon y sustituyeron por texto antes de persistir), asi que el
-		// flag queda false y ValidateStatically toma el camino de validacion completa
-		// sin pagar los dos traversals.
+		// Set by the Parser while building the Program: true iff the parse created some
+		// EvalStatement. ValidateStatically reads it instead of doing
+		// Collect<EvalStatement>() (a full traversal of the
+		// AST per entry). In the rehydration journal there is not a single Eval
+		// (they were computed and replaced by text before persisting), so the
+		// flag stays false and ValidateStatically takes the full validation path
+		// without paying the two traversals.
 		internal bool HasEval { get; set; } = false;
 
-		// Lever 1 de la optimizacion de Now: true sii el script referencia el parametro de
-		// SISTEMA Now (como Id 'Now'/'@Now'), o conservadoramente si HasEval (un Eval puede
-		// sintetizar la referencia en tiempo de ejecucion y no es visible al Collect<Id>
-		// estatico). Lo computa el Parser tras el parse (con los statements presentes) y
-		// viaja cacheado con el Program en el cache de operaciones. El framework solo inyecta
-		// Now en cada Perform en vivo cuando este flag es true: las operaciones que no usan el
-		// reloj no pagan el box ni el set de Now. OccurredAt del journal sale del 'now' local
-		// del Perform, no del parametro, asi que omitir la inyeccion no lo afecta. Calcular
-		// por NOMBRE no puede sub-inyectar: 'Now' es nombre reservado (no declarable), de modo
-		// que la unica forma de referenciarlo es escribir Now/@Now, que Collect<Id> si ve.
+		// Lever 1 of the Now optimization: true iff the script references the SYSTEM
+		// parameter Now (as Id 'Now'/'@Now'), or conservatively if HasEval (an Eval can
+		// synthesize the reference at execution time and it is not visible to the static
+		// Collect<Id>). The Parser computes it after the parse (with the statements present) and
+		// it travels cached with the Program in the operations cache. The framework only injects
+		// Now on each live Perform when this flag is true: operations that do not use the
+		// clock pay neither the box nor the set of Now. The journal's OccurredAt comes from the
+		// Perform's local 'now', not from the parameter, so omitting the injection does not affect it. Computing
+		// by NAME cannot under-inject: 'Now' is a reserved name (not declarable), so
+		// the only way to reference it is to write Now/@Now, which Collect<Id> does see.
 		internal bool ReferencesNow { get; set; }
 		internal string LastExposeData { get; private set; }
 
@@ -115,7 +115,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             this.Script = script;
 			this.statements = statements;
             this.symbolTable = symbolTable;
-            this.elProgramaEsUnEval = symbolTable.InEvalMode;//Revisar que el source Eval no se puede usar con el perfomqry
+            this.elProgramaEsUnEval = symbolTable.InEvalMode;//Check that the Eval source cannot be used with the perform query
             this.level = level;
             this.isQuery = isQuery;
             this.parameters = Parameters.EMPTY;
@@ -454,13 +454,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return builderStr;
         }
 
-        // ConvertToString cachea builderStr en la primera llamada. ActorHandler
-        // invoca ese primer render en PrepareCommand, ANTES de Perform — para un
-        // programa con Eval ese render es la forma LITERAL `Eval(<expr>);` porque
-        // EvalStatement.forDairy aun es null. Tras ejecutar (cuando cada Eval
-        // ejecutado ya poblo su forDairy con la asignacion evaluada), ActorHandler
-        // invalida este cache para re-renderizar la forma EVALUADA y journalizarla
-        // (determinismo en replay). Solo se usa en el path Eval (HasEval).
+        // ConvertToString caches builderStr on the first call. ActorHandler
+        // invokes that first render in PrepareCommand, BEFORE Perform — for a
+        // program with Eval that render is the LITERAL form `Eval(<expr>);` because
+        // EvalStatement.forDairy is still null. After executing (when each executed
+        // Eval has populated its forDairy with the evaluated assignment), ActorHandler
+        // invalidates this cache to re-render the EVALUATED form and journal it
+        // (determinism on replay). Only used in the Eval path (HasEval).
         internal void InvalidateDairyRenderCache()
         {
             builderStr = null;
@@ -573,19 +573,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else
 			{
-				// Best-effort: cuando hay Eval omitimos la validacion estatica completa
-				// (los identifiers sintetizados por Eval no se conocen en tiempo de resolve), pero
-				// propagamos el tipo declarado de cada global asignada via NewInstanceStatement
-				// cuyo rValue.ComputeType() resuelve sin tocar el path de Eval. Sin esto, el
-				// setter Id.ForcedType nunca corre para `g = Guardian(company);` y
-				// SymbolTable.Entry("g").type queda en null al terminar el resolverTask de esta
-				// entry. Si una entry posterior del journal referencia ese global como RValue,
-				// el resolver no le puede asignar ForcedType (Program.cs:667-670 requiere
-				// symbol.type != null) y la static validation de la entry posterior cae en
-				// DotAccess.ComputeCallExpressionType con instanceClass==null. El symptom
-				// produccion es resolverTask logueando NRE/LanguageException por cada entry
-				// dependiente del global. Documentado en
-				// BUG_RehydrationStaticValidation_AccountsCreate_ExchangeAPI §4.1, §4.2, §7.2.
+				// Best-effort: when there is Eval we omit the full static validation
+				// (the identifiers synthesized by Eval are not known at resolve time), but
+				// we propagate the declared type of each global assigned via NewInstanceStatement
+				// whose rValue.ComputeType() resolves without touching the Eval path. Without this, the
+				// Id.ForcedType setter never runs for an assignment like `g = Base(obj);` and
+				// SymbolTable.Entry("g").type stays null when this entry's resolver task finishes.
+				// If a later journal entry references that global as an RValue,
+				// the resolver cannot assign it ForcedType (the resolution requires
+				// symbol.type != null) and the static validation of the later entry falls into
+				// DotAccess.ComputeCallExpressionType with instanceClass==null. The production
+				// symptom is the resolver task logging NRE/LanguageException for each entry
+				// dependent on the global.
 				foreach (var statement in this.statements.OfType<NewInstanceStatement>())
 				{
 					if (statement.LValue is Id id && id.IsOriginalLValueDeclaration && id.ForcedType == null)
@@ -608,12 +607,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Lever 1 de la optimizacion de Now: escanea los Id del programa una sola vez (en
-		// parse-time, statements presentes) buscando una referencia al parametro de SISTEMA
-		// Now. Reusa el mismo Collect<Id> que ReferencesSolver usa como vista canonica de
-		// todos los ids, asi que es tan completo como la resolucion de referencias. Normaliza
-		// el alias '@' (CLAUDE.md: '@Now' es alias de 'Now') por span sin asignar. El llamador
-		// (Parser) combina con HasEval para el caso conservador.
+		// Lever 1 of the Now optimization: scans the program's Ids only once (at
+		// parse-time, statements present) looking for a reference to the SYSTEM parameter
+		// Now. Reuses the same Collect<Id> that ReferencesSolver uses as the canonical view of
+		// all ids, so it is as complete as the reference resolution. Normalizes
+		// the '@' alias ('@Now' is an alias of 'Now') by span without allocating. The caller
+		// (Parser) combines it with HasEval for the conservative case.
 		internal bool ScriptReferencesSystemNow()
 		{
 			foreach (Id id in this.Collect<Id>())
@@ -650,7 +649,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
 				this.symbolTable = program.symbolTable;
 
-				// Colectar LValues de asignaciones, excluyendo aquellos que ya existen como variables globales
+				// Collect LValues from assignments, excluding those that already exist as global variables
 				var lValuesFromAssignments = program.Collect<NewInstanceStatement>()
 					.Where(x => x.LValue is Id)
 					.Select(x => (Id)x.LValue)
@@ -685,7 +684,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					parametersIds.Add(paramLValue);
 				}
 
-				// Segundo, procesar LValues que son referencias a variables globales existentes
+				// Second, process LValues that are references to existing global variables
 				var globalLValues = program.Collect<NewInstanceStatement>()
 					.Where(x => x.LValue is Id)
 					.Select(x => (Id)x.LValue)
@@ -727,19 +726,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 }
 
 				// Eval re-declaration unification:
-				// EvalStatement.Execute re-entra a SolveReferences pasando las
-				// declaraciones del programa interno como DeclaracionesExternas del
-				// padre (y viceversa al parsear el siguiente Eval). En el TOP-LEVEL
-				// el filtro HasVariable evita el problema porque el x del eval queda
-				// Global. Dentro de un bloque el x es Local (IsolatedStorage), no
-				// entra al SymbolTable y cada Eval('x = ...;') sucesivo produce un
-				// x_evalN nuevo en localDeclarations. Sin unificar, parent termina con
-				// dos OriginalLValueDeclaration distintas para el mismo nombre y, al
-				// re-resolver tras el segundo Eval, ReferencesTo intenta rebindear el
-				// x RValue ya bindeado a x_eval1 hacia x_eval2 y lanza "ambigous
-				// declaration". Aqui detectamos ese caso y unificamos el local con
-				// el external: el assignment del Eval interno termina escribiendo al
-				// mismo symbol que ya ven los reads del bloque externo.
+				// EvalStatement.Execute re-enters SolveReferences passing the
+				// inner program's declarations as the parent's DeclaracionesExternas
+				// (and vice versa when parsing the next Eval). At the TOP-LEVEL
+				// the HasVariable filter avoids the problem because the eval's x stays
+				// Global. Inside a block the x is Local (IsolatedStorage), does not
+				// enter the SymbolTable and each successive Eval('x = ...;') produces a
+				// new x_evalN in localDeclarations. Without unifying, parent ends up with
+				// two distinct OriginalLValueDeclaration for the same name and, when
+				// re-resolving after the second Eval, ReferencesTo tries to rebind the
+				// x RValue already bound to x_eval1 toward x_eval2 and throws "ambigous
+				// declaration". Here we detect that case and unify the local with
+				// the external: the inner Eval's assignment ends up writing to the
+				// same symbol that the outer block's reads already see.
 				if (program.DeclaracionesExternas.Count > 0)
 				{
 					var externalsByName = program.DeclaracionesExternas
@@ -779,10 +778,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
                 }
 
-				// program.HasEval evita el Collect<EvalStatement>() (un recorrido completo del
-				// AST) cuando el Program no tiene evals — el caso de todos los scripts del
-				// journal en rehidratacion. Si no hay evals el foreach no haria nada de todos
-				// modos, pero el Collect igual caminaba el arbol entero.
+				// program.HasEval avoids the Collect<EvalStatement>() (a full traversal of the
+				// AST) when the Program has no evals — the case of all the journal's scripts
+				// during rehydration. If there are no evals the foreach would do nothing
+				// anyway, but the Collect still walked the whole tree.
 				if (! program.IsCompiledMode && program.HasEval)
 				{
 					foreach(var eval in program.Collect<EvalStatement>())

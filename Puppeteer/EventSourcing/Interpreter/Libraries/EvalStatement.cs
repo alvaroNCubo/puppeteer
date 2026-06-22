@@ -89,19 +89,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else
 			{
-				// forDairy lo setea Execute con la forma EXPANDIDA del eval (e.g.
-				// `id = 1;`). Pero ActorHandler invoca ConvertToString del programa
-				// padre ANTES de Perform — el snapshot va al journal mientras forDairy
-				// es null y, sin esta rama, la asignacion sintetizada por Eval se
-				// pierde. Sin ella, la rehidratacion ve un script con referencias
-				// libres a la variable creada por Eval (typeof(object)) y la validacion
-				// estatica lanza `Unknown property or method 'X' on type 'Y'.`.
-				// Reproducido por DotAccessHomonymResolutionTests.Recovery_FromJournal_*
-				// (la version stripped del bloque de creacion de perfiles de
-				// LiquidityAPI). Al emitir el Eval literal el AST replayed contiene
-				// EvalStatement, hasEvals==true en Program.ValidateStatically, y la
-				// validacion estatica se omite — replay re-ejecuta el Eval y reconstruye
-				// las globals de manera determinista (mismo orden de NextProfileId(), etc.).
+				// forDairy is set by Execute with the EXPANDED form of the eval (e.g.
+				// `id = 1;`). But ActorHandler invokes ConvertToString of the parent
+				// program BEFORE Perform — the snapshot goes to the journal while forDairy
+				// is null and, without this branch, the assignment synthesized by Eval is
+				// lost. Without it, rehydration sees a script with free references
+				// to the variable created by Eval (typeof(object)) and static validation
+				// throws `Unknown property or method 'X' on type 'Y'.`.
+				// When the literal Eval is emitted the replayed AST contains
+				// EvalStatement, hasEvals==true in Program.ValidateStatically, and
+				// static validation is skipped — replay re-executes the Eval and
+				// rebuilds the globals deterministically (same call order, etc.).
 				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
 				resultado.Append("Eval(");
 				expression.write(resultado, databaseType);

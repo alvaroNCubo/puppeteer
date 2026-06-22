@@ -4,9 +4,9 @@ using Choreography.StageManager;
 
 namespace Choreography.Transport
 {
-    // UsherForward (50): Stage -> Usher. Self-introduction del nuevo Stage despues de
-    // aceptar la invitacion del QR. Lleva la pubkey con la que el Usher sella el
-    // JournalSecret, y la firma del request (D7) para auditoria de no-repudio.
+    // UsherForward (50): Stage -> Usher. Self-introduction of the new Stage after
+    // accepting the QR invitation. Carries the pubkey with which the Usher seals the
+    // JournalSecret, and the request signature (D7) for non-repudiation auditing.
     public sealed class UsherJoinRequest : StageMessage
     {
         public override StageMessageType MessageType => StageMessageType.UsherForward;
@@ -45,10 +45,10 @@ namespace Choreography.Transport
 
         internal UsherJoinRequest(PerformerId senderId, DateTime ts) : base(senderId, ts) { }
 
-        // Payload firmado (D7): nonce || pubkey || requestedAt(binary). Lo recomputan
-        // request side antes de Sign y verifier side antes de Verify. No incluye
-        // DeviceName/Fingerprint para que un cambio futuro en esos campos UX no rompa
-        // firmas existentes.
+        // Signed payload (D7): nonce || pubkey || requestedAt(binary). The request
+        // side recomputes it before Sign and the verifier side before Verify. It does
+        // not include DeviceName/Fingerprint so that a future change in those UX fields
+        // does not break existing signatures.
         public byte[] BuildSignedPayload()
         {
             using var ms = new MemoryStream();
@@ -84,12 +84,13 @@ namespace Choreography.Transport
         }
     }
 
-    // UsherResponse (51): Usher -> Stage. Payload de sindicalizacion tras aprobacion del
-    // operador y commit del MembershipRecord al journal. NO incluye PeerDirectory (D1):
-    // los peers existentes aprenden del nuevo Stage replicando el journal y publican sus
-    // propias invitaciones via PeerInvitationRecord (Fase 6, no implementada en este
-    // scaffold). NO incluye DataStar todavia: la election de Director y el catch-up
-    // arrancan despues, una vez que el Stage tiene su identidad e infraestructura.
+    // UsherResponse (51): Usher -> Stage. Enrollment payload after operator
+    // approval and commit of the MembershipRecord to the journal. Does NOT include
+    // PeerDirectory (D1): existing peers learn of the new Stage by replicating the
+    // journal and publish their own invitations via PeerInvitationRecord (Phase 6, not
+    // implemented in this scaffold). Does NOT include DataStar yet: the Director
+    // election and the catch-up start later, once the Stage has its identity and
+    // infrastructure.
     public sealed class UsherJoinResponse : StageMessage
     {
         public override StageMessageType MessageType => StageMessageType.UsherResponse;
@@ -181,9 +182,9 @@ namespace Choreography.Transport
         }
     }
 
-    // Representacion plana de ServerFingerprint para serializacion al wire. Existe
-    // aqui (en Transport) en vez de en Usher namespace para mantener la separacion:
-    // el wire es Transport, las semanticas son Usher.
+    // Flat representation of ServerFingerprint for wire serialization. It lives
+    // here (in Transport) instead of in the Usher namespace to keep the separation:
+    // the wire is Transport, the semantics are Usher.
     public sealed class ServerFingerprintWire
     {
         public string Host { get; }

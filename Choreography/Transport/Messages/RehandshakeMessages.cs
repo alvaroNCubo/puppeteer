@@ -7,39 +7,39 @@ namespace Choreography.Transport
 {
     // Bug 18 — Failover replication gap after role rotation.
     //
-    // Tras una rotacion de roles por failover (Director silent + auto-eleccion del
-    // Cast + term-first demote del ex-Director), el state machine reconcilia roles
-    // sobre el bus de Coordination (sobreviviente) pero los data channels
-    // Replication/Command quedan muertos: el nuevo Director no tiene CastLink hacia
-    // el nuevo Cast, y el nuevo Cast no tiene DirectorLink hacia el nuevo Director.
-    // En produccion cada Stage vive en un proceso/device distinto, asi que el host
-    // no puede repetir el pairing out-of-band (no hay como cruzar las nuevas
-    // ConnectionInvitation entre procesos).
+    // After a role rotation due to failover (Director silent + auto-election of the
+    // Cast + term-first demote of the ex-Director), the state machine reconciles roles
+    // over the (surviving) Coordination bus but the Replication/Command data channels
+    // are left dead: the new Director has no CastLink toward the new Cast, and the
+    // new Cast has no DirectorLink toward the new Director. In production each Stage
+    // lives in a distinct process/device, so the host cannot repeat the pairing
+    // out-of-band (there is no way to cross the new ConnectionInvitation between
+    // processes).
     //
-    // El re-handshake in-band usa el unico canal vivo (Coordination) para
-    // transportar las Address de las nuevas invitaciones:
+    // The in-band re-handshake uses the only live channel (Coordination) to
+    // carry the Address of the new invitations:
     //
-    //   1) El nuevo Cast, al adoptar un nuevo Director (rotacion detectada), envia
-    //      RehandshakeRequest(LastKnownEntryId) al Director sobre Coordination.
-    //   2) El Director crea invitaciones Replication+Command, responde con
-    //      RehandshakeProposal(replicationAddress, commandAddress) sobre Coordination,
-    //      espera la conexion, hace AcceptCastConnection y un catch-up desde
+    //   1) The new Cast, upon adopting a new Director (rotation detected), sends
+    //      RehandshakeRequest(LastKnownEntryId) to the Director over Coordination.
+    //   2) The Director creates Replication+Command invitations, responds with
+    //      RehandshakeProposal(replicationAddress, commandAddress) over Coordination,
+    //      waits for the connection, does AcceptCastConnection and a catch-up from
     //      LastKnownEntryId.
-    //   3) El Cast reconstruye las ConnectionInvitation desde las Address, las
-    //      acepta y hace ConnectToDirector.
+    //   3) The Cast reconstructs the ConnectionInvitation from the Address, accepts
+    //      them and does ConnectToDirector.
     //
-    // ConnectionInvitation es reconstruible por completo desde (InviterId, Purpose,
-    // Address) — InviterId es el SenderId del proposal, Purpose es fija por campo, y
-    // Address encapsula todo lo que AcceptInvitationAsync necesita (verificado en
-    // InMemoryTransport y HttpsTransport). Por eso solo viajan las dos Address.
+    // ConnectionInvitation is fully reconstructible from (InviterId, Purpose,
+    // Address) — InviterId is the SenderId of the proposal, Purpose is fixed per field, and
+    // Address encapsulates everything AcceptInvitationAsync needs (verified in
+    // InMemoryTransport and HttpsTransport). That is why only the two Address travel.
 
     public sealed class RehandshakeRequest : StageMessage
     {
         public override StageMessageType MessageType => StageMessageType.RehandshakeRequest;
 
-        // EntryId mas alto del journal del Cast al momento de pedir el re-handshake.
-        // El Director lo usa como peerLastEntryId para el catch-up: envia las entries
-        // > LastKnownEntryId que el Cast aun no tiene tras la rotacion.
+        // Highest journal EntryId of the Cast at the time of requesting the re-handshake.
+        // The Director uses it as peerLastEntryId for the catch-up: it sends the entries
+        // > LastKnownEntryId that the Cast does not yet have after the rotation.
         public long LastKnownEntryId { get; private set; }
 
         public RehandshakeRequest(PerformerId senderId, long lastKnownEntryId) : base(senderId)
@@ -64,9 +64,9 @@ namespace Choreography.Transport
     {
         public override StageMessageType MessageType => StageMessageType.RehandshakeProposal;
 
-        // Address de las invitaciones recien creadas por el Director. El Cast
-        // reconstruye ConnectionInvitation(SenderId, Replication/Command, Address)
-        // y las acepta para abrir los nuevos data channels.
+        // Address of the invitations just created by the Director. The Cast
+        // reconstructs ConnectionInvitation(SenderId, Replication/Command, Address)
+        // and accepts them to open the new data channels.
         public string ReplicationAddress { get; private set; }
         public string CommandAddress { get; private set; }
 

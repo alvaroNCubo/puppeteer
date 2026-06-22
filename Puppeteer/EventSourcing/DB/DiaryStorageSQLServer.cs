@@ -180,7 +180,7 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	);")
 				.Append(" END;\n");
 
-			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			// Resume optimization (checkpoint redesign, step 2): two global cursors per reaction.
 			statement
 				.Append("IF NOT EXISTS(")
 				.Append("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ReactionFrontier')")
@@ -205,12 +205,12 @@ namespace Puppeteer.EventSourcing.DB
 				END;
 			");
 
-			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
-			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
-			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// ExposeData: optional lateral table (one row per event that executed expose).
+			// The follower path forces includeExposeData=true and its replay SELECT
+			// does a LEFT JOIN ExposeData, so the table must always exist — just like
 			// Reaction/ReactionCheckpoint/ReactionFrontier/Follower. Reported by a follower deployment
-			// 2.0.1-beta.9817. La columna es DiaryId (no DairyId): es la que el motor lee en
-			// el JOIN y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			// 2.0.1-beta.9817. The column is DiaryId (not DairyId): it is the one the engine reads in
+			// the JOIN and in the INSERT INTO ExposeData (DiaryId, ExposeJson).
 			statement.Append(@"
 				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ExposeData')
 				BEGIN
@@ -291,7 +291,7 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	);")
 				.Append(" END;\n");
 
-			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			// Resume optimization (checkpoint redesign, step 2): two global cursors per reaction.
 			statement
 				.Append("IF NOT EXISTS(")
 				.Append("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ReactionFrontier')")
@@ -316,12 +316,12 @@ namespace Puppeteer.EventSourcing.DB
 				END;
 			");
 
-			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
-			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
-			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// ExposeData: optional lateral table (one row per event that executed expose).
+			// The follower path forces includeExposeData=true and its replay SELECT
+			// does a LEFT JOIN ExposeData, so the table must always exist — just like
 			// Reaction/ReactionCheckpoint/ReactionFrontier/Follower. Reported by a follower deployment
-			// 2.0.1-beta.9817. La columna es DiaryId (no DairyId): es la que el motor lee en
-			// el JOIN y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			// 2.0.1-beta.9817. The column is DiaryId (not DairyId): it is the one the engine reads in
+			// the JOIN and in the INSERT INTO ExposeData (DiaryId, ExposeJson).
 			statement.Append(@"
 				IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ExposeData')
 				BEGIN
@@ -377,9 +377,9 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					connection.Open();
 
-					// Materialize v2 / Fase 0.5: la columna Skip del journal es autoritativa
+					// Materialize v2 / Phase 0.5: the journal Skip column is authoritative
 					// for rehydration. Replaces LEFT JOIN EventElision with WHERE d.[Skip] = 0.
-					// EventElisionStorageSQLServer.MarkEventsAsElided poble Skip = 1 transaccionalmente.
+					// EventElisionStorageSQLServer.MarkEventsAsElided sets Skip = 1 transactionally.
 					string sqlCount = $@"
 						SELECT Count_Big(*) Cantidad
 						FROM {base.Name} d WITH (NOLOCK)
@@ -546,10 +546,10 @@ namespace Puppeteer.EventSourcing.DB
 			}
 			catch (Exception e) //As is inside a fire and forget, this is needed to see the error and execute the CompleteAdding unlocking the main process.
 			{
-				// Pasa por IPuppeteerLogger.Error en vez de Console.WriteLine: con el
-				// ConsoleLogger default va a Console.Error (stderr) con prefijo
-				// [Puppeteer ERROR]. Si el host inyecto un logger (Serilog/MEL/NLog)
-				// via Performance.Logger(...), tambien lo recibe ahi.
+				// Goes through IPuppeteerLogger.Error instead of Console.WriteLine: with the
+				// default ConsoleLogger it goes to Console.Error (stderr) with prefix
+				// [Puppeteer ERROR]. If the host injected a logger (Serilog/MEL/NLog)
+				// via Performance.Logger(...), it receives it there too.
 				Logger.Error($"RehydrateFromEvent failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
@@ -1454,7 +1454,7 @@ namespace Puppeteer.EventSourcing.DB
 
 						if (needsTrim)
 						{
-							/*ARMA EL SCRIPT EL RENAME*/
+							/*BUILDS THE RENAME SCRIPT*/
 							sql.Append("EXEC sp_rename '");
 							sql.Append(aName);
 							sql.Append("', '");
@@ -1474,7 +1474,7 @@ namespace Puppeteer.EventSourcing.DB
 								CreateDiary(aName);
 							}
 
-							/*ARMA EL SCRIPT DE CRATE TABLE, INDICES Y DATA*/
+							/*BUILDS THE CREATE TABLE, INDEXES AND DATA SCRIPT*/
 							sql.Append("INSERT INTO ");
 							sql.Append(aName);
 							sql.Append("(id, OccurredAt, Script, [Skip]) ");
@@ -1489,7 +1489,7 @@ namespace Puppeteer.EventSourcing.DB
 							sql.Append(trimmedDown);
 							sql.Append("' ORDER BY id;");
 
-							/*ARMA EL SCRIPT DE DROP TABLE*/
+							/*BUILDS THE DROP TABLE SCRIPT*/
 							sql.Append("DROP TABLE ");
 							sql.Append(aName);
 							sql.Append(POSTFIX);
@@ -1559,7 +1559,7 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			ArgumentNullException.ThrowIfNull(formattedReaction);
 
-			// Primero intentar obtener el ID si ya existe
+			// First try to obtain the ID if it already exists
 			string selectSql = "SELECT Id FROM Reaction WHERE Reaction = @FormattedReaction";
 			long existingId = 0;
 
@@ -1597,7 +1597,7 @@ namespace Puppeteer.EventSourcing.DB
 						newId = Convert.ToInt32(result) + 1;
 					}
 
-					// Insertar el nuevo reaction
+					// Insert the new reaction
 					string insertSql = "INSERT INTO Reaction (Id, Reaction) VALUES (@ReactionId, @FormattedReaction)";
 					using (SqlCommand command = new SqlCommand(insertSql, connection))
 					{
@@ -1617,14 +1617,14 @@ namespace Puppeteer.EventSourcing.DB
 			return existingId;
 		}
 
-		// DEPRECATED: Mantener por compatibilidad, retorna Detected
+		// DEPRECATED: Kept for compatibility, returns Detected
 		protected internal override long GetReactionLastProcessedEntryId(long reactionId, int pattern)
 		{
 			var (detected, _) = GetReactionCheckpoint(reactionId, pattern);
-			return detected; // Retornar solo Detected por compatibilidad
+			return detected; // Return only Detected for compatibility
 		}
 
-		// DEPRECATED: Mantener por compatibilidad, guarda ambos (detected = confirmed = lastEntryId)
+		// DEPRECATED: Kept for compatibility, saves both (detected = confirmed = lastEntryId)
 		protected internal override void SaveReactionLastProcessedEntryId(long reactionId, int pattern, long lastEntryId)
 		{
 			if (pattern < 0) throw new LanguageException($"Pattern '{pattern}' must be zero or greater");
@@ -1662,9 +1662,9 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// FASE 5A: Checkpoint de dos fases - retorna tupla (detected, confirmed) en un solo acceso
-		// NOTA: La columna DiaryId se usa para Detected, y ConfirmedDiaryId para Confirmed
-		// Si ConfirmedDiaryId es NULL, retornar 0
+		// PHASE 5A: Two-phase checkpoint - returns tuple (detected, confirmed) in a single access
+		// NOTE: The DiaryId column is used for Detected, and ConfirmedDiaryId for Confirmed
+		// If ConfirmedDiaryId is NULL, return 0
 		protected internal override (long detected, long confirmed) GetReactionCheckpoint(long reactionId, int seekLevel)
 		{
 			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
@@ -1703,9 +1703,9 @@ namespace Puppeteer.EventSourcing.DB
 			return (detected, confirmed);
 		}
 
-		// Resume optimization (paso 2): dos cursores globales por reaction (frente-leido +
-		// frontera-cerrada). SQL Server es backend "journal local" (fila Job/Cue de la matriz)
-		// -> resume re-leyendo [closed, high-water]; no usa snapshot.
+		// Resume optimization (step 2): two global cursors per reaction (read-frontier +
+		// closed-frontier). SQL Server is a "local journal" backend (Job/Cue row of the matrix)
+		// -> resume by re-reading [closed, high-water]; does not use a snapshot.
 		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
 		{
 			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
@@ -1859,20 +1859,20 @@ namespace Puppeteer.EventSourcing.DB
 							if (newEntryId > currentEntryId)
 							{
 								isGreater = true;
-								break; // Primer nivel diferente y greaterThan
+								break; // First differing level and greaterThan
 							}
 							else if (newEntryId < currentEntryId)
 							{
 								transaction.Rollback();
-								return false; // Primer nivel diferente y lessThan
+								return false; // First differing level and lessThan
 							}
-							// Si assign, continuar
+							// If equal, continue
 						}
 
 						if (!isGreater)
 						{
 							transaction.Rollback();
-							return false; // Todos iguales o lessThan
+							return false; // All equal or lessThan
 						}
 
 						foreach (long eventId in eventIds)
@@ -1922,16 +1922,16 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Etapa 5 del refactor Distill. Mismo patron que DiaryStorageMySQL.Distill
-		// (ver doc alli) — single transaction, preserve MAX(id) (invariante "ultimo
-		// record"), borra `{Name}` rows e su correspondiente entrada en EventElision.
-		// Usa table variable @ToDistill (T-SQL) en lugar de CREATE TEMPORARY TABLE
-		// (sintaxis MySQL).
+		// Stage 5 of the Distill refactor. Same pattern as DiaryStorageMySQL.Distill
+		// (see doc there) — single transaction, preserve MAX(id) (the "last
+		// record" invariant), deletes `{Name}` rows and their corresponding entry in EventElision.
+		// Uses a table variable @ToDistill (T-SQL) instead of CREATE TEMPORARY TABLE
+		// (MySQL syntax).
 		//
-		// EventElision sirve a un solo actor — el principio "one actor per database"
-		// (ver memoria project_actor_per_db_principle.md) garantiza que todos los rows
-		// pertenecen a este actor. El INNER JOIN con `{Name}` es defensivo, no
-		// necesario para aislamiento cross-actor.
+		// EventElision serves a single actor — the "one actor per database" principle
+		// (see memory project_actor_per_db_principle.md) guarantees that all rows
+		// belong to this actor. The INNER JOIN with `{Name}` is defensive, not
+		// necessary for cross-actor isolation.
 		protected internal override void Distill()
 		{
 			using (SqlConnection connection = new SqlConnection(ConnectionString))
@@ -1941,7 +1941,7 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					try
 					{
-						// Snapshot del max id (preserve para la invariante).
+						// Snapshot of the max id (preserved for the invariant).
 						long maxId;
 						string maxIdSql = $"SELECT ISNULL(MAX(id), 0) FROM {Name}";
 						using (SqlCommand cmd = new SqlCommand(maxIdSql, connection, transaction))
@@ -1952,13 +1952,13 @@ namespace Puppeteer.EventSourcing.DB
 
 						if (maxId == 0)
 						{
-							// Journal vacio, nada que destilar.
+							// Empty journal, nothing to distill.
 							transaction.Commit();
 							return;
 						}
 
-						// Capturar IDs a remover en table variable, luego dos DELETEs
-						// contra esa tabla. Acota al journal de este actor (defensiva).
+						// Capture IDs to remove in a table variable, then two DELETEs
+						// against that table. Scoped to this actor's journal (defensive).
 						string distillSql = $@"
 							DECLARE @ToDistill TABLE (id BIGINT PRIMARY KEY);
 
@@ -1991,8 +1991,8 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Paper 5 / Materialize v2 — Fase 2. Read raw records (sin filtrar [Skip]).
-		// Capa 1 del wire. Discriminator per Phase 6 del Action refactor:
+		// Paper 5 / Materialize v2 — Phase 2. Read raw records (without filtering [Skip]).
+		// Wire layer 1. Discriminator per Phase 6 of the Action refactor:
 		// Script != NULL AND Action IS NULL = Script; Script != NULL AND Action != NULL =
 		// Define; Script IS NULL AND Action != NULL = Invocation.
 		protected internal override void ReadRecordsAfter(long afterEntryId, List<MaterializationRecord> result)
@@ -2071,7 +2071,7 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (c) DameCheckpointsHasta.
+		// Materialize v2 / Phase 3 — wire verb (c) DameCheckpointsHasta.
 		protected internal override void ReadReactionRegistry(List<MaterializationReactionDefinition> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);

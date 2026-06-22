@@ -30,10 +30,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
-			// Mismo contrato que MetadataStore.Load: file-missing es valido (actor
-			// nuevo), pero file-present-pero-invalido es corrupcion y debe lanzar
-			// con un mensaje accionable. Silenciar lleva a NRE downstream cuando
-			// el caller asume "fresh actor" sobre journal files preexistentes.
+			// Same contract as MetadataStore.Load: a missing file is valid (new
+			// actor), but a present-but-invalid file is corruption and must throw
+			// with an actionable message. Silencing it leads to a downstream NRE when
+			// the caller assumes "fresh actor" over preexisting journal files.
 			if (!File.Exists(filePath))
 				return false;
 

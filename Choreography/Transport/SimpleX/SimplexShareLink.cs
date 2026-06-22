@@ -15,14 +15,14 @@ namespace Choreography.Transport.SimpleX
     //   mode   = "invitation" | "contact"
     //   queryString = "v=...&smp=...&e2e=...&data=..." (URL-encoded values)
     //
-    //   smp = lista ;-separated de queue URIs (formato smp://HASH@host/sndId#/dhKey)
-    //   v   = agent version range (ignorado por Choreography)
-    //   e2e = ratchet params (relevante solo si Choreography implementa Double Ratchet)
-    //   data = client data opcional (text)
+    //   smp = ;-separated list of queue URIs (format smp://HASH@host/sndId#/dhKey)
+    //   v   = agent version range (ignored by Choreography)
+    //   e2e = ratchet params (relevant only if Choreography implements Double Ratchet)
+    //   data = optional client data (text)
     //
-    // Choreography no usa e2e ni v; este decoder extrae solo smp queues. El Ushier
-    // emitir share-links si quiere interop con SimpleX Chat oficial; los Stage consumen
-    // queues directamente.
+    // Choreography uses neither e2e nor v; this decoder extracts only smp queues. The host
+    // can emit share-links if it wants interop with the official SimpleX Chat; Stages consume
+    // queues directly.
     internal static class SimplexShareLink
     {
         public sealed class DecodedShareLink

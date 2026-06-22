@@ -3,15 +3,15 @@ using Choreography.StageManager;
 
 namespace Choreography.Usher
 {
-    // Record que el Usher inyecta al journal cuando un nuevo Stage pasa la aprobacion.
-    // Es la fuente de verdad de membresia: los peers existentes lo replican y a partir
-    // de el saben que existe un Stage nuevo con esta pubkey, y emiten sus invitaciones
-    // de peer-to-peer hacia el (Fase 6).
+    // Record that the Usher injects into the journal when a new Stage passes approval.
+    // It is the source of truth for membership: existing peers replicate it and from
+    // it they know that a new Stage exists with this pubkey, and they emit their
+    // peer-to-peer invitations toward it (Phase 6).
     //
-    // IMPORTANTE (D5): el StagePublicKey va dentro porque los peers lo necesitan para
-    // sellar PeerInvitationRecord. El Usher lo escribe aqui y descarta su copia
-    // in-memory; despues del commit el Usher no conserva el pubkey. La "fuente" del
-    // pubkey pasa a ser el journal replicado, no el Usher.
+    // IMPORTANT (D5): the StagePublicKey is included because peers need it to
+    // seal PeerInvitationRecord. The Usher writes it here and discards its
+    // in-memory copy; after the commit the Usher does not retain the pubkey. The "source" of
+    // the pubkey becomes the replicated journal, not the Usher.
     public sealed class MembershipRecord
     {
         public PerformerId StageId { get; }

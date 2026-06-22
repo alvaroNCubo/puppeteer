@@ -26,7 +26,7 @@ namespace Puppeteer.EventSourcing.DB
 		// post-refactor write API is WriteScriptEntry / WriteDefineEntry /
 		// WriteInvocationEntry / WriteDefineWithFirstInvocation.
 
-		// Requiere AllowMultipleStatements = true en la connection string de MySQL: "Server=...;Database=...;AllowMultipleStatements=true;..."
+		// Requires AllowMultipleStatements = true in the MySQL connection string: "Server=...;Database=...;AllowMultipleStatements=true;..."
 		internal DiaryStorageMySQL(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
 		{
 			mySqlWriteScriptCommand = $"insert into `{Name}` (id, OccurredAt, Script) values (@id, @OccurredAt, @Script)";
@@ -114,8 +114,8 @@ namespace Puppeteer.EventSourcing.DB
 					PRIMARY KEY (ReactionId, Pattern)
 				) ENGINE=InnoDB CHARSET=utf8;");
 
-			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por
-			// reaction (frente-leido + frontera-cerrada) para resume de cobertura.
+			// Resume optimization (checkpoint redesign, step 2): two global cursors per
+			// reaction (read-front + closed-frontier) for coverage resume.
 			statement
 				.Append(@"CREATE TABLE IF NOT EXISTS ReactionFrontier (
 					ReactionId INT NOT NULL,
@@ -124,13 +124,13 @@ namespace Puppeteer.EventSourcing.DB
 					PRIMARY KEY (ReactionId)
 				) ENGINE=InnoDB CHARSET=utf8;");
 
-			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
-			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
-			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// ExposeData: optional lateral table (one row per event that executed expose).
+			// The follower path forces includeExposeData=true and its replay SELECT
+			// performs LEFT JOIN ExposeData, so the table must always exist — just like
 			// Follower/Reaction/ReactionCheckpoint/ReactionFrontier. Reported by a follower deployment
-			// 2.0.1-beta.9817 (follower sobre DB MySQL nueva donde el script manual nunca
-			// corrio). La columna es DiaryId (no DairyId): es la que el motor lee en el JOIN
-			// y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			// 2.0.1-beta.9817 (follower on a fresh MySQL DB where the manual script never
+			// ran). The column is DiaryId (not DairyId): it is the one the engine reads in the JOIN
+			// and in the INSERT INTO ExposeData (DiaryId, ExposeJson).
 			statement
 				.Append(@"CREATE TABLE IF NOT EXISTS ExposeData (
 					DiaryId BIGINT NOT NULL,
@@ -178,15 +178,15 @@ namespace Puppeteer.EventSourcing.DB
 				.Append("	PRIMARY KEY (id)")
 				.Append(")	ENGINE=InnoDB CHARSET=utf8;");
 
-			// Schema validation: si la tabla del actor ya existia con un schema
-			// viejo (pre-rename), CREATE TABLE IF NOT EXISTS es
-			// no-op y la siguiente SELECT con d.OccurredAt / d.Action /
-			// d.Arguments lanza MySqlException 'Unknown column ...' que el
-			// catch de RehydrateFromEvent silenciaba con Console.WriteLine,
-			// dejando al actor con CurrentEntryId=0 y journal aparentemente
-			// vacio. Reportado por LiquidityAPI 2.0.1-beta.9553. Aqui
-			// inspeccionamos las columnas reales y throw inmediato con el
-			// ALTER TABLE accionable.
+			// Schema validation: if the actor's table already existed with an
+			// old schema (pre-rename), CREATE TABLE IF NOT EXISTS is a
+			// no-op and the next SELECT with d.OccurredAt / d.Action /
+			// d.Arguments throws MySqlException 'Unknown column ...' that the
+			// RehydrateFromEvent catch silenced with Console.WriteLine,
+			// leaving the actor with CurrentEntryId=0 and an apparently
+			// empty journal. Here we
+			// inspect the real columns and throw immediately with the
+			// actionable ALTER TABLE.
 
 			// Phase 6 of the Action refactor: dropped CREATE TABLE _ACTION.
 			// Action definitions live in the journal as Define records.
@@ -219,7 +219,7 @@ namespace Puppeteer.EventSourcing.DB
 				) ENGINE=InnoDB CHARSET=utf8;"
 			);
 
-			// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction.
+			// Resume optimization (checkpoint redesign, step 2): two global cursors per reaction.
 			statement.Append(@"
 				CREATE TABLE IF NOT EXISTS ReactionFrontier (
 					ReactionId INT NOT NULL,
@@ -229,13 +229,13 @@ namespace Puppeteer.EventSourcing.DB
 				) ENGINE=InnoDB CHARSET=utf8;"
 			);
 
-			// ExposeData: tabla lateral opcional (un row por evento que ejecuto expose).
-			// El camino del follower fuerza includeExposeData=true y su SELECT de replay
-			// hace LEFT JOIN ExposeData, asi que la tabla debe existir siempre — igual que
+			// ExposeData: optional lateral table (one row per event that executed expose).
+			// The follower path forces includeExposeData=true and its replay SELECT
+			// performs LEFT JOIN ExposeData, so the table must always exist — just like
 			// Follower/Reaction/ReactionCheckpoint/ReactionFrontier. Reported by a follower deployment
-			// 2.0.1-beta.9817 (follower sobre DB MySQL nueva donde el script manual nunca
-			// corrio). La columna es DiaryId (no DairyId): es la que el motor lee en el JOIN
-			// y en los INSERT INTO ExposeData (DiaryId, ExposeJson).
+			// 2.0.1-beta.9817 (follower on a fresh MySQL DB where the manual script never
+			// ran). The column is DiaryId (not DairyId): it is the one the engine reads in the JOIN
+			// and in the INSERT INTO ExposeData (DiaryId, ExposeJson).
 			statement.Append(@"
 				CREATE TABLE IF NOT EXISTS ExposeData (
 					DiaryId BIGINT NOT NULL,
@@ -273,11 +273,11 @@ namespace Puppeteer.EventSourcing.DB
 			return created;
 		}
 
-		// Inspecciona `information_schema.COLUMNS` para detectar tablas de actor
-		// pre-existentes con el schema viejo anterior (FechaHora,
-		// NOT NULL Ip/User/Script, sin Action/Arguments). Si encuentra mismatch,
-		// throw LanguageException con el script ALTER TABLE listo para correr.
-		// Llamado solo cuando created==false (la tabla ya existia).
+		// Inspects `information_schema.COLUMNS` to detect pre-existing actor
+		// tables with the older legacy schema (FechaHora,
+		// NOT NULL Ip/User/Script, without Action/Arguments). If a mismatch is found,
+		// throw LanguageException with the ALTER TABLE script ready to run.
+		// Called only when created==false (the table already existed).
 		private void ValidateExistingSchemaOrThrow(string tableName)
 		{
 			var columns = new Dictionary<string, (string DataType, string IsNullable)>(StringComparer.OrdinalIgnoreCase);
@@ -361,9 +361,9 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					connection.Open();
 
-					// Materialize v2 / Fase 0.5: la columna Skip del journal es autoritativa
+					// Materialize v2 / Phase 0.5: the journal's Skip column is authoritative
 					// for rehydration. Replaces LEFT JOIN EventElision with WHERE d.Skip = 0.
-					// EventElisionStorageMySQL.MarkEventsAsElided poble Skip = 1 transaccionalmente.
+					// EventElisionStorageMySQL.MarkEventsAsElided sets Skip = 1 transactionally.
 					string sqlCount = $@"
 						SELECT Count(*) Cantidad
 						FROM `{base.Name}` d
@@ -486,11 +486,11 @@ namespace Puppeteer.EventSourcing.DB
 										{
 											intentos--;
 											fails++;
-											// Pasa por IPuppeteerLogger.Error en vez de Console.WriteLine: con
-											// el ConsoleLogger default va a stderr (Console.Error) con prefijo
-											// [Puppeteer ERROR], y los hosts que inyectaron Serilog/MEL/NLog
-											// via Performance.Logger(...) lo capturan tambien. Antes del refactor
-											// de log4net->IPuppeteerLogger esto era invisible en stderr.
+											// Goes through IPuppeteerLogger.Error instead of Console.WriteLine: with
+											// the default ConsoleLogger it goes to stderr (Console.Error) with prefix
+											// [Puppeteer ERROR], and hosts that injected Serilog/MEL/NLog
+											// via Performance.Logger(...) capture it too. Before the
+											// log4net->IPuppeteerLogger refactor this was invisible on stderr.
 											Logger.Error($"RehydrateFromEvent retry {fails} on actor '{base.Name}'. type:{mysqlException.GetType()} error:{mysqlException.Message}", mysqlException);
 										}
 									}
@@ -536,13 +536,13 @@ namespace Puppeteer.EventSourcing.DB
 			}
 			catch (Exception e)
 			{
-				// Pasa por IPuppeteerLogger.Error: con el ConsoleLogger default va a
-				// Console.Error (stderr) con prefijo [Puppeteer ERROR]. Si el host
-				// inyecto un logger (Serilog/MEL/NLog) via Performance.Logger(...),
-				// tambien lo recibe ahi. El swallow-and-continue se mantiene para
-				// permitir que fallas transitorias no aborten el actor — el caller
-				// (EventSourcingStorage) ve ultimoId = afterEntryId y continua con
-				// estado parcial; el log es la unica evidencia de la falla.
+				// Goes through IPuppeteerLogger.Error: with the default ConsoleLogger it goes to
+				// Console.Error (stderr) with prefix [Puppeteer ERROR]. If the host
+				// injected a logger (Serilog/MEL/NLog) via Performance.Logger(...),
+				// it also receives it there. The swallow-and-continue is kept to
+				// allow transient failures not to abort the actor — the caller
+				// (EventSourcingStorage) sees ultimoId = afterEntryId and continues with
+				// partial state; the log is the only evidence of the failure.
 				Logger.Error($"RehydrateFromEvent outer block failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
@@ -1264,7 +1264,7 @@ namespace Puppeteer.EventSourcing.DB
 
 						if (needsTrim)
 						{
-							/*ARMA EL SCRIPT EL RENAME*/
+							/*BUILD THE RENAME SCRIPT*/
 							sql.Append("RENAME TABLE ");
 							sql.Append(aName);
 							sql.Append(" TO ");
@@ -1281,7 +1281,7 @@ namespace Puppeteer.EventSourcing.DB
 
 							CreateDiary(aName);
 
-							/*ARMA EL SCRIPT DE CRATE TABLE, INDICES Y DATA*/
+							/*BUILD THE CREATE TABLE, INDEXES AND DATA SCRIPT*/
 							sql.Append("INSERT INTO ");
 							sql.Append('`');
 							sql.Append(aName);
@@ -1299,7 +1299,7 @@ namespace Puppeteer.EventSourcing.DB
 							sql.Append(trimmedDown.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
 							sql.Append("' ORDER BY id;");
 
-							/*ARMA EL SCRIPT DE DROP TABLE*/
+							/*BUILD THE DROP TABLE SCRIPT*/
 							sql.AppendLine();
 							sql.Append("DROP TABLE ");
 							sql.Append(aName);
@@ -1415,7 +1415,7 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			ArgumentNullException.ThrowIfNull(formattedReaction);
 
-			// Primero intentar obtener el ID si ya existe
+			// First try to get the ID if it already exists
 			string selectSql = "SELECT Id FROM Reaction WHERE Reaction = @FormattedReaction";
 			long existingId = 0;
 
@@ -1453,7 +1453,7 @@ namespace Puppeteer.EventSourcing.DB
 						newId = Convert.ToInt32(result) + 1;
 					}
 
-					// Insertar el nuevo reaction
+					// Insert the new reaction
 					string insertSql = "INSERT INTO Reaction (Id, Reaction) VALUES (@ReactionId, @FormattedReaction)";
 					using (MySqlCommand command = new MySqlCommand(insertSql, connection))
 					{
@@ -1473,7 +1473,7 @@ namespace Puppeteer.EventSourcing.DB
 			return existingId;
 		}
 
-		// FASE 5A: Checkpoint de dos fases - retorna tupla (detected, confirmed) en un solo acceso
+		// PHASE 5A: two-phase checkpoint - returns tuple (detected, confirmed) in a single access
 		protected internal override (long detected, long confirmed) GetReactionCheckpoint(long reactionId, int seekLevel)
 		{
 			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
@@ -1512,9 +1512,9 @@ namespace Puppeteer.EventSourcing.DB
 			return (detected, confirmed);
 		}
 
-		// Resume optimization (paso 2): dos cursores globales por reaction (frente-leido +
-		// frontera-cerrada). MySQL es backend "journal local" (fila Job/Cue de la matriz) ->
-		// resume re-leyendo [closed, high-water]; no usa snapshot.
+		// Resume optimization (step 2): two global cursors per reaction (read-front +
+		// closed-frontier). MySQL is a "local journal" backend (Job/Cue row of the matrix) ->
+		// resume by re-reading [closed, high-water]; does not use a snapshot.
 		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
 		{
 			if (reactionId <= 0) throw new LanguageException("Reaction Id must be upper than zero");
@@ -1623,14 +1623,14 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// DEPRECATED: Mantener por compatibilidad, retorna Detected
+		// DEPRECATED: Kept for compatibility, returns Detected
 		protected internal override long GetReactionLastProcessedEntryId(long reactionId, int pattern)
 		{
 			var (detected, _) = GetReactionCheckpoint(reactionId, pattern);
-			return detected; // Retornar solo Detected por compatibilidad
+			return detected; // Return only Detected for compatibility
 		}
 
-		// DEPRECATED: Mantener por compatibilidad, guarda ambos (detected = confirmed = lastEntryId)
+		// DEPRECATED: Kept for compatibility, saves both (detected = confirmed = lastEntryId)
 		protected internal override void SaveReactionLastProcessedEntryId(long reactionId, int pattern, long lastEntryId)
 		{
 			if (pattern < 0) throw new LanguageException("Pattern must be zero or upper");
@@ -1706,20 +1706,20 @@ namespace Puppeteer.EventSourcing.DB
 							if (newEntryId > currentEntryId)
 							{
 								isGreater = true;
-								break; // Primer nivel diferente y greaterThan
+								break; // First differing level and greaterThan
 							}
 							else if (newEntryId < currentEntryId)
 							{
 								transaction.Rollback();
-								return false; // Primer nivel diferente y lessThan
+								return false; // First differing level and lessThan
 							}
-							// Si assign, continuar
+							// If equal, continue
 						}
 
 						if (!isGreater)
 						{
 							transaction.Rollback();
-							return false; // Todos iguales o lessThan
+							return false; // All equal or lessThan
 						}
 
 						foreach (long eventId in eventIds)
@@ -1768,22 +1768,22 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Etapa 5 del refactor Distill. Reemplaza el throw NotImplementedException
-		// heredado del base. Materializa fisicamente las elisiones acumuladas en
-		// EventElision: borra los rows de `{Name}` cuyos ids estan en EventElision
-		// (junto con sus entradas en EventElision), excepto el record con MAX(id) —
-		// invariante "ultimo record nunca se elide fisicamente".
+		// Stage 5 of the Distill refactor. Replaces the throw NotImplementedException
+		// inherited from the base. Physically materializes the elisions accumulated in
+		// EventElision: deletes the rows of `{Name}` whose ids are in EventElision
+		// (together with their entries in EventElision), except the record with MAX(id) —
+		// invariant "the last record is never physically elided".
 		//
-		// Semantica: single transaction. Si falla, rollback completo.
-		// El outer rwLock de ActorHandler ya serializa con WriteScriptEntry /
-		// MarkEventsAsElidedWithCheckpoint, so the SET of IDs to delete does not
-		// puede cambiar mientras corremos.
+		// Semantics: single transaction. If it fails, full rollback.
+		// ActorHandler's outer rwLock already serializes with WriteScriptEntry /
+		// MarkEventsAsElidedWithCheckpoint, so the SET of IDs to delete cannot
+		// change while we run.
 		//
-		// EventElision sirve a un solo actor — el principio "one actor per database"
-		// (ver memoria project_actor_per_db_principle.md) garantiza que todos los rows
-		// de la tabla pertenecen a este actor. El INNER JOIN con `{Name}` es defensivo
-		// (evita afectar rows sin journal entry correspondiente) no necesario para
-		// aislamiento cross-actor.
+		// EventElision serves a single actor — the "one actor per database" principle
+		// (see memory project_actor_per_db_principle.md) guarantees that all the rows
+		// of the table belong to this actor. The INNER JOIN with `{Name}` is defensive
+		// (avoids affecting rows without a corresponding journal entry) not necessary for
+		// cross-actor isolation.
 		protected internal override void Distill()
 		{
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
@@ -1793,7 +1793,7 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					try
 					{
-						// Snapshot del max id (preserve para la invariante).
+						// Snapshot of the max id (preserved for the invariant).
 						long maxId;
 						string maxIdSql = $"SELECT COALESCE(MAX(id), 0) FROM `{Name}`";
 						using (MySqlCommand cmd = new MySqlCommand(maxIdSql, connection, transaction))
@@ -1804,17 +1804,17 @@ namespace Puppeteer.EventSourcing.DB
 
 						if (maxId == 0)
 						{
-							// Journal vacio, nada que destilar.
+							// Empty journal, nothing to distill.
 							transaction.Commit();
 							return;
 						}
 
-						// Capturar IDs a remover en una tabla temporal. Tiene tres ventajas:
-						//  - Permite el DELETE en `{Name}` sin la restriccion MySQL de "can't
+						// Capture IDs to remove in a temporary table. It has three advantages:
+						//  - Allows the DELETE on `{Name}` without the MySQL restriction "can't
 						//    delete from table referenced in subquery".
-						//  - El conjunto se calcula una sola vez (consistencia entre los dos DELETEs).
-						//  - Acota a IDs presentes en NUESTRO journal (defensiva ante posibles
-						//    DiaryIds colisionantes con otros actores en la tabla global).
+						//  - The set is computed only once (consistency between the two DELETEs).
+						//  - Bounds to IDs present in OUR journal (defensive against possible
+						//    DiaryIds colliding with other actors in the global table).
 						using (MySqlCommand cmd = new MySqlCommand(
 							$@"CREATE TEMPORARY TABLE _distill_ids_{Name} (id BIGINT PRIMARY KEY) ENGINE=Memory;
 							INSERT INTO _distill_ids_{Name}
@@ -1849,9 +1849,9 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Paper 5 / Materialize v2 — Fase 2. Read raw records (sin filtrar Skip).
-		// Capa 1 del wire (records solos, sin elision markers ni checkpoints —
-		// esos vienen en Fase 3 via (c)+(d)). Distincion por columna: Script != NULL
+		// Paper 5 / Materialize v2 — Phase 2. Read raw records (without filtering Skip).
+		// Layer 1 of the wire (records alone, without elision markers or checkpoints —
+		// those come in Phase 3 via (c)+(d)). Distinction by column: Script != NULL
 		// AND Action IS NULL = Script entry; Script != NULL AND Action != NULL = Define;
 		// Script IS NULL AND Action != NULL = Invocation.
 		protected internal override void ReadRecordsAfter(long afterEntryId, List<MaterializationRecord> result)
@@ -1930,9 +1930,9 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (c) DameCheckpointsHasta.
-		// Snapshot atomic del registry de reactions desde tabla Reaction (schema
-		// global por DB: Id INT PK, Reaction TEXT). Una row por (formattedReaction).
+		// Materialize v2 / Phase 3 — wire verb (c) DameCheckpointsHasta.
+		// Atomic snapshot of the reactions registry from the Reaction table (global
+		// schema per DB: Id INT PK, Reaction TEXT). One row per (formattedReaction).
 		protected internal override void ReadReactionRegistry(List<MaterializationReactionDefinition> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -1962,9 +1962,9 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Snapshot atomic de checkpoints. Tabla ReactionCheckpoint(ReactionId,
-		// Pattern, DiaryId, ConfirmedDiaryId). 'DiaryId' es el campo de Detected
-		// (legacy naming); 'ConfirmedDiaryId' es Confirmed.
+		// Atomic snapshot of checkpoints. ReactionCheckpoint table (ReactionId,
+		// Pattern, DiaryId, ConfirmedDiaryId). 'DiaryId' is the Detected field
+		// (legacy naming); 'ConfirmedDiaryId' is Confirmed.
 		protected internal override void ReadReactionCheckpoints(List<MaterializationReactionCheckpoint> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);

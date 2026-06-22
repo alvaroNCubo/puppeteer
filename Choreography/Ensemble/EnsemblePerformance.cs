@@ -12,11 +12,11 @@ namespace Choreography.Ensemble
         private readonly ConcurrentDictionary<string, T> performers = new(StringComparer.OrdinalIgnoreCase);
         private readonly Func<string, T> factory;
         private IOutputFormatter formatterPrototype;  // null = default JsonFormatter
-        // Logger inyectado por el host. null = cada Performance arranca con su
-        // ConsoleLogger default. Se aplica a performers existentes en .Logger(x)
-        // y se propaga a nuevos en GetOrCreate. Per-actor (no singleton): cada
-        // Performance del ensemble recibe la misma impl pero la guarda en su
-        // propio ActorHandler.
+        // Logger injected by the host. null = each Performance starts with its
+        // default ConsoleLogger. Applied to existing performers in .Logger(x)
+        // and propagated to new ones in GetOrCreate. Per-actor (not singleton): each
+        // Performance in the ensemble receives the same impl but stores it in its
+        // own ActorHandler.
         private IPuppeteerLogger loggerPrototype;
 
         public EnsemblePerformance(Func<string, T> factory)
@@ -32,8 +32,8 @@ namespace Choreography.Ensemble
         //    performer immediately, AND new performers created via
         //    GetOrCreate are configured with the prototype.
         //  - V1 performers (or any other T:Performance without the
-        //    Formatter setter): silent ignore. V1 is fixed JSON per
-        //    Alvaro firma 2026-05-19; mixing V1+V2 in one ensemble is
+        //    Formatter setter): silent ignore. V1 is fixed JSON by
+        //    design; mixing V1+V2 in one ensemble is
         //    allowed but the V1 actors continue emitting JSON.
 
         public EnsemblePerformance<T> Formatter(IOutputFormatter prototype)
@@ -45,15 +45,15 @@ namespace Choreography.Ensemble
                 {
                     v2.Formatter(prototype);
                 }
-                // V1 / otros: silent ignore.
+                // V1 / others: silent ignore.
             }
             return this;
         }
 
-        // Logger seam: per-actor (no singleton). El prototipo se propaga a cada
-        // performer existente y se aplica a nuevos en GetOrCreate. Fluent para
-        // alinearse con Formatter(). Sin inyeccion cada Performance usa su
-        // ConsoleLogger default (Error -> stderr, Debug -> stdout).
+        // Logger seam: per-actor (not singleton). The prototype is propagated to each
+        // existing performer and applied to new ones in GetOrCreate. Fluent to
+        // align with Formatter(). Without injection each Performance uses its
+        // default ConsoleLogger (Error -> stderr, Debug -> stdout).
         public EnsemblePerformance<T> Logger(IPuppeteerLogger logger)
         {
             if (logger == null) throw new ArgumentNullException(nameof(logger));
@@ -100,8 +100,8 @@ namespace Choreography.Ensemble
                 {
                     v2.Formatter(formatterPrototype);
                 }
-                // Per-actor logger: cada Performance recien creado recibe el
-                // sink configurado al nivel del ensemble (si el host lo cableo
+                // Per-actor logger: each newly created Performance receives the
+                // sink configured at the ensemble level (if the host wired it
                 // via .Logger(x)).
                 if (loggerPrototype != null)
                 {

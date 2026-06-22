@@ -64,7 +64,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 		void BeginCollectionItem();
 		void EndCollectionItem();
 
-		// ── Field (escalar) ────────────────────────────────────────────────
+		// ── Field (scalar) ─────────────────────────────────────────────────
 
 		void Field(ReadOnlySpan<char> name, bool value);
 		void Field(ReadOnlySpan<char> name, int value);
@@ -75,7 +75,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 		void Field(ReadOnlySpan<char> name, DateTime value);
 		void Field(ReadOnlySpan<char> name, char value);
 
-		// ── Field (collection de primitivos) ───────────────────────────────
+		// ── Field (collection of primitives) ───────────────────────────────
 
 		void Field(ReadOnlySpan<char> name, IEnumerable<int> values);
 		void Field(ReadOnlySpan<char> name, IEnumerable<long> values);

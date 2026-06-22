@@ -3,12 +3,11 @@ using System.Runtime.CompilerServices;
 
 namespace Puppeteer.EventSourcing.Interpreter.Utils
 {
-	// Mejora A de perf: cache de boxes para value-types comunes en la ruta de
-	// deserializacion de Parameters (LoadArguments) y para los defaults de los
-	// parametros Out. Compartir el box es seguro porque los primitivos boxeados son
-	// inmutables: el codigo siempre reemplaza la referencia en VariableSymbol.value,
-	// nunca muta el contenido del box in-place, y no hay comparaciones por identidad
-	// sobre los valores de los parametros.
+	// Perf improvement A: cache of boxes for common value-types on the Parameters
+	// deserialization path (LoadArguments) and for the defaults of Out parameters.
+	// Sharing the box is safe because boxed primitives are immutable: the code always
+	// replaces the reference in VariableSymbol.value, never mutates the box content
+	// in-place, and there are no identity comparisons over the parameter values.
 	internal static class BoxCache
 	{
 		internal static readonly object True = true;
@@ -38,14 +37,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 
 		internal static object Box(bool value) => value ? True : False;
 
-		// Mejora (d): de-box generico para el path de preparacion (UserParameter<T>),
-		// donde el value llega como T sin boxear. Para int/bool extrae el valor con
-		// Unsafe.As (sin boxear) y devuelve el box cacheado; para los demas T boxea
-		// normal (decimal/double/DateTime no son cacheables; string y refs no boxean).
-		// El idioma typeof(T)==typeof(...) es resuelto por el JIT por instanciacion, asi
-		// que solo se ejecuta la rama de su tipo. NOTA: el indexer object this[string,
-		// Type] NO puede de-boxearse — el box lo emite el compilador en el call-site
-		// antes de entrar al setter.
+		// Improvement (d): generic de-box for the preparation path (UserParameter<T>),
+		// where the value arrives as T unboxed. For int/bool it extracts the value with
+		// Unsafe.As (without boxing) and returns the cached box; for the other T it boxes
+		// normally (decimal/double/DateTime are not cacheable; string and refs do not box).
+		// The typeof(T)==typeof(...) idiom is resolved by the JIT per instantiation, so
+		// only the branch for its type runs. NOTE: the indexer object this[string,
+		// Type] CANNOT be de-boxed — the box is emitted by the compiler at the call-site
+		// before entering the setter.
 		internal static object Box<T>(T value)
 		{
 			if (typeof(T) == typeof(int)) return Box(Unsafe.As<T, int>(ref value));

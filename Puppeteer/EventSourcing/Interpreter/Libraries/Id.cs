@@ -64,11 +64,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// True cuando la resolucion de referencias ya ligo este Id a un simbolo
-		// (parametro, variable local o global). False si su scope sigue Undefined,
-		// que es el caso de un identificador que no corresponde a ningun binding y
-		// que por tanto puede tratarse como el nombre de una clase registrada
-		// (regla simbolo-primero / clase-fallback para llamadas a metodos static).
+		// True when reference resolution has already bound this Id to a symbol
+		// (parameter, local variable, or global). False if its scope is still Undefined,
+		// which is the case of an identifier that does not correspond to any binding and
+		// can therefore be treated as the name of a registered class
+		// (symbol-first / class-fallback rule for static method calls).
 		internal bool HasResolvedScope
 		{
 			get

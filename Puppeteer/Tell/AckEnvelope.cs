@@ -1,10 +1,10 @@
 namespace Puppeteer.Tell
 {
-	// Sobre que el transport entrega de regreso al actor de origen cuando el
-	// receptor (B) reportó procesamiento. B no sabe que existe la primitiva tell —
-	// emite un evento normal por su endpoint, y el transport (KafkaTransport,
-	// RestTransport, etc.) lo mapea al canal de retorno hacia A. Plan 6 lo
-	// ingiere como oración `tell ack <id> from <Target>(<id>)` en el journal de A.
+	// Envelope that the transport delivers back to the origin actor when the
+	// receiver (B) reported processing. B does not know that the tell primitive exists —
+	// it emits a normal event through its endpoint, and the transport (KafkaTransport,
+	// RestTransport, etc.) maps it to the return channel toward A. Plan 6
+	// ingests it as the sentence `tell ack <id> from <Target>(<id>)` in A's journal.
 	public readonly record struct AckEnvelope(
 		string Id,
 		string TargetClass,

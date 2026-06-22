@@ -29,9 +29,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		// Checkpoints: (reactionId, seekLevel) -> (detected, confirmed)
 		private readonly Dictionary<(long, int), (long detected, long confirmed)> checkpoints = new();
 
-		// Resume optimization (rediseño de checkpoint, paso 2): dos cursores globales por reaction
-		// para cobertura. reactionId -> (highWater, closedFrontier). Persiste en un archivo propio
-		// (derivado de checkpointsPath) para no tocar el formato del checkpoint per-seek.
+		// Resume optimization (checkpoint redesign, step 2): two global cursors per reaction
+		// for coverage. reactionId -> (highWater, closedFrontier). Persisted in its own file
+		// (derived from checkpointsPath) so the per-seek checkpoint format is left untouched.
 		private readonly Dictionary<long, (long highWater, long closedFrontier)> frontiers = new();
 
 		internal ReactionStore(string reactionsPath, string checkpointsPath, IAtomicFileOperation atomicOp)
@@ -288,7 +288,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Materialize v2 / Fase 3: snapshot atomic del registry para wire verb (c).
+		// Materialize v2 / Fase 3: atomic snapshot of the registry for wire verb (c).
 		internal void ListRegistry(List<MaterializationReactionDefinition> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -304,7 +304,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			result.Sort((a, b) => a.ReactionId.CompareTo(b.ReactionId));
 		}
 
-		// Materialize v2 / Fase 3: snapshot atomic de checkpoints para wire verb (c).
+		// Materialize v2 / Fase 3: atomic snapshot of checkpoints for wire verb (c).
 		internal void ListCheckpoints(List<MaterializationReactionCheckpoint> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);

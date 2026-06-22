@@ -25,8 +25,8 @@ namespace Choreography.Transport.SimpleX
             // Payload
             payload.CopyTo(block.AsSpan(LengthPrefixSize));
 
-            // Padding con caracter '#' (0x23). La spec SMP (simplexmq Crypto.hs `pad`)
-            // exige este byte especifico, no random — el server compara con mascara fija.
+            // Padding with the '#' character (0x23). The SMP spec (simplexmq Crypto.hs `pad`)
+            // requires this specific byte, not random — the server compares against a fixed mask.
             if (payload.Length < MaxPayloadSize)
             {
                 block.AsSpan(LengthPrefixSize + payload.Length).Fill((byte)'#');

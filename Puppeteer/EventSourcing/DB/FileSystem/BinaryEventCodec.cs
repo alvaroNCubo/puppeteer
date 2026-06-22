@@ -176,7 +176,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			// Phase 3 of the Action refactor: Define records have a distinct two-payload
 			// layout (actionId + defineStatementText + arguments) and must be decoded via
 			// TryDecodeDefine. Returning false here makes JournalReader silently skip them
-			// during replay (firmado Q5 — Phase 5 wires the real dispatch once the live
+			// during replay (signed Q5 — Phase 5 wires the real dispatch once the live
 			// caller emits Define entries).
 			if (eventType == EventRecordType.Define) return false;
 
@@ -217,7 +217,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		}
 
 		// Phase 3 of the Action refactor: encodes a Define record carrying
-		// (actionId, defineStatementText). Phase 4 split-model firmado (2026-05-09):
+		// (actionId, defineStatementText). Phase 4 split-model signed (2026-05-09):
 		// Define records do NOT carry arguments — the first invocation lives in a
 		// separate Invocation record written immediately after. Layout mirrors
 		// EncodeActionEvent but the body payload is the canonical DSL sentence
@@ -274,7 +274,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 		// Phase 3 of the Action refactor: decodes a Define record. Returns false if the
 		// record's type byte is not Define, mirroring the negative-result contract of
-		// the existing TryDecode. Phase 4 split-model firmado: Define records do not
+		// the existing TryDecode. Phase 4 split-model signed: Define records do not
 		// carry arguments — first invocation is a separate record.
 		internal static bool TryDecodeDefine(byte[] recordBuffer, int recordLength,
 			out long entryId, out DateTime occurredAt,

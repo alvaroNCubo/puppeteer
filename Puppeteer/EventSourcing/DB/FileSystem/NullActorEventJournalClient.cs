@@ -15,8 +15,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		public string ActorName => actorName;
 		public bool IsNew { set { } }
 
-		// Null client se construye sin Actor (helpers de FileSystem). El default
-		// ConsoleLogger es suficiente para el ambito de uso.
+		// The null client is constructed without an Actor (FileSystem helpers). The
+		// default ConsoleLogger is sufficient for this usage scope.
 		public IPuppeteerLogger Logger { get; } = new ConsoleLogger();
 
 		public bool IsActionKnown(int actionId) => false;

@@ -8,31 +8,31 @@ using Puppeteer;
 
 namespace Choreography.Usher
 {
-    // El Usher es la pieza de ContactSecret que sindicaliza Stages nuevos a la red. NO es
-    // peer de consenso (D2): no participa en quorum, solo gatekeepea entry y appendea
-    // MembershipRecord al journal via IJournalWriter.
+    // The Usher is the ContactSecret piece that syndicates new Stages into the network. It is NOT
+    // a consensus peer (D2): it does not participate in quorum, it only gatekeeps entry and appends
+    // MembershipRecord to the journal via IJournalWriter.
     //
-    // Lifecycle por onboarding:
-    //   1. IssueInvitationAsync -> emite ConnectionInvitation y la persiste como
-    //      PendingInvitation con un nonce y TTL. El caller renderiza la invitacion
-    //      como QR (D3: 1 QR = 1 Stage, fresh queue cada vez).
-    //   2. RunOnboardingLoopAsync -> escucha conexiones entrantes en cada PendingInvitation
-    //      vigente. Cuando un Stage se conecta, recibe UsherJoinRequest, pide aprobacion
-    //      (D4 manual), commitea MembershipRecord, sella el journal secret a la pubkey
-    //      recibida, manda UsherJoinResponse, cierra el canal y descarta la pubkey
-    //      in-memory.
+    // Per-onboarding lifecycle:
+    //   1. IssueInvitationAsync -> emits a ConnectionInvitation and persists it as a
+    //      PendingInvitation with a nonce and TTL. The caller renders the invitation
+    //      as a QR (D3: 1 QR = 1 Stage, fresh queue each time).
+    //   2. RunOnboardingLoopAsync -> listens for incoming connections on each live
+    //      PendingInvitation. When a Stage connects, it receives UsherJoinRequest, requests approval
+    //      (D4 manual), commits MembershipRecord, seals the journal secret to the received
+    //      pubkey, sends UsherJoinResponse, closes the channel and discards the in-memory
+    //      pubkey.
     //
-    // Invariantes de seguridad:
-    //   - Nonce del QR debe matchear con el PendingInvitation correspondiente. Sin
-    //     match, se rechaza el request (sin filtrar a Stage si fue por nonce-invalido o
-    //     invitacion-expirada — solo "rejected").
-    //   - Firma del JoinRequest (D7) debe verificar contra la pubkey enviada. Si no
-    //     verifica, rechazo.
-    //   - StageId del MembershipRecord = StageIdDerivation.FromPublicKey(pubkey). El
-    //     Usher recomputa, no confia en el Stage para asignarse Id.
-    //   - Tras escribir el MembershipRecord, el Usher NO conserva el pubkey en memoria
-    //     (D5). El pubkey vive en el journal; el estado del Usher solo lleva el
-    //     StageId (hash) en logs/auditoria si quisiera.
+    // Security invariants:
+    //   - The QR nonce must match the corresponding PendingInvitation. Without a
+    //     match, the request is rejected (without disclosing to the Stage whether it was due to an
+    //     invalid-nonce or an expired-invitation — only "rejected").
+    //   - The JoinRequest signature (D7) must verify against the sent pubkey. If it does not
+    //     verify, reject.
+    //   - The MembershipRecord StageId = StageIdDerivation.FromPublicKey(pubkey). The
+    //     Usher recomputes it, it does not trust the Stage to assign its own Id.
+    //   - After writing the MembershipRecord, the Usher does NOT retain the pubkey in memory
+    //     (D5). The pubkey lives in the journal; the Usher state only carries the
+    //     StageId (hash) in logs/audit if it wanted to.
     // Paper 7 Phase 2: promoted internal→public alongside IStageTransport and
     // StageOnboardingClient (option (a) of the original scaffold note). The CLI
     // that emits invitations and the per-Docker host that joins via Usher live
@@ -54,8 +54,8 @@ namespace Choreography.Usher
         private readonly List<CancellationTokenSource> backgroundTasks = new();
         private readonly object backgroundTasksLock = new object();
 
-        // Overload viejo (sin logger): callers existentes (Paper7 CLI) lo siguen
-        // usando. Delega al overload nuevo con un ConsoleLogger default.
+        // Old overload (without logger): existing callers (Paper7 CLI) still use
+        // it. Delegates to the new overload with a default ConsoleLogger.
         public Usher(
             PerformerId localId,
             IStageTransport transport,
@@ -110,9 +110,9 @@ namespace Choreography.Usher
             this.logger = logger;
         }
 
-        // F1: emite invitacion fresca. Cada llamada crea un nonce y una queue dedicada
-        // (D3). El TTL acota cuanto tiempo el operador puede tener el QR mostrado en
-        // pantalla antes de que se invalide.
+        // F1: emits a fresh invitation. Each call creates a nonce and a dedicated queue
+        // (D3). The TTL bounds how long the operator can keep the QR displayed on
+        // screen before it is invalidated.
         public async Task<UsherInvitation> IssueInvitationAsync(
             OperatorId issuedBy,
             CancellationToken ct)
@@ -131,9 +131,9 @@ namespace Choreography.Usher
 
             await invitationStore.SaveAsync(pending, ct);
 
-            // Arranca el listener para esta invitacion en background. Cada invitacion
-            // espera UNA sola conexion (D3); cuando llega o cuando expira el TTL, el
-            // listener termina.
+            // Starts the listener for this invitation in the background. Each invitation
+            // waits for ONE single connection (D3); when it arrives or when the TTL expires, the
+            // listener ends.
             StartListenerForInvitation(pending);
 
             return new UsherInvitation(nonce, transportInvitation, pending.ExpiresAt);
@@ -167,8 +167,8 @@ namespace Choreography.Usher
             {
                 UsherJoinRequest request = await ReceiveJoinRequestAsync(channel, ct);
 
-                // Validaciones del request antes de pedir aprobacion: nonce match,
-                // invitacion no expirada, firma valida.
+                // Request validations before requesting approval: nonce match,
+                // invitation not expired, valid signature.
                 if (request.InvitationNonce != pending.Nonce)
                 {
                     await RejectAsync(channel, "Nonce mismatch", pending, ct);
@@ -187,7 +187,7 @@ namespace Choreography.Usher
                     return;
                 }
 
-                // F4: aprobacion humana en ContactSecret.
+                // F4: human approval in ContactSecret.
                 UsherApprovalDecision decision = await approvalQueue.RequestApprovalAsync(request, pending, ct);
                 if (!decision.IsApproved)
                 {
@@ -195,7 +195,7 @@ namespace Choreography.Usher
                     return;
                 }
 
-                // Commit del MembershipRecord. El StageId se deriva del pubkey (D5).
+                // Commit of the MembershipRecord. The StageId is derived from the pubkey (D5).
                 PerformerId assignedId = StageIdDerivation.FromPublicKey(request.StagePublicKey);
                 var membership = new MembershipRecord(
                     stageId: assignedId,
@@ -206,7 +206,7 @@ namespace Choreography.Usher
 
                 long epoch = await journalWriter.AppendMembershipAsync(membership, ct);
 
-                // F5: respuesta firmada con el journal secret sellado a la pubkey.
+                // F5: response signed with the journal secret sealed to the pubkey.
                 byte[] sealed_ = payloadSealer.Seal(journalSecretProvider(), request.StagePublicKey);
                 ServerFingerprintWire[] fingerprints = trustedSmpServersProvider();
                 var response = new UsherJoinResponse(
@@ -216,35 +216,35 @@ namespace Choreography.Usher
                     trustedSmpServers: fingerprints,
                     journalEpochAtJoin: epoch);
 
-                // Marcar Consumed ANTES del SendAsync. Razones:
+                // Mark Consumed BEFORE the SendAsync. Reasons:
                 //
-                // (a) Punto de no retorno: el MembershipRecord ya fue commit-eado
-                //     al journal en AppendMembershipAsync. La identidad del Stage
-                //     existe en el cluster — la marca local de "invitation
-                //     consumed" es bookkeeping del Usher, no afecta al Stage.
+                // (a) Point of no return: the MembershipRecord was already committed
+                //     to the journal in AppendMembershipAsync. The Stage identity
+                //     exists in the cluster — the local "invitation
+                //     consumed" mark is Usher bookkeeping, it does not affect the Stage.
                 //
-                // (b) Evita el race observable por el caller: si el Usher hace
-                //     SendAsync primero, el Stage recibe F5 OK y JoinNetworkViaUsherAsync
-                //     retorna. Si el caller del lado Usher consulta el store
-                //     (test, panel de operador, audit log) antes de que termine
-                //     MarkConsumedAsync, ve la invitacion como Pending — fue lo
-                //     que rompio UsherOnboardingTests.EndToEnd_RealCryptoOverRealTls_RoundsTripIdentity
-                //     en CI (VM lento). Con este orden, cuando F5 sale al wire la
-                //     invitacion ya esta Consumed; no hay ventana.
+                // (b) Avoids the race observable by the caller: if the Usher does
+                //     SendAsync first, the Stage receives F5 OK and JoinNetworkViaUsherAsync
+                //     returns. If the Usher-side caller queries the store
+                //     (test, operator panel, audit log) before MarkConsumedAsync
+                //     finishes, it sees the invitation as Pending — this was what
+                //     broke UsherOnboardingTests.EndToEnd_RealCryptoOverRealTls_RoundsTripIdentity
+                //     in CI (slow VM). With this order, when F5 goes out on the wire the
+                //     invitation is already Consumed; there is no window.
                 //
-                // (c) Trade-off: si MarkConsumedAsync falla aqui (ej. DB caida),
-                //     el F5 nunca se envia; el Stage hace timeout y reintenta con
-                //     otra invitacion. Es el mismo failure-mode que el orden
-                //     anterior cuando SendAsync fallaba — la invitacion quedaba
-                //     en estado intermedio. La nueva variante hace el race del
-                //     test desaparecer sin empeorar el contrato de delivery.
+                // (c) Trade-off: if MarkConsumedAsync fails here (e.g. DB down),
+                //     the F5 is never sent; the Stage times out and retries with
+                //     another invitation. It is the same failure-mode as the
+                //     previous order when SendAsync failed — the invitation was left
+                //     in an intermediate state. The new variant makes the test race
+                //     disappear without worsening the delivery contract.
                 pending.MarkConsumed();
                 await invitationStore.MarkConsumedAsync(pending.Nonce, ct);
 
                 await channel.SendAsync(response, ct);
 
-                // D5: descartar el pubkey del scope local. La variable local sale del
-                // scope al retornar; no la persistimos en ningun campo del Usher.
+                // D5: discard the pubkey from the local scope. The local variable goes out of
+                // scope on return; we do not persist it in any Usher field.
             }
             finally
             {

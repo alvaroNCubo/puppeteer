@@ -149,7 +149,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			inForIteration = false;
 		}
 
-		// ── Field (escalar) ────────────────────────────────────────────────
+		// ── Field (scalar) ─────────────────────────────────────────────────
 
 		public void Field(ReadOnlySpan<char> name, bool value)
 		{
@@ -244,7 +244,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			needsComma = true;
 		}
 
-		// ── Field (collection de primitivos) ───────────────────────────────
+		// ── Field (collection of primitives) ───────────────────────────────
 
 		public void Field(ReadOnlySpan<char> name, IEnumerable<int> values)
 		{
@@ -594,7 +594,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			needsComma = true;
 		}
 
-		// ── Helpers privados ───────────────────────────────────────────────
+		// ── Private helpers ────────────────────────────────────────────────
 
 		private void EscapeString(ReadOnlySpan<char> value)
 		{

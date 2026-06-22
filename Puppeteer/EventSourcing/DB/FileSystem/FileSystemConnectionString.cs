@@ -17,7 +17,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
             if (!connectionString.Contains('='))
             {
-                // Backward-compatible: str completa es la ruta
+                // Backward-compatible: the whole string is the path
                 Path = connectionString;
                 MaxFileSizeBytes = DEFAULT_MAX_FILE_SIZE;
                 Compression = PayloadCompression.None;

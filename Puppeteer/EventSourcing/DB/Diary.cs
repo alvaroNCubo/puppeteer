@@ -13,12 +13,12 @@ namespace Puppeteer.EventSourcing.DB
 
 		private readonly DiaryStorage diaryStorage;
 		internal DiaryStorage Storage => diaryStorage;
-		// Pre-2026-05-19: el script de un PerformCmd que fallaba en runtime se
-		// journalizaba con un prefijo "//EXECUTION ERROR WAS DETECTED ON THIS COMMAND"
-		// para que la rehidratacion posterior lo identificara. Eliminado: el script
-		// se persiste integro y la informacion del fallo viaja por IPuppeteerLogger.
-		// El journal es un registro fidedigno de comandos intentados, no un canal
-		// para metadata de errores.
+		// Pre-2026-05-19: the script of a PerformCmd that failed at runtime was
+		// journaled with a "//EXECUTION ERROR WAS DETECTED ON THIS COMMAND" prefix
+		// so that later rehydration could identify it. Removed: the script
+		// is persisted intact and the failure information travels through IPuppeteerLogger.
+		// The journal is a faithful record of attempted commands, not a channel
+		// for error metadata.
 		private readonly DatabaseType dbType;
 
 		// Buffering: local WAL + asynchronous replication to the remote storage.
@@ -50,9 +50,9 @@ namespace Puppeteer.EventSourcing.DB
 			(string backendConnectionString, string parsedLocalBufferPath) =
 				StorageConnectionString.Extract(connectionString);
 
-			// IN_MEMORY ignora silenciosamente la key (buffer a memoria no tiene sentido:
-			// el storage canonico ya es el medio mas rapido posible). Resto de dbTypes
-			// honran la presencia/ausencia de la key como switch on/off del buffer.
+			// IN_MEMORY silently ignores the key (buffering to memory makes no sense:
+			// the canonical storage is already the fastest possible medium). The other dbTypes
+			// honor the presence/absence of the key as an on/off switch for the buffer.
 			if (dbType == DatabaseType.IN_MEMORY)
 				parsedLocalBufferPath = null;
 
@@ -127,7 +127,7 @@ namespace Puppeteer.EventSourcing.DB
 			// Replication of actions now flows entirely through OnRecordWritten — the
 			// Define entry is a journal record like any other and replicates as
 			// CueEvent. The legacy ActionDefinition message + EnqueueActionDefinition
-			// path is gone (firmado: cross-stage atomicity is unnecessary).
+			// path is gone (signed: cross-stage atomicity is unnecessary).
 
 			this.localBuffer = buffer;
 			this.replicationProgress = progress;
@@ -294,8 +294,8 @@ namespace Puppeteer.EventSourcing.DB
 
 			if (IsBuffered)
 			{
-				// Drenar la cola hacia el storage remoto antes del Distill para
-				// asegurar que el filtrado opera sobre el estado completo.
+				// Drain the queue toward the remote storage before the Distill to
+				// ensure the filtering operates over the complete state.
 				replicationAgent.DrainAndWait();
 				localBuffer.Distill();
 				diaryStorage.Distill();
@@ -367,7 +367,7 @@ namespace Puppeteer.EventSourcing.DB
 
 		// Phase 4 of the Action refactor (project_puppeteer_action_refactor_plan.md):
 		// façade wrappers paired with the abstract DiaryStorage methods. Phase 4
-		// split-model firmado: Define + Invocation are TWO separate journal rows on
+		// split-model signed: Define + Invocation are TWO separate journal rows on
 		// the first invocation, so MarkAsSkip on a first invocation cannot
 		// collaterally erase the Define declaration.
 		internal void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)

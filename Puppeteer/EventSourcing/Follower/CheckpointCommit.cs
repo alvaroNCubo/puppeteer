@@ -29,8 +29,8 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException("checkpointVector cannot be empty. At least one checkpoint level must be specified.");
 
 			ValidateNoDuplicateEventIds(eventIds);
-			// Para Many, puede haber mas eventIds que checkpoint levels
-			// Solo validar que todos los checkpoint levels estan presentes
+			// For Many there can be more eventIds than checkpoint levels.
+			// Only validate that all checkpoint levels are present.
 			ValidateCheckpointLevelsPresent(checkpointVector);
 
 			this.eventIds = (long[])eventIds.Clone();
@@ -60,8 +60,8 @@ namespace Puppeteer.EventSourcing.Follower
 			if (eventIdsList.Count == 0)
 				throw new LanguageException("Match chain is empty. Cannot create CheckpointCommit from empty chain.");
 
-			// Construir checkpoint vector: un nivel por cada nodo en la str (no por cada evento)
-			// Para Many, puede haber mas eventIds que niveles
+			// Build the checkpoint vector: one level per node in the chain (not per event).
+			// For Many there can be more eventIds than levels.
 			List<long> checkpointLevelIds = new List<long>();
 			CollectCheckpointLevelIds(leafNode, checkpointLevelIds);
 
@@ -85,16 +85,16 @@ namespace Puppeteer.EventSourcing.Follower
 			if (node == null) return;
 			CollectCheckpointLevelIds(node.Parent, levelIds);
 
-			// Para Many, usar el ultimo ID acumulado como checkpoint del nivel
+			// For Many, use the last accumulated ID as the level's checkpoint.
 			if (node.AccumulatedEventIds != null && node.AccumulatedEventIds.Count > 0)
 			{
 				levelIds.Add(node.AccumulatedEventIds[node.AccumulatedEventIds.Count - 1]);
 			}
 			else if (node.Engine != null && node.Engine.IsExact)
 			{
-				// K.2: Exact con zero accumulated — el checkpoint del nivel es el
-				// parent anchor (no hay match propio para indexar). Defensivo: si
-				// no hay parent, fallback a EntryId que sera 0 para eager-creation.
+				// K.2: Exact with zero accumulated — the level's checkpoint is the
+				// parent anchor (there is no own match to index). Defensive: if
+				// there is no parent, fall back to EntryId, which will be 0 for eager-creation.
 				if (node.Parent != null && node.Parent.AccumulatedEventIds != null && node.Parent.AccumulatedEventIds.Count > 0)
 				{
 					levelIds.Add(node.Parent.AccumulatedEventIds[node.Parent.AccumulatedEventIds.Count - 1]);
@@ -120,7 +120,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			CollectEventIdsFromChain(node.Parent, eventIds);
 
-			// Si el nodo es de un Many con IDs acumulados, incluir todos
+			// If the node belongs to a Many with accumulated IDs, include them all.
 			if (node.AccumulatedEventIds != null && node.AccumulatedEventIds.Count > 0)
 			{
 				foreach (var accumulatedId in node.AccumulatedEventIds)
@@ -133,8 +133,8 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			else if (node.Engine != null && node.Engine.IsExact)
 			{
-				// K.2: Exact con zero accumulated (e.g. None que cerro vacuamente)
-				// no contribuye ningun EntryId al chain.
+				// K.2: Exact with zero accumulated (e.g. None that closed vacuously)
+				// contributes no EntryId to the chain.
 			}
 			else
 			{

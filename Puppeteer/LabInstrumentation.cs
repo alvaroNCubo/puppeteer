@@ -89,20 +89,20 @@ namespace Puppeteer
 
 		public static void IncrementReplayEventsCounted() => Interlocked.Increment(ref _replayEventsCounted);
 
-		// --- Timing por etapa del pipeline de rehidratacion ----------------------------
-		// El pipeline corre 3 etapas concurrentes (parser -> resolver -> exec). El
-		// wall-clock total ~= max(tiempo de cada etapa) + fill/drain, asi que la etapa
-		// con mas tiempo acumulado de trabajo es el cuello de botella. Estos acumuladores
-		// suman el tiempo (en ticks de Stopwatch) que cada etapa pasa DENTRO de su trabajo
-		// por-entry (parse / SolveReferences / Perform), no el tiempo bloqueada en la cola.
+		// --- Per-stage timing of the rehydration pipeline ----------------------------
+		// The pipeline runs 3 concurrent stages (parser -> resolver -> exec). The
+		// total wall-clock ~= max(time of each stage) + fill/drain, so the stage with
+		// the most accumulated work time is the bottleneck. These accumulators sum the
+		// time (in Stopwatch ticks) each stage spends INSIDE its per-entry work
+		// (parse / SolveReferences / Perform), not the time blocked in the queue.
 		//
-		// Gateado por StageTimingEnabled para no pagar Stopwatch.GetTimestamp() por entry
-		// en produccion. El host de medicion lo enciende, corre la rehidratacion, y lee
+		// Gated by StageTimingEnabled to avoid paying Stopwatch.GetTimestamp() per entry
+		// in production. The measurement host turns it on, runs the rehydration, and reads
 		// ParseElapsedMs / ResolveElapsedMs / ExecuteElapsedMs.
-		// Tambien se activa SIN tocar codigo via la variable de entorno
-		// PUPPETEER_STAGE_TIMING=1: con eso ActorHandler.EventSourcingStorage imprime el
-		// desglose por etapa de cada rehidratacion al stdout (ver el Console.WriteLine alla).
-		// Pensado para que DevOps corra el respaldo y nos pase los numeros sin compilar nada.
+		// It is also enabled WITHOUT touching code via the environment variable
+		// PUPPETEER_STAGE_TIMING=1: with that, ActorHandler.EventSourcingStorage prints the
+		// per-stage breakdown of each rehydration to stdout (see the Console.WriteLine there).
+		// Intended so DevOps can run the backup and pass us the numbers without compiling anything.
 		public static bool StageTimingEnabled =
 			Environment.GetEnvironmentVariable("PUPPETEER_STAGE_TIMING") == "1";
 
@@ -124,12 +124,12 @@ namespace Puppeteer
 		public static double ResolveElapsedMs => TicksToMs(Interlocked.Read(ref _resolveTicks));
 		public static double ExecuteElapsedMs => TicksToMs(Interlocked.Read(ref _executeTicks));
 
-		// --- Contadores del cache de resolucion de metodo (DotAccess.FindMethodCached) ------
-		// Senal DETERMINISTICA (independiente de la carga de la maquina, a diferencia del
-		// wall-clock por etapa): responde si el cache se usa de verdad. Si Uncacheable domina
-		// (argTypes null/object por imprecision de tipos en V1), el cache nunca pega y solo
-		// agrega overhead -> habria que clavear por tipos runtime de los valores ya evaluados.
-		// Se incrementan solo con StageTimingEnabled para no pagar en produccion.
+		// --- Counters of the method-resolution cache (DotAccess.FindMethodCached) ------
+		// DETERMINISTIC signal (independent of machine load, unlike the per-stage
+		// wall-clock): answers whether the cache is actually used. If Uncacheable dominates
+		// (argTypes null/object due to type imprecision in V1), the cache never hits and only
+		// adds overhead -> one would have to key by the runtime types of the already-evaluated
+		// values. Incremented only with StageTimingEnabled to avoid paying in production.
 		private static long _methodCacheHits;
 		private static long _methodCacheMisses;
 		private static long _methodCacheUncacheable;

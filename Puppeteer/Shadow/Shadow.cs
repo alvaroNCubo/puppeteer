@@ -6,20 +6,20 @@ using System.Collections.Generic;
 
 namespace Puppeteer
 {
-	// Shadow Replay — S1. Resultado in-process del primitivo actor.Shadow(cfg):
-	// un actor derivado-laboratorio aislado del primary. Lee el journal real del
-	// primary por replay (SyncUntil) pero escribe en su PROPIO storage y produce
-	// CERO efecto externo (Tells neutralizados; no registrado como destination de
-	// Materialization del primary).
+	// Shadow Replay — S1. In-process result of the actor.Shadow(cfg) primitive:
+	// a derived-laboratory actor isolated from the primary. It reads the primary's
+	// real journal by replay (SyncUntil) but writes to its OWN storage and produces
+	// ZERO external effect (Tells neutralized; not registered as a destination of the
+	// primary's Materialization).
 	//
-	// Ontologia (design §3.0): el Shadow es un PRIMITIVO del actor, NO un subtipo de
-	// Performance. Para deployment (pod K8s con HTTP console, S6) un ShadowPerformance
-	// (Choreography) lo HOSPEDA por composicion. Esta clase es la cara in-process —
-	// experimentos rapidos, loops de Claude, bug-repro point-in-time.
+	// Ontology (design §3.0): the Shadow is a PRIMITIVE of the actor, NOT a subtype of
+	// Performance. For deployment (K8s pod with HTTP console, S6) a ShadowPerformance
+	// (Choreography) HOSTS it by composition. This class is the in-process face —
+	// quick experiments, agent loops, point-in-time bug-repro.
 	//
-	// TTL kill-all: Dispose() tira abajo el shadow (graceful shutdown de reactions +
-	// limpieza del storage para los backends que lo soportan). El TTL por K8s Job es
-	// S6, no aqui.
+	// TTL kill-all: Dispose() tears down the shadow (graceful shutdown of reactions +
+	// cleanup of the storage for the backends that support it). The TTL via K8s Job is
+	// S6, not here.
 	public sealed class Shadow : IDisposable
 	{
 		private readonly Actor shadowActor;
@@ -37,46 +37,46 @@ namespace Puppeteer
 			this.config = config;
 		}
 
-		// El actor shadow (familia V1/V2 igual al primary). Expuesto para registrar
-		// reactions experimentales (shadow.Actor.Reactions.DefineReaction(...)) y, en
-		// V1, drivearlo con PerformCmdAsync.
+		// The shadow actor (V1/V2 family same as the primary). Exposed to register
+		// experimental reactions (shadow.Actor.Reactions.DefineReaction(...)) and, in
+		// V1, to drive it with PerformCmdAsync.
 		public Actor Actor => shadowActor;
 
-		// Reactions del shadow — misma API de Tema A apuntando al shadow.
+		// Shadow reactions — same Theme A API pointing at the shadow.
 		public Reactions Reactions => shadowActor.Reactions;
 
-		// EntryId actual del shadow (su propia linea de tiempo, divergente tras fork).
+		// The shadow's current EntryId (its own timeline, divergent after fork).
 		public long CurrentEntryId => shadowHandler.CurrentEntryId;
 
 		public ShadowMode Mode => config.Mode;
 		public TimeSpan? Ttl => config.Ttl;
 
-		// SyncUntil(toEntryId): replay del journal del primary desde GENESIS hasta
-		// toEntryId inclusive, aplicado al storage propio del shadow. Techo, no piso.
-		// Tras esto el shadow queda forkeado y acepta comandos locales.
+		// SyncUntil(toEntryId): replay of the primary's journal from GENESIS up to
+		// toEntryId inclusive, applied to the shadow's own storage. A ceiling, not a
+		// floor. After this the shadow is forked and accepts local commands.
 		public void SyncUntil(long toEntryId)
 		{
 			ThrowIfDisposed();
 			shadowHandler.SyncUntil(toEntryId);
 		}
 
-		// Shadow Replay — S3. Activa skip-preview (dry-run de Elide): las reactions Elide
-		// del shadow capturan en Reaction.WouldSkip los EntryIds que marcarian, SIN
-		// commitear la elision en ningun journal. Para inspeccionar "que se elidiria"
-		// sobre datos reales replicados, sin efecto.
+		// Shadow Replay — S3. Enables skip-preview (dry-run of Elide): the shadow's Elide
+		// reactions capture in Reaction.WouldSkip the EntryIds they would mark, WITHOUT
+		// committing the elision to any journal. For inspecting "what would be elided"
+		// over real replicated data, with no effect.
 		public void EnableSkipPreview()
 		{
 			ThrowIfDisposed();
 			shadowHandler.EnableSkipPreview();
 		}
 
-		// Shadow Replay — S4. Elision-impact diff (la "movida killer" del estado de
-		// cuenta): para un set candidato de EntryIds a elidir, compara las salidas
-		// observables (queries) entre rehidratar el journal SIN elision y CON la elision.
-		// Diff vacio (result.IsSafe) => elidir ese set no cambia ninguna observacion =
-		// seguro respecto a los observadores provistos. Construye dos twins aislados
-		// (shadow-of-shadow del journal de ESTE shadow) y los descarta al final. Convierte
-		// "¿es seguro elidir esto?" de juicio estatico de dominio en propiedad medible.
+		// Shadow Replay — S4. Elision-impact diff (the "killer move"): for a candidate
+		// set of EntryIds to elide, compares the observable outputs (queries) between
+		// rehydrating the journal WITHOUT elision and WITH the elision. An empty diff
+		// (result.IsSafe) => eliding that set changes no observation = safe with respect
+		// to the provided observers. Builds two isolated twins (shadow-of-shadow of THIS
+		// shadow's journal) and discards them at the end. Turns "is it safe to elide
+		// this?" from a static domain judgment into a measurable property.
 		public ElisionImpactResult ElisionImpactDiff(long[] candidateSkipEntryIds, params string[] observationQueries)
 		{
 			ThrowIfDisposed();
@@ -86,8 +86,8 @@ namespace Puppeteer
 
 			long head = shadowHandler.CurrentEntryId;
 
-			// Nombres unicos por llamada (los twins son storage propio; nombres reusados
-			// arriesgarian estado residual en backends por-nombre como InMemory).
+			// Unique names per call (the twins are their own storage; reused names
+			// would risk residual state in per-name backends like InMemory).
 			int n = ++diffCounter;
 			ActorHandler twinFull = shadowHandler.CreateShadow(new ShadowConfig(config.Id + "-s4full-" + n, config.ShadowStorageType, config.ShadowStorageConnection));
 			ActorHandler twinElided = shadowHandler.CreateShadow(new ShadowConfig(config.Id + "-s4elided-" + n, config.ShadowStorageType, config.ShadowStorageConnection));
@@ -117,10 +117,10 @@ namespace Puppeteer
 			}
 		}
 
-		// Driver de comando local contra el shadow (su propio storage). Util para
-		// inducir la divergencia local del experimento. Path V1 (ActorV1) — el flujo
-		// async es el publico del handler. Para V2, el caller usa shadow.Actor
-		// (ActorV2) y su superficie Using(...)/Dispatch.
+		// Local command driver against the shadow (its own storage). Useful for
+		// inducing the experiment's local divergence. V1 path (ActorV1) — the async
+		// flow is the handler's public one. For V2, the caller uses shadow.Actor
+		// (ActorV2) and its Using(...)/Dispatch surface.
 		public string PerformCmd(string script, string ip, string user)
 		{
 			ThrowIfDisposed();
@@ -131,7 +131,7 @@ namespace Puppeteer
 			return shadowHandler.PerformCmd(script, ip, user);
 		}
 
-		// Query de solo lectura contra el estado del shadow.
+		// Read-only query against the shadow's state.
 		public string PerformQry(string script)
 		{
 			ThrowIfDisposed();
@@ -139,18 +139,18 @@ namespace Puppeteer
 			return shadowHandler.PerformQry(script, new Parameters());
 		}
 
-		// Shadow Replay — S2. Continuous shadowing: arranca un mirror en background que
-		// sigue el head del primary en near-real-time (pull incremental de records nuevos
-		// + rehidratacion). Mutuamente excluyente con el fork de SyncUntil — mientras esta
-		// activo, PerformCmd local se rechaza. Parar via StopShadowing() o Dispose().
+		// Shadow Replay — S2. Continuous shadowing: starts a background mirror that
+		// follows the primary's head in near-real-time (incremental pull of new records
+		// + rehydration). Mutually exclusive with the SyncUntil fork — while active,
+		// local PerformCmd is rejected. Stop via StopShadowing() or Dispose().
 		public void StartShadowing()
 		{
 			ThrowIfDisposed();
 			shadowHandler.StartShadowing();
 		}
 
-		// Detiene el continuous mirror (idempotente). Tras esto el shadow vuelve a
-		// aceptar comandos locales (fork).
+		// Stops the continuous mirror (idempotent). After this the shadow again
+		// accepts local commands (fork).
 		public void StopShadowing()
 		{
 			ThrowIfDisposed();
@@ -159,9 +159,9 @@ namespace Puppeteer
 
 		public bool IsShadowing => shadowHandler.IsShadowingActive;
 
-		// TTL kill-all (S1): graceful shutdown de las reactions del shadow y limpieza
-		// del storage propio. Idempotente. El teardown por K8s Job (activeDeadlineSeconds)
-		// es S6.
+		// TTL kill-all (S1): graceful shutdown of the shadow's reactions and cleanup
+		// of its own storage. Idempotent. The teardown via K8s Job (activeDeadlineSeconds)
+		// is S6.
 		public void Dispose()
 		{
 			if (disposed) return;

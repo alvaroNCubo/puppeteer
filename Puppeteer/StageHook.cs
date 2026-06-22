@@ -18,9 +18,9 @@ namespace Puppeteer
             this.handler = actor.GetHandler();
         }
 
-        // Wrapper para que Choreography (Stage / Performance / Ensemble) propague
-        // el logger inyectado por el host hasta el Actor que vive bajo el hook.
-        // El sink es per-handler (no singleton); F6 del refactor de logger.
+        // Wrapper so Choreography (Stage / Performance / Ensemble) can propagate
+        // the logger injected by the host down to the Actor that lives under the hook.
+        // The sink is per-handler (not a singleton); F6 of the logger refactor.
         public void UseLogger(IPuppeteerLogger logger)
         {
             ArgumentNullException.ThrowIfNull(logger);
@@ -44,33 +44,33 @@ namespace Puppeteer
 
         // === Playbill (Fase 5) ===
         //
-        // Optional facade — null si el Stage no tiene Playbill configurado
-        // (audit-off). Cuando se asigna, Choreography (Stage) lo usa para
-        // (a) suscribirse a OnSchemaRegistered/OnRecordWritten y broadcastear
-        // PlaybillSchemaCue/PlaybillCue como Director, y (b) aplicar cues
-        // entrantes como Cast via WriteRecordRaw / RegisterSchemaRaw.
+        // Optional facade — null if the Stage has no Playbill configured
+        // (audit-off). When assigned, Choreography (Stage) uses it to
+        // (a) subscribe to OnSchemaRegistered/OnRecordWritten and broadcast
+        // PlaybillSchemaCue/PlaybillCue as Director, and (b) apply incoming
+        // cues as Cast via WriteRecordRaw / RegisterSchemaRaw.
         //
-        // El Playbill instance es per-Stage (cada Stage en el cluster tiene
-        // su propio backend local — InMemory dict / FS subdir / SQL DB).
-        // El setter solo configura la referencia; la suscripcion del Stage
-        // a los callbacks ocurre en Stage.AttachPlaybill.
+        // The Playbill instance is per-Stage (each Stage in the cluster has
+        // its own local backend — InMemory dict / FS subdir / SQL DB).
+        // The setter only configures the reference; the Stage's subscription
+        // to the callbacks happens in Stage.AttachPlaybill.
         public Playbill Playbill { get; set; }
 
-        // Wrapper para que Performance.Start(asFollower:true) pueda activar
-        // el flag desde Choreography (que no tiene InternalsVisibleTo de
-        // Puppeteer). Ver ActorHandler.SuppressReactionJournaling para la
-        // semantica (Etapa 1: gate de ExecuteTell para no journalize en
-        // followers; invariante 1-escritor del journal canonico).
+        // Wrapper so Performance.Start(asFollower:true) can activate
+        // the flag from Choreography (which has no InternalsVisibleTo of
+        // Puppeteer). See ActorHandler.SuppressReactionJournaling for the
+        // semantics (Stage 1: gate on ExecuteTell to not journalize on
+        // followers; 1-writer invariant of the canonical journal).
         public bool SuppressReactionJournaling
         {
             get { return handler.SuppressReactionJournaling; }
             set { handler.SuppressReactionJournaling = value; }
         }
 
-        // Wrapper para que Choreography (sin InternalsVisibleTo de Puppeteer)
-        // configure el provider del rol vivo que usa el gate de
-        // ReactionActivation. El Stage P2P pasa () => IsDirector; la Performance
-        // Theater () => !isFollower. Ver ActorHandler.SetActingAsDirectorProvider.
+        // Wrapper so Choreography (without InternalsVisibleTo of Puppeteer)
+        // can configure the live-role provider used by the ReactionActivation
+        // gate. The P2P Stage passes () => IsDirector; the Theater Performance
+        // () => !isFollower. See ActorHandler.SetActingAsDirectorProvider.
         public void SetActingAsDirectorProvider(Func<bool> provider)
         {
             handler.SetActingAsDirectorProvider(provider);
@@ -157,10 +157,10 @@ namespace Puppeteer
             return handler.PerformCmd(script, parameters);
         }
 
-        // Fase 4.5 refactor Playbill: ip/user dejan de auto-inyectarse como parametros
-        // del script. Quedan en la firma del API (compat binaria con callers existentes)
-        // pero el handler ya defaultea Ip/User internamente. Scripts que necesiten estos
-        // valores deben declararlos como parametros de usuario y pasarlos en userParameters.
+        // Phase 4.5 Playbill refactor: ip/user are no longer auto-injected as script
+        // parameters. They remain in the API signature (binary compat with existing
+        // callers) but the handler already defaults Ip/User internally. Scripts that
+        // need these values must declare them as user parameters and pass them in userParameters.
         public string PerformCmd(string script, DateTime now, string ip, string user)
         {
             Parameters parameters = handler.ParametersPool.Rent();

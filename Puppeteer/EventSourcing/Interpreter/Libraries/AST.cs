@@ -45,7 +45,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		// B.3.1: structural hash that ignores literal *values* but preserves
 		// structure and literal *types*. Two scripts that differ only in their
-		// literal arguments (e.g. `cia.GetOrden(123)` vs `cia.GetOrden(456)`)
+		// literal arguments (e.g. `obj.Get(123)` vs `obj.Get(456)`)
 		// produce the same PromotionCandidateHash; they are equivalent except
 		// for their parameters and thus are candidates for automatic promotion
 		// from V1 Script to V2 Action. Used as the counter key for detecting
@@ -67,12 +67,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		private class Collector : ASTVisitor
 		{
 			private readonly List<AST> list = new List<AST>();
-			// El dedup es real para los singletons de literales (LiteralBoolean.LiteralTrue/False,
-			// LiteralString.EMPTY) que aparecen en mas de un punto del arbol. El List.Contains que
-			// habia aqui hacia el OnVisit O(n) y por ende cada Collect<T>() O(n^2) en la cantidad de
-			// nodos matcheados (Collect<Id>() sobre scripts con muchos identificadores era cuadratico).
-			// HashSet baja el dedup a O(1) y la lista paralela preserva el orden de visita del que
-			// dependen ReferencesSolver (OrderBy(Level) y los loops LValue/RValue).
+			// The dedup is real for the literal singletons (LiteralBoolean.LiteralTrue/False,
+			// LiteralString.EMPTY) that appear at more than one point of the tree. The List.Contains
+			// that used to be here made OnVisit O(n) and therefore each Collect<T>() O(n^2) in the
+			// number of matched nodes (Collect<Id>() over scripts with many identifiers was quadratic).
+			// HashSet brings the dedup down to O(1) and the parallel list preserves the visit order
+			// that ReferencesSolver depends on (OrderBy(Level) and the LValue/RValue loops).
 			private readonly HashSet<AST> seen = new HashSet<AST>();
 
 			internal Collector(AST root, Type type) : base(root, type)

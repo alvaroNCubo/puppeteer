@@ -7,7 +7,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 {
 	class LiteralString : AstExpression
 	{
-		internal const Char SLASH_OR_SINGLE_QUOTED_CHARACTER = '\u0000'; //Para SQLServer es SINGLE_QUOTED && MySQL es SLASH
+		internal const Char SLASH_OR_SINGLE_QUOTED_CHARACTER = '\u0000'; //For SQLServer it is SINGLE_QUOTED && MySQL is SLASH
 		internal const Char DOUBLE_QUOTED_CHARACTER = '\u0001';
 		internal const Char PIPE_CHARACTER = '\u0002';
 		internal readonly static LiteralString EMPTY = new LiteralString("");
@@ -46,14 +46,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal static void Write(StringBuilder output, string value, DatabaseType databaseType)
 		{
-			// Las cuatro ramas comparten el mismo invariante: el Lexer
-			// (ProcessStringLiteral) solo reconoce \' y \\ como secuencias
-			// de escape dentro de un literal '...'. La rama MySQL antes emitia
-			// la ' interna sin escapar (bug reportado), y SQLServer ademas no
-			// duplicaba el \. Se unifican MySQL/SQLServer al mismo formato
-			// canonico que ya usaba IN_MEMORY/FileSystem para la apostrofe.
-			// El handling del \ se preserva por rama para no romper el
-			// formato historico que ya pinaban los tests de Parameters.
+			// The four branches share the same invariant: the Lexer
+			// (ProcessStringLiteral) only recognizes \' and \\ as escape
+			// sequences inside a '...' literal. The MySQL branch previously emitted
+			// the inner ' unescaped (reported bug), and SQLServer additionally did not
+			// duplicate the \. MySQL/SQLServer are unified to the same canonical
+			// format that IN_MEMORY/FileSystem already used for the apostrophe.
+			// The handling of \ is preserved per branch so as not to break the
+			// historical format that the Parameters tests already pinned.
 			if (value == null) throw new ArgumentNullException(nameof(value));
 
 			if (databaseType == DatabaseType.MySQL || databaseType == DatabaseType.SQLServer)

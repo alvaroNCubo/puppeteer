@@ -157,7 +157,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return Expression.MakeIndex(colExpr, indexerProp, boundKeys);
 		}
 
-		// Lado izquierdo (L-value) interpretado: coleccion[clave] = value.
+		// Left-hand side (L-value) interpreted: collection[key] = value.
 		internal void ExecuteAssignment(object value)
 		{
 			object col = coleccion.Execute();
@@ -193,7 +193,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			indexerProp.SetValue(col, CoerceValue(value, indexerProp.PropertyType), keys);
 		}
 
-		// Lado izquierdo (L-value) compilado: produce la Expression que escribe value en la celda.
+		// Left-hand side (L-value) compiled: produces the Expression that writes value into the cell.
 		internal Expression ExecuteAssignmentExpression(ParameterExpression parametersParam, Expression valueExpr)
 		{
 			ArgumentNullException.ThrowIfNull(valueExpr);
@@ -302,13 +302,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return sb.ToString();
 		}
 
-		// Resuelve el indexer C# (this[...] -> propiedad con uno o mas parametros de indice) que
-		// mejor cuadra con los tipos de los indices. Solo considera indexers cuya aridad coincide.
-		// Por cada parametro un indice puede ligar como: exacto (mismo tipo), enum (binding por
-		// nombre/simbolo), o coercionable (numerico / IsAssignableFrom). La preferencia es
-		// deterministica: gana el candidato con mas parametros que ligan EXACTO; asi this[int] y
-		// this[string], o this[int,int] y this[string,string], no son ambiguos. Un indice con tipo
-		// indeterminado (null/object) liga contra cualquier parametro (se difiere a runtime).
+		// Resolves the C# indexer (this[...] -> property with one or more index parameters) that
+		// best fits the index types. Only considers indexers whose arity matches.
+		// For each parameter an index can bind as: exact (same type), enum (binding by
+		// name/symbol), or coercible (numeric / IsAssignableFrom). The preference is
+		// deterministic: the candidate with the most EXACTLY-binding parameters wins; thus this[int]
+		// and this[string], or this[int,int] and this[string,string], are not ambiguous. An index
+		// with indeterminate type (null/object) binds against any parameter (deferred to runtime).
 		private static PropertyInfo ResolveIndexer(Type collectionType, Type[] indexTypes, AstExpression[] indexNodes)
 		{
 			PropertyInfo best = null;

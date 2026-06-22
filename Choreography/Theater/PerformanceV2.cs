@@ -15,16 +15,24 @@ namespace Choreography.Theater
         private readonly ActorV2 actorV2;
         private IOutputFormatter formatterPrototype;  // null = default JsonFormatter
 
+        // Authoring front-end (input-side mirror of formatterPrototype): the
+        // transpiler that lowers a domain notation into a Puppeteer DSL command
+        // body for PerformCheckThenEnact. Defaults to Identity so every
+        // Performance always carries one; an N-projection wrapper can override it
+        // via .Transpiler(...) to expose a different authoring notation over the
+        // same shared actor/journal.
+        private INotationTranspiler transpilerPrototype = IdentityTranspiler.Instance;
+
         // Playbill state — lazily constructed when .Playbill(name, builder) is
         // called for the first time. Auto-provision: backend creates its tables/
         // files at construction. Null = audit-off (legitimate per design memo).
         private Playbill playbill;
         private string currentPlaybillSchemaName;
 
-        // Conveniencia: si el caller no provee libraries, se asume el assembly desde
-        // donde se invoco el ctor. Util cuando dominio e interfaz viven en el mismo
-        // proyecto. El path idiomatico es pasar las DLLs de dominio explicitamente
-        // (ver el ctor con params Assembly[]).
+        // Convenience: if the caller does not provide libraries, the assembly from
+        // which the ctor was invoked is assumed. Useful when domain and interface live in
+        // the same project. The idiomatic path is to pass the domain DLLs explicitly
+        // (see the ctor with params Assembly[]).
         [MethodImpl(MethodImplOptions.NoInlining)]
         public PerformanceV2(string actorName)
             : this(actorName, new[] { Assembly.GetCallingAssembly() })
@@ -98,8 +106,20 @@ namespace Choreography.Theater
             return this;
         }
 
-        // Shadow del Logger base para preservar PerformanceV2 en la cadena fluent
-        // (asi se puede encadenar con Formatter/ConfigureStorage/Start V2-tipados).
+        // Install the authoring transpiler for this Performance (input-side
+        // mirror of Formatter). The transpiler lowers a domain notation into a
+        // Puppeteer DSL command body at author-time; only the transpiled body is
+        // journaled, never the transpiler. Pair with the N-projection ctor to
+        // expose several authoring notations over one shared actor/journal:
+        // new PerformanceV2(basePerformance).Transpiler(bracketTranspiler).
+        public PerformanceV2 Transpiler(INotationTranspiler prototype)
+        {
+            this.transpilerPrototype = prototype ?? throw new ArgumentNullException(nameof(prototype));
+            return this;
+        }
+
+        // Shadow of the base Logger to preserve PerformanceV2 in the fluent chain
+        // (so it can be chained with the V2-typed Formatter/ConfigureStorage/Start).
         public new PerformanceV2 Logger(IPuppeteerLogger logger)
         {
             base.Logger(logger);
@@ -154,8 +174,8 @@ namespace Choreography.Theater
             if (script == null) throw new ArgumentNullException(nameof(script));
 
             LastActivity = DateTime.Now;
-            // Fase 4.5 refactor Playbill: ip/user dejaron de inyectarse como parametros del script.
-            // Now lo establece el handler en PerformQry/PerformChk/PerformEmit.
+            // Phase 4.5 Playbill refactor: ip/user are no longer injected as script parameters.
+            // Now is set by the handler in PerformQry/PerformChk/PerformEmit.
             var p = new Parameters();
             using (FormatterContext.Push(formatterPrototype))
             {
@@ -163,18 +183,63 @@ namespace Choreography.Theater
             }
         }
 
+        // ── Enact (V2 surface): capture a computed command body as the Action ──
+
+        // Enact: lower a domain authoring notation into a Puppeteer DSL command
+        // body via this Performance's transpiler (Identity by default), then
+        // perform it as a command. The transpiler runs ONLY here, at author-time;
+        // only the transpiled body is journaled as the Action, so replay
+        // reconstructs the structure WITHOUT the transpiler. With the Identity
+        // transpiler the notation is already Puppeteer DSL and is enacted
+        // verbatim — which shows the essence is "capture a computed command",
+        // not "transpile". The journaled fact is the body, never transform(input).
+        public string PerformEnact(string notation)
+        {
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            string body = transpilerPrototype.Transpile(notation);
+            return PerformCmd(body);
+        }
+
+        // CheckThenEnact: felicity-guarded Enact. The check is re-evaluated under
+        // the write lock by PerformCheckThenCommand, protecting against the source
+        // changing between the author-time transpile and the commit (e.g. a guard
+        // comparing current actor state to the notation that was read). The
+        // transpile still happens once, here, outside any lock; only the
+        // transpiled body is journaled.
+        public string PerformCheckThenEnact(string check, string notation)
+        {
+            if (check == null) throw new ArgumentNullException(nameof(check));
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            string body = transpilerPrototype.Transpile(notation);
+            return new ActorV2Invocation(actorV2, check, body, playbill, currentPlaybillSchemaName)
+                .PerformCheckThenCommand();
+        }
+
+        // CheckThenEnact overload accepting parameters for the check (e.g. the
+        // captured notation to compare against, supplied as an In parameter).
+        public string PerformCheckThenEnact(string check, string notation, Action<Parameters> configure)
+        {
+            if (check == null) throw new ArgumentNullException(nameof(check));
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            if (configure == null) throw new ArgumentNullException(nameof(configure));
+            string body = transpilerPrototype.Transpile(notation);
+            return new ActorV2Invocation(actorV2, check, body, playbill, currentPlaybillSchemaName)
+                .WithParameters(configure)
+                .PerformCheckThenCommand();
+        }
+
         // ── Playbill API (V2-only, fluent) ────────────────────────────────
 
-        // Declara un Playbill schema en este Performance. Registra el schema
-        // en el PlaybillStore (auto-provisionando el storage si no existe)
-        // y lo deja como el schema "actual" para invocaciones subsiguientes
+        // Declares a Playbill schema on this Performance. Registers the schema
+        // in the PlaybillStore (auto-provisioning the storage if it does not exist)
+        // and leaves it as the "current" schema for subsequent invocations
         // via Using(...).
         //
-        // Llamado mas de una vez con NOMBRES distintos: cada DefinePlaybill
-        // registra su schema; el ultimo queda como el currentSchemaName.
-        // Llamado dos veces con el MISMO nombre + misma firma: idempotente.
-        // Mismo nombre + firma distinta: LanguageException (drift requiere
-        // migracion explicita).
+        // Called more than once with DIFFERENT names: each DefinePlaybill
+        // registers its schema; the last one remains as the currentSchemaName.
+        // Called twice with the SAME name + same signature: idempotent.
+        // Same name + different signature: LanguageException (drift requires
+        // explicit migration).
         public PerformanceV2 Playbill(string schemaName, Action<PlaybillSchemaBuilder> build)
         {
             if (schemaName == null) throw new ArgumentNullException(nameof(schemaName));
@@ -196,12 +261,12 @@ namespace Choreography.Theater
 
         // ── Fluent invocation entry (V2 + Playbill-aware) ─────────────────
 
-        // Variante Playbill-aware del fluent V2. Equivalente a perf.Actor.Using(...)
-        // PERO adicionalmente pasa el contexto del Playbill al ActorV2Invocation,
-        // habilitando .WithPlaybill(...) y el second-write automatico al persistir.
+        // Playbill-aware variant of the V2 fluent entry. Equivalent to perf.Actor.Using(...)
+        // BUT additionally passes the Playbill context to the ActorV2Invocation,
+        // enabling .WithPlaybill(...) and the automatic second-write on persist.
         //
-        // Si el Performance no tiene Playbill configurado, el contexto va null —
-        // la invocacion es funcionalmente identica a perf.Actor.Using(script).
+        // If the Performance has no Playbill configured, the context is null —
+        // the invocation is functionally identical to perf.Actor.Using(script).
         public ActorV2Invocation Using(string script)
         {
             if (script == null) throw new ArgumentNullException(nameof(script));

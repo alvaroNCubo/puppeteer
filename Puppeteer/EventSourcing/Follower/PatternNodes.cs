@@ -6,8 +6,8 @@ using System.Reflection;
 
 namespace Puppeteer.EventSourcing.Follower
 {
-	// Representa un type de dominio no resuelto durante el parsing
-	// Se usa como placeholder hasta la fase de matching donde se resuelven los tipos reales
+	// Represents a domain type left unresolved during parsing.
+	// Used as a placeholder until the matching phase, where the real types are resolved.
 	internal class UnresolvedDomainType : Type
 	{
 		private readonly string typeName;
@@ -88,10 +88,10 @@ namespace Puppeteer.EventSourcing.Follower
 		protected override ConstructorInfo GetConstructorImpl(BindingFlags bindingAttr, Binder binder, CallingConventions callConvention, Type[] types, ParameterModifier[] modifiers) => throw new NotSupportedException();
 		public override ConstructorInfo[] GetConstructors(BindingFlags bindingAttr) => throw new NotSupportedException();
 
-		// IMPORTANTE: IsArrayImpl retorna true para indicar que es un array
+		// IMPORTANT: IsArrayImpl returns true to indicate this is an array.
 		protected override bool IsArrayImpl() => true;
 
-		// GetElementType retorna el type del elemento del array
+		// GetElementType returns the array's element type.
 		public override Type GetElementType() => elementType;
 
 		protected override bool HasElementTypeImpl() => true;
@@ -119,7 +119,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public override bool IsDefined(Type attributeType, bool inherit) => throw new NotSupportedException();
 	}
 
-	// Nodo base para todos los patrones
+	// Base node for all patterns.
 	internal abstract class PatternNode
 	{
 	}
@@ -257,7 +257,7 @@ namespace Puppeteer.EventSourcing.Follower
 			scriptTellAckStatements.Add(new ScriptTellAckStatement(ackId, fromTargetClass, fromTargetIdValue, position));
 		}
 
-		// Accessors para el matching
+		// Accessors for the matching.
 		internal IReadOnlyList<ScriptLiteral> ScriptLiterals => scriptLiterals;
 		internal IReadOnlyList<ScriptIdentifier> ScriptIdentifiers => scriptIdentifiers;
 		internal IReadOnlyList<ScriptMemberAccess> ScriptMemberAccesses => scriptMemberAccesses;
@@ -675,12 +675,12 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
-	// Argumento que es a su vez una llamada-con-receiver: foo([_:Clase2].goo($x)).
-	// Envuelve el ExpressionNode de la llamada (InstanceAccessNode / TypeAccessNode).
-	// El matcher lo casa contra las ScriptMethodCalls registradas (no contra el valor
-	// placeholder del argumento, que es desconocido por ser estatico): "existe esa
-	// llamada-con-receiver", capturando sus $vars internos. No verifica el enlace
-	// exacto resultado->argumento (azucar sobre obligacion plana).
+	// Argument that is itself a call-with-receiver: foo([_:Derived].goo($x)).
+	// Wraps the call's ExpressionNode (InstanceAccessNode / TypeAccessNode).
+	// The matcher matches it against the registered ScriptMethodCalls (not against the
+	// argument's placeholder value, which is unknown because matching is static):
+	// "such a call-with-receiver exists", capturing its inner $vars. It does not verify
+	// the exact result->argument binding (sugar over a flat obligation).
 	internal class NestedCallParameterNode : ParameterNode
 	{
 		internal ExpressionNode Call { get; }

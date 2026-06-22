@@ -6,19 +6,19 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Cliente que corre del lado de la app Stage ANTES de instanciar el Stage. La
-    // razon: el AssignedStageId viene determinado por el handshake con el Usher
-    // (deriva de la pubkey local pero solo se hace efectivo cuando el Usher lo
-    // commitea en el journal). El Stage se construye despues con esa identidad ya
-    // fija.
+    // Client that runs on the Stage app side BEFORE instantiating the Stage. The
+    // reason: the AssignedStageId is determined by the handshake with the Usher
+    // (it derives from the local pubkey but only becomes effective once the Usher
+    // commits it to the journal). The Stage is constructed afterward with that identity
+    // already fixed.
     //
-    // Necesita:
-    //   - Un transporte temporal con un PerformerId placeholder (para que el SMP/
-    //     InMemory tenga algo que identificar el endpoint mientras dura el
-    //     handshake). El Id placeholder se descarta al terminar.
-    //   - Un IStageKeyGenerator y un IStageSigner: ambos pueden ser provistos por el
-    //     mismo backend crypto (BouncyCastle Ed25519 en produccion, fakes en tests).
-    //   - Un IPayloadSealer para abrir el sealed journal secret de la respuesta.
+    // It needs:
+    //   - A temporary transport with a placeholder PerformerId (so the SMP/
+    //     InMemory has something to identify the endpoint while the handshake
+    //     lasts). The placeholder Id is discarded when it finishes.
+    //   - An IStageKeyGenerator and an IStageSigner: both can be provided by the
+    //     same crypto backend (BouncyCastle Ed25519 in production, fakes in tests).
+    //   - An IPayloadSealer to open the sealed journal secret from the response.
     // Paper 7 Phase 2: promoted internal→public alongside IStageTransport and
     // Usher. The per-Docker host calls JoinNetworkViaUsherAsync to syndicate
     // before constructing its Stage; lives outside Choreography.dll.
@@ -52,7 +52,7 @@ namespace Choreography.Usher
 
             try
             {
-                // F3: construir y enviar UsherJoinRequest firmado (D7).
+                // F3: build and send a signed UsherJoinRequest (D7).
                 DateTime requestedAt = DateTime.UtcNow;
                 var unsigned = new UsherJoinRequest(
                     senderId: transientLocalId,
@@ -61,7 +61,7 @@ namespace Choreography.Usher
                     deviceName: deviceProfile.Name,
                     deviceFingerprint: deviceProfile.Fingerprint,
                     requestedAt: requestedAt,
-                    signature: new byte[] { 0 }); // placeholder para que el constructor pase
+                    signature: new byte[] { 0 }); // placeholder so the constructor passes
                 byte[] payload = unsigned.BuildSignedPayload();
                 byte[] signature = signer.Sign(keys.PrivateKey, payload);
 
@@ -76,20 +76,20 @@ namespace Choreography.Usher
 
                 await channel.SendAsync(request, ct);
 
-                // F5: esperar UsherJoinResponse.
+                // F5: wait for UsherJoinResponse.
                 UsherJoinResponse response = await ReceiveResponseAsync(channel, ct);
 
                 if (!response.Accepted)
                     throw new InvalidOperationException($"Usher rejected join request: {response.RejectionReason}");
 
-                // El Usher derivo el StageId con StageIdDerivation.FromPublicKey. Aqui
-                // recomputamos para verificar que coincide con lo que recibimos.
+                // The Usher derived the StageId with StageIdDerivation.FromPublicKey. Here
+                // we recompute it to verify it matches what we received.
                 PerformerId expectedId = StageIdDerivation.FromPublicKey(keys.PublicKey);
                 if (response.AssignedStageId != expectedId)
                     throw new InvalidOperationException(
                         $"AssignedStageId mismatch: expected {expectedId}, got {response.AssignedStageId}");
 
-                // Abrir el sealed journal secret.
+                // Open the sealed journal secret.
                 byte[] journalSecret = payloadSealer.Open(
                     response.SealedJournalSecret, keys.PublicKey, keys.PrivateKey);
 

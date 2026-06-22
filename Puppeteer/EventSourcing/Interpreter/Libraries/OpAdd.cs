@@ -39,7 +39,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return typeof(string);
 			}
-			// Aritmetica temporal: DateTime + TimeSpan = DateTime; TimeSpan + TimeSpan = TimeSpan
+			// Temporal arithmetic: DateTime + TimeSpan = DateTime; TimeSpan + TimeSpan = TimeSpan
 			if (typeE1 == typeof(DateTime) && typeE2 == typeof(TimeSpan)) return typeof(DateTime);
 			if (typeE1 == typeof(TimeSpan) && typeE2 == typeof(DateTime)) return typeof(DateTime);
 			if (typeE1 == typeof(TimeSpan) && typeE2 == typeof(TimeSpan)) return typeof(TimeSpan);
@@ -181,11 +181,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var tipo1 = expr1.Type;
 			var tipo2 = expr2.Type;
 
-			// Coercion a string culture-invariante para concatenacion: las fechas
-			// usan el formato fijo MM/dd/yyyy y los numeros el separador decimal '.',
-			// igual que el camino interpretado. Sin esto el compilado caia en
-			// object.ToString() (CurrentCulture), divergiendo del interpretado y
-			// rompiendo la invariante de representacion del DSL en culturas no-US.
+			// Culture-invariant coercion to string for concatenation: dates
+			// use the fixed format MM/dd/yyyy and numbers the decimal separator '.',
+			// just like the interpreted path. Without this the compiled path fell into
+			// object.ToString() (CurrentCulture), diverging from the interpreted one and
+			// breaking the DSL representation invariant in non-US cultures.
 			Expression CoerceToString(Expression operand)
 			{
 				Type t = operand.Type;

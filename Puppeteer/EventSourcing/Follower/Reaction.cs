@@ -114,16 +114,16 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private string hydrationUntilSeek = null;
 
-		// Cuantificador universal del Reaction: (a,b,c) in $x × $y × $z. Declarado
-		// despues del Seek que captura las colecciones fuente; el conjunto de
-		// obligaciones (producto cartesiano) se materializa al matchear ese Seek (F1b).
+		// Universal quantifier of the Reaction: (a,b,c) in $x × $y × $z. Declared
+		// after the Seek that captures the source collections; the set of
+		// obligations (cartesian product) is materialized when that Seek matches (F1b).
 		private ForEachSpec forEachSpec = null;
 
-		// Resume optimization (rediseño de checkpoint, paso 4). Opt-in de la fila
-		// "Cue / Replicación / consumidor-puro" de la matriz: el transporte push (Svix) NO
-		// rebobina, asi que el cold-start no puede re-leer. En su lugar se restauran los matches
-		// de cobertura abiertos desde un snapshot y se resume en el frente. Para Job/Cue con
-		// journal local (default) NO se activa: ahi el resume es re-leer [closed, high-water].
+		// Resume optimization (checkpoint redesign, step 4). Opt-in for the
+		// "Cue / Replication / pure-consumer" row of the matrix: the push transport does NOT
+		// rewind, so the cold-start cannot re-read. Instead the open coverage matches are
+		// restored from a snapshot and resumed at the frontier. For Job/Cue with a
+		// local journal (default) it is NOT enabled: there the resume is re-reading [closed, high-water].
 		private bool useSnapshotResume = false;
 
 		private MatchTree matchTree;
@@ -154,10 +154,10 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private string scriptForCmd;
 		private string scriptForChk;
-		// Check de una Causation.Continue(check:, script). A diferencia de
-		// scriptForChk (el `when:` de Program.Emit, que se evalua localmente
-		// antes del emit), este check NO se evalua aqui: viaja en el
-		// TellEnvelope.Check para que el RECEPTOR lo corra como CheckThenCommand.
+		// Check of a Causation.Continue(check:, script). Unlike
+		// scriptForChk (the `when:` of Program.Emit, which is evaluated locally
+		// before the emit), this check is NOT evaluated here: it travels in the
+		// TellEnvelope.Check so the RECEIVER runs it as CheckThenCommand.
 		private string causationCheck;
 		private Action<Parameters> _configureParameters;
 
@@ -220,9 +220,9 @@ namespace Puppeteer.EventSourcing.Follower
 		private int lastMatchesCount;
 		private readonly object lastMatchesLock = new object();
 
-		// Shadow Replay — S3 (skip-preview). EntryIds que las reactions Elide marcarian
-		// en modo dry-run sobre un shadow, SIN commitear la elision. Acumulado por
-		// RecordWouldSkip; reseteado por ResetCounters.
+		// Shadow Replay — S3 (skip-preview). EntryIds that Elide reactions would mark
+		// in dry-run mode over a shadow, WITHOUT committing the elision. Accumulated by
+		// RecordWouldSkip; reset by ResetCounters.
 		private readonly List<long> wouldSkip = new List<long>();
 		private readonly object wouldSkipLock = new object();
 
@@ -296,10 +296,10 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Shadow Replay — S3. WouldSkip expone, en modo skip-preview (dry-run sobre un
-		// shadow), los EntryIds que las reactions Elide marcarian SIN commitear la
-		// elision. Es a Elide lo que LastMatches es a los matches: un buffer observable
-		// de "que elidiria", no un efecto persistido. Lectura = copia snapshot.
+		// Shadow Replay — S3. WouldSkip exposes, in skip-preview mode (dry-run over a
+		// shadow), the EntryIds that Elide reactions would mark WITHOUT committing the
+		// elision. It is to Elide what LastMatches is to matches: an observable buffer
+		// of "what it would elide", not a persisted effect. Read = snapshot copy.
 		public IReadOnlyList<long> WouldSkip
 		{
 			get
@@ -370,9 +370,9 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Shadow Replay — S3. Llamado desde MatchTree.ExecuteCompleteMatch cuando el
-		// shadow corre en skip-preview: captura el batch de EntryIds que la Elide
-		// marcaria, SIN commitear (no MarkEventsAsElidedWithCheckpoint).
+		// Shadow Replay — S3. Called from MatchTree.ExecuteCompleteMatch when the
+		// shadow runs in skip-preview: captures the batch of EntryIds that Elide
+		// would mark, WITHOUT committing (no MarkEventsAsElidedWithCheckpoint).
 		internal void RecordWouldSkip(long[] batch)
 		{
 			ArgumentNullException.ThrowIfNull(batch);
@@ -397,9 +397,9 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal ReactionActivation Activation => activation;
 
-		// Decide si una activacion corre dado el rol vivo del nodo. DirectorOnly
-		// solo en el director/primary; CastOnly solo en el Cast/follower; Company
-		// en ambos.
+		// Decide whether an activation runs given the node's live role. DirectorOnly
+		// only on the director/primary; CastOnly only on the Cast/follower; Company
+		// on both.
 		private static bool ActivationAllowsRole(ReactionActivation activation, bool isActingAsDirector)
 		{
 			switch (activation)
@@ -495,43 +495,43 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal ForEachSpec ForEachSpec => forEachSpec;
 
-		// Cuantificador universal: declara la tupla y el producto cartesiano de
-		// colecciones capturadas. Se invoca DESPUES del Seek que captura las fuentes
-		// (las $vars deben estar capturadas para que F1b materialice el producto). En
-		// F1a solo parsea/valida/almacena la spec; la materializacion y el binding de
-		// las variables de la tupla a los Seeks siguientes llegan en F1b.
+		// Universal quantifier: declares the tuple and the cartesian product of
+		// captured collections. Invoked AFTER the Seek that captures the sources
+		// (the $vars must be captured so F1b can materialize the product). In
+		// F1a it only parses/validates/stores the spec; the materialization and the binding
+		// of the tuple variables to the subsequent Seeks arrive in F1b.
 		public Reaction ForEach(string spec)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(spec);
 
-			if (this.forEachSpec != null) throw new LanguageException("ForEach() solo puede declararse una vez por Reaction.");
-			if (reactionEngines.Count == 0) throw new LanguageException("ForEach() debe declararse despues del Seek que captura las colecciones fuente.");
+			if (this.forEachSpec != null) throw new LanguageException("ForEach() can be declared only once per Reaction.");
+			if (reactionEngines.Count == 0) throw new LanguageException("ForEach() must be declared after the Seek that captures the source collections.");
 
 			this.forEachSpec = ForEachSpec.Parse(spec);
 
 			return this;
 		}
 
-		// Resume optimization (paso 4): opt-in del cold-start por snapshot para la topologia
-		// consumidor-puro de replicacion (sin journal local que re-leer). Debe llamarse antes
-		// del primer Seek(), igual que los modificadores de hidratacion.
+		// Resume optimization (step 4): opt-in for the snapshot-based cold-start for the
+		// pure-consumer replication topology (no local journal to re-read). Must be called before
+		// the first Seek(), like the hydration modifiers.
 		public Reaction WithSnapshotResume()
 		{
-			if (reactionEngines.Count > 0) throw new LanguageException("WithSnapshotResume() debe llamarse antes del primer Seek().");
+			if (reactionEngines.Count > 0) throw new LanguageException("WithSnapshotResume() must be called before the first Seek().");
 
 			useSnapshotResume = true;
 			return this;
 		}
 
-		// Resume optimization: la frontera-cerrada / snapshot solo aplican a reactions de
-		// cobertura (ForEach) que eliden. El resto sigue con el checkpoint escalar per-seek.
+		// Resume optimization: the closed-frontier / snapshot only apply to coverage
+		// reactions (ForEach) that elide. The rest continue with the per-seek scalar checkpoint.
 		private bool IsCoverageElide => forEachSpec != null
 			&& actionType == ReactionActionType.Metadata
 			&& metadataKind == MetadataKind.Elide;
 
-		// Paso 5 de la matriz: un Shadow (SkipPreview) NO toca checkpoint — no commitea (la rama
-		// dry-run de ExecuteCompleteMatch retorna antes del commit) ni resume; replaya one-shot
-		// desde génesis. Por eso el resume por frontera/snapshot se desactiva bajo SkipPreview.
+		// Step 5 of the matrix: a Shadow (SkipPreview) does NOT touch the checkpoint — it neither commits (the
+		// dry-run branch of ExecuteCompleteMatch returns before the commit) nor resumes; it replays one-shot
+		// from genesis. That is why the frontier/snapshot resume is disabled under SkipPreview.
 		private bool UseClosedFrontierResume => IsCoverageElide && !actorHandler.SkipPreviewEnabled;
 
 		private static readonly HashSet<string> ReservedSeekNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -631,10 +631,10 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"[Reaction.ValidateFinalSeek] Validation passed: FinalSeekCount={finalSeekCount}, LastSeekIndex={reactionEngines.Count - 1}, IsSingleSeek={reactionEngines.Count == 1}");
 		}
 
-		// K.2: cuantificadores exact-family (None/One/Exactly) son indecidibles sin
-		// punto de cierre en journal abierto. Requieren .Within(...) que define el
-		// rango (EntryIds o TimeSpan) donde el cuantificador se evalua. Sin Within,
-		// el count jamas se finaliza y el fire queda pendiente para siempre.
+		// K.2: exact-family quantifiers (None/One/Exactly) are undecidable without
+		// a closing point in an open journal. They require .Within(...) which defines the
+		// range (EntryIds or TimeSpan) where the quantifier is evaluated. Without Within,
+		// the count never finalizes and the fire stays pending forever.
 		private void ValidateExactRequiresWithin()
 		{
 			for (int i = 0; i < reactionEngines.Count; i++)
@@ -679,14 +679,14 @@ namespace Puppeteer.EventSourcing.Follower
 
 		public void Execute(ReactionExecutionMode executionMode = ReactionExecutionMode.Batch, System.Threading.CancellationToken cancellationToken = default)
 		{
-			// Gate de ReactionActivation: la Reaction solo corre si su activacion
-			// calza con el rol vivo del nodo. DirectorOnly solo en el
-			// director/primary; CastOnly solo en un Cast/follower; Company en
-			// ambos. El rol lo provee Choreography (Stage.IsDirector /
-			// Performance.!isFollower); un actor standalone defaultea a director.
-			// Es el chokepoint unico (lo invocan tanto Reactions.Execute como el
-			// path Cued/Continuous), asi un fan-out replicado no re-dispara en el
-			// nodo equivocado.
+			// ReactionActivation gate: the Reaction only runs if its activation
+			// matches the node's live role. DirectorOnly only on the
+			// director/primary; CastOnly only on a Cast/follower; Company on
+			// both. The role is provided by Choreography (Stage.IsDirector /
+			// Performance.!isFollower); a standalone actor defaults to director.
+			// This is the single chokepoint (invoked by both Reactions.Execute and the
+			// Cued/Continuous path), so a replicated fan-out does not re-fire on the
+			// wrong node.
 			if (!ActivationAllowsRole(activation, actorHandler.IsActingAsDirector))
 				return;
 
@@ -713,7 +713,7 @@ namespace Puppeteer.EventSourcing.Follower
 			ValidateFinalSeek();
 
 			// K.2: Exact-family quantifiers (None/One/Exactly) require .Within(...)
-			// — sin window no hay punto de cierre en journal abierto.
+			// — without a window there is no closing point in an open journal.
 			ValidateExactRequiresWithin();
 
 			var diaryStorage = DiaryStorage;
@@ -779,10 +779,10 @@ namespace Puppeteer.EventSourcing.Follower
 			symbolTable = new SymbolTable();
 			cachedProgramas = new Dictionary<int, (Program program, int lastAccessTick)>();
 
-			// Resume optimization (rediseño de checkpoint, pasos 2-4 — notes/reactions-checkpoint-policy.md).
-			// Para cobertura el resume NO es desde génesis: lo gobierna la frontera-cerrada (re-read
-			// local) o un snapshot (consumidor-puro). Se decide aqui, con el matchTree ya creado, porque
-			// el restore inyecta los nodos de matches abiertos ANTES de la rehidratacion.
+			// Resume optimization (checkpoint redesign, steps 2-4 — notes/reactions-checkpoint-policy.md).
+			// For coverage the resume is NOT from genesis: it is governed by the closed-frontier (local
+			// re-read) or a snapshot (pure-consumer). It is decided here, with the matchTree already created, because
+			// the restore injects the open-match nodes BEFORE rehydration.
 			if (UseClosedFrontierResume && reactionId > 0)
 			{
 				var (highWater, closedFrontier) = diaryStorage.GetReactionFrontier(reactionId);
@@ -798,9 +798,9 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				// Consumidor-puro con snapshot restaurado: el transporte (Svix) no rebobina -> resume
-				// en el frente, sin re-leer. En cualquier otro caso (Job/Cue local, o snapshot vacio) se
-				// re-lee la ventana [closed, high-water]; closedFrontier=0 en el primer Execute => génesis.
+				// Pure-consumer with restored snapshot: the transport does not rewind -> resume
+				// at the frontier, without re-reading. In any other case (local Job/Cue, or empty snapshot) the
+				// window [closed, high-water] is re-read; closedFrontier=0 on the first Execute => genesis.
 				afterEntryId = restoredFromSnapshot ? highWater : closedFrontier;
 			}
 
@@ -816,10 +816,10 @@ namespace Puppeteer.EventSourcing.Follower
 			ParsersPool = new ActorHandler.ConcurrentParsersPool(actorHandler.Libraries, symbolTable);
 
 			// PHASE 3: statically validate every engine's Where expression at startup.
-			// Fase 4.5 refactor Playbill: los simbolos validos en Where son @Now y @EntryId
-			// (Ip/User dejaron de inyectarse). El lexer trata '@' como whitespace y lo
-			// descarta, asi que '@Now' parsea a 'Now' y coincide con el parametro Now
-			// pre-populado por el pool; EntryId se inyecta per-event.
+			// Phase 4.5 Playbill refactor: the valid symbols in Where are @Now and @EntryId
+			// (Ip/User are no longer injected). The lexer treats '@' as whitespace and
+			// discards it, so '@Now' parses to 'Now' and matches the Now parameter
+			// pre-populated by the pool; EntryId is injected per-event.
 			CompileWhereExpressions();
 
 			// Reset optimization metrics.
@@ -896,27 +896,27 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"======================================");
 			System.Diagnostics.Debug.WriteLine($"");
 
-			// Resume optimization (rediseño de checkpoint, pasos 2-4). Persistir los dos cursores
-			// globales ANTES de limpiar el matchTree (la frontera-cerrada se computa de sus roots
-			// abiertos). Solo cobertura, nunca bajo Shadow/SkipPreview (paso 5).
+			// Resume optimization (checkpoint redesign, steps 2-4). Persist the two global
+			// cursors BEFORE clearing the matchTree (the closed-frontier is computed from its open
+			// roots). Coverage only, never under Shadow/SkipPreview (step 5).
 			if (UseClosedFrontierResume && reactionId > 0)
 			{
 				var (prevHighWater, prevClosedFrontier) = diaryStorage.GetReactionFrontier(reactionId);
 
-				// high-water = max entryId escaneado (monotono entre Executes). lastProcessedEntryId
-				// es long.MinValue si no se replayo ningun evento; se acota a >= 0.
+				// high-water = max entryId scanned (monotonic across Executes). lastProcessedEntryId
+				// is long.MinValue if no event was replayed; it is clamped to >= 0.
 				long scanned = lastProcessedEntryId > 0 ? lastProcessedEntryId : 0;
 				long highWater = Math.Max(prevHighWater, scanned);
 
-				// frontera-cerrada = (ancla abierta mas vieja)-1, o high-water si todo cerro. Clamp
-				// monotono: nunca retrocede (re-leer de mas es correcto/idempotente, pero retroceder
-				// la frontera persistida solo desperdiciaria trabajo en el proximo Execute).
+				// closed-frontier = (oldest open anchor)-1, or high-water if everything closed. Monotonic
+				// clamp: it never moves backward (re-reading too much is correct/idempotent, but moving
+				// the persisted frontier backward would only waste work in the next Execute).
 				long closedFrontier = matchTree.ComputeClosedFrontier(highWater);
 				if (closedFrontier < prevClosedFrontier) closedFrontier = prevClosedFrontier;
 
 				diaryStorage.SaveReactionFrontier(reactionId, highWater, closedFrontier);
 
-				// Paso 4: snapshot de matches abiertos para el cold-start consumidor-puro.
+				// Step 4: snapshot of open matches for the pure-consumer cold-start.
 				if (useSnapshotResume)
 				{
 					var openMatches = matchTree.SnapshotOpenCoverageMatches();
@@ -982,6 +982,13 @@ namespace Puppeteer.EventSourcing.Follower
 		public CausationPlane Causation => new CausationPlane(this);
 		public MetadataPlane Metadata => new MetadataPlane(this);
 
+		// Outbox plane (OutboxPlane / SetOutboxAction / ReactionActionType.Outbox) is
+		// retained as infrastructure but intentionally NOT exposed here as a Reaction
+		// action plane: a Reaction's Action touches exactly the three planes above
+		// (Program, Causation, Metadata). The journal-outbox emit path stays wired
+		// (OutboxPlane, the diary outbox table, the at-least-once relay) for future
+		// re-exposure. See notes/reactions-outbox-emit.md.
+
 		// Sub-distinction inside the Metadata plane: which journal-level
 		// bookkeeping verb the developer chose. Set together with
 		// actionType = Metadata via SetMetadataAction.
@@ -993,8 +1000,14 @@ namespace Puppeteer.EventSourcing.Follower
 		// delivery worker. Null when metadataKind != Materialize.
 		private string materializeDestination;
 
-		// F4 Elide(seek:/seeks:): Seeks cuyos entryIds se eliden. null = cadena completa.
+		// F4 Elide(seek:/seeks:): Seeks whose entryIds are elided. null = full chain.
 		private string[] elideTargetSeeks;
+
+		// Outbox plane (.Outbox.Emit). Destination + payload template recorded into
+		// the diary's outbox table when a match completes. Both null when the
+		// action is not an Outbox emit.
+		private string outboxDestination;
+		private string outboxPayloadTemplate;
 
 		// Plane terminator helpers — invoked by the Plane types when the
 		// developer calls `.Program.Emit(...)` / `.Causation.Continue(...)`
@@ -1019,7 +1032,7 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			EnsureNoActionConfigured();
 			this.scriptForCmd = script;
-			this.causationCheck = check;  // null cuando no se dio check:
+			this.causationCheck = check;  // null when no check: was supplied
 			this.actionType = ReactionActionType.Causation;
 		}
 
@@ -1030,8 +1043,8 @@ namespace Puppeteer.EventSourcing.Follower
 			this.metadataKind = kind;
 			this.materializeDestination = destination;
 
-			// F4: validar que cada Seek objetivo de Elide(seek:/seeks:) exista. Elide es el
-			// terminador (tras todos los ThenSeek), asi que reactionEngines ya esta completo.
+			// F4: validate that each target Seek of Elide(seek:/seeks:) exists. Elide is the
+			// terminator (after all the ThenSeek), so reactionEngines is already complete.
 			if (elideSeeks != null)
 			{
 				foreach (string seekName in elideSeeks)
@@ -1046,10 +1059,18 @@ namespace Puppeteer.EventSourcing.Follower
 						}
 					}
 					if (!found)
-						throw new LanguageException($"Elide(seek/seeks): el Seek '{seekName}' no existe en esta Reaction. Seeks: {string.Join(", ", reactionEngines.ConvertAll(e => e.PatternDescription))}.");
+						throw new LanguageException($"Elide(seek/seeks): the Seek '{seekName}' does not exist in this Reaction. Seeks: {string.Join(", ", reactionEngines.ConvertAll(e => e.PatternDescription))}.");
 				}
 			}
 			this.elideTargetSeeks = elideSeeks;
+		}
+
+		internal void SetOutboxAction(string destination, string payload)
+		{
+			EnsureNoActionConfigured();
+			this.actionType = ReactionActionType.Outbox;
+			this.outboxDestination = destination;
+			this.outboxPayloadTemplate = payload;
 		}
 
 		private void EnsureNoActionConfigured()
@@ -1058,6 +1079,28 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				throw new LanguageException($"Reaction '{name}' already has an Action plane configured ({actionType}). Each Reaction has exactly one Action; remove the redundant plane verb.");
 			}
+		}
+
+		internal bool IsOutboxEmit => actionType == ReactionActionType.Outbox;
+		internal string OutboxDestination => outboxDestination;
+
+		// Render the recorded payload: substitute `@name` tokens in the template
+		// with the matched parameter values. Deterministic — a fixed match yields a
+		// fixed payload. Unknown tokens are left as-is (the recorded data stays
+		// inspectable); well-known non-domain params (Now/Ip/User) are not used.
+		internal string RenderOutboxPayload(Parameters matched)
+		{
+			if (string.IsNullOrEmpty(outboxPayloadTemplate) || matched == null)
+				return outboxPayloadTemplate ?? string.Empty;
+
+			string rendered = outboxPayloadTemplate;
+			foreach (var p in matched)
+			{
+				if (p.Name == "Now" || p.Name == "Ip" || p.Name == "User") continue;
+				object value = p.GetValue();
+				rendered = rendered.Replace("@" + p.Name, value?.ToString() ?? string.Empty);
+			}
+			return rendered;
 		}
 
 		public Reaction WithParameters(Action<Parameters> configure)
@@ -1081,6 +1124,13 @@ namespace Puppeteer.EventSourcing.Follower
 
 				case ReactionActionType.Metadata:
 					ExecuteMetadata();
+					break;
+
+				case ReactionActionType.Outbox:
+					// No-op here on purpose: the recording (outbox row insert) is
+					// committed atomically with the cursor in MatchTree's outbox
+					// branch BEFORE this runs. There is no separate external effect
+					// in the reaction path — the relay (actor.Outbox) delivers.
 					break;
 
 				case ReactionActionType.None:
@@ -1142,15 +1192,15 @@ namespace Puppeteer.EventSourcing.Follower
 		// are once again subject to the tell-only-in-reaction-action
 		// invariant.
 		//
-		// Modo follower: el invariante 1-escritor del journal canonico
-		// impide que un follower escriba al journal compartido del actor.
-		// Etapa 2: PerformCmd sigue corriendo igual — TellStatement.Execute
-		// construye el envelope y lo enqueua en SymbolTable.PendingTells,
-		// y ActorHandler.SuppressReactionJournaling gate-a el writeNewEntry
-		// adentro de ExecuteCommandWithWriteLock para que la sentence NO
-		// toque el journal. El drain post-lock despacha el envelope por
-		// el Transport igual que en el primary; el side effect cross-actor
-		// se conserva y la huella en el journal del follower desaparece.
+		// Follower mode: the single-writer invariant of the canonical journal
+		// prevents a follower from writing to the actor's shared journal.
+		// Stage 2: PerformCmd still runs the same — TellStatement.Execute
+		// builds the envelope and enqueues it into SymbolTable.PendingTells,
+		// and ActorHandler.SuppressReactionJournaling gates the writeNewEntry
+		// inside ExecuteCommandWithWriteLock so the sentence does NOT
+		// touch the journal. The post-lock drain dispatches the envelope over
+		// the Transport just as on the primary; the cross-actor side effect
+		// is preserved and the footprint in the follower's journal disappears.
 		private void ExecuteCausation(Parameters matchedParameters, long triggeringEntryId)
 		{
 			Parameters parameters = actorHandler.ParametersPool.Rent();
@@ -1169,10 +1219,10 @@ namespace Puppeteer.EventSourcing.Follower
 				actorHandler.EnterReactionActionScope();
 				try
 				{
-					// El check (si lo hay) NO se evalua aqui: se hornea en el
-					// TellEnvelope.Check que construye TellStatement.Execute durante
-					// este PerformCmd, para que el RECEPTOR lo corra como
-					// CheckThenCommand. Se limpia siempre tras el body.
+					// The check (if any) is NOT evaluated here: it is baked into the
+					// TellEnvelope.Check that TellStatement.Execute builds during
+					// this PerformCmd, so the RECEIVER runs it as
+					// CheckThenCommand. It is always cleared after the body.
 					actorHandler.CausationTellCheck = this.causationCheck;
 					try
 					{
@@ -1240,12 +1290,12 @@ namespace Puppeteer.EventSourcing.Follower
 				foreach (var p in parameters)
 				{
 					// Filter by NAME to exclude well-known non-domain parameters.
-					// Now es el unico parametro especial vivo tras Fase 4.5 (Ip/User
-					// dejaron de inyectarse, pero los filtramos defensivamente por si
-					// algun script legacy todavia los pasa como parametros de usuario).
-					// El pool es compartido con PerformEmit que setea Now=DateTime.Now,
-					// dejando el wall-clock visible al hash; excluir estos nombres
-					// mantiene el hash como funcion pura de las capturas matcheadas.
+					// Now is the only special parameter still live after Phase 4.5 (Ip/User
+					// are no longer injected, but we filter them defensively in case
+					// some legacy script still passes them as user parameters).
+					// The pool is shared with PerformEmit which sets Now=DateTime.Now,
+					// leaving the wall-clock visible to the hash; excluding these names
+					// keeps the hash a pure function of the matched captures.
 					if (p.Name == "Now" || p.Name == "Ip" || p.Name == "User") continue;
 					object v = p.GetValue();
 					ordered.Add((p.Name ?? "", p.ParameterType?.FullName ?? "", v == null ? "" : v.ToString()));
@@ -1279,12 +1329,12 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			sb.AppendLine();
 
-			// Escribir cada ReactionEngine
+			// Write each ReactionEngine
 			foreach (var engine in reactionEngines)
 			{
 				sb.AppendLine($"Seek: {engine.PatternDescription}");
 
-				// Escribir los patrones de este engine
+				// Write this engine's patterns
 				for (int i = 0; i < engine.Patterns.Count; i++)
 				{
 					var pattern = engine.Patterns[i];
@@ -1443,7 +1493,7 @@ namespace Puppeteer.EventSourcing.Follower
 				if (!cacheParameters.IsStructuralEquivalentTo(eventParameters)) throw new LanguageException("Parameter structure mismatch between cache and event");
 
 				// Logging: show registered parameters.
-				// Playbill final refactor: ya no se filtra IsNow (no existe SystemParameter — todo es user param).
+				// Playbill final refactor: IsNow is no longer filtered (there is no SystemParameter — everything is a user param).
 				System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] Parameters registered for ActionId={actionData.ActionId}:");
 				foreach (var param in eventParameters)
 				{
@@ -1476,7 +1526,7 @@ namespace Puppeteer.EventSourcing.Follower
 				cachedProgramas[actionData.ActionId] = (program, cacheAccessTick);
 
 				// Count parameters for metrics.
-				// Playbill final refactor: ya no se filtra IsNow — todo parametro es de usuario.
+				// Playbill final refactor: IsNow is no longer filtered — every parameter is a user parameter.
 				int userParamCount = 0;
 				foreach (var param in eventParameters)
 				{
@@ -1548,7 +1598,7 @@ namespace Puppeteer.EventSourcing.Follower
 				// Reload ONLY parameter values (structure is already resolved).
 				cacheEntry.program.Parameters.LoadArguments(actionData.Arguments);
 
-				// Playbill final refactor: ya no se filtra IsNow.
+				// Playbill final refactor: IsNow is no longer filtered.
 				System.Diagnostics.Debug.WriteLine($"[SolveActionParameters] Reloaded parameter values for ActionId={actionData.ActionId}:");
 				foreach (var param in cacheEntry.program.Parameters)
 				{

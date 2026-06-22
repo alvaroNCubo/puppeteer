@@ -4,20 +4,19 @@ using System.Text;
 
 namespace Puppeteer.EventSourcing.Follower
 {
-	// Spec de cuantificacion universal de un Reaction:
-	//   (estado, hora, fecha) in ($states, $hours) × $dates
-	// Declara las variables de la tupla (estado, hora, fecha) y los FACTORES fuente
-	// que se cruzan. Cada factor es:
-	//   - una coleccion simple ($dates), o
-	//   - un grupo ZIP entre parentesis ($states, $hours) cuyas colecciones se
-	//     emparejan por indice (lockstep): states[i] solo va con hours[i]; deben tener
-	//     la misma longitud.
-	// El conjunto de obligaciones es el producto cartesiano de los factores, donde un
-	// factor zip itera indice-alineado. Las variables de la tupla mapean POSICIONALMENTE
-	// al orden APLANADO de las fuentes en la expresion (por eso los zipeados van
-	// adyacentes): (estado, hora, fecha) <- [states, hours, dates]. El '×' es el cruce
-	// entre factores; se acepta tambien '*' como alterno tecleable. El cartesiano puro
-	// ($x × $y × $z, cada factor una sola fuente) sigue siendo el caso default.
+	// Universal-quantification spec for a Reaction:
+	//   (a, b, c) in ($as, $bs) × $cs
+	// Declares the tuple variables (a, b, c) and the source FACTORS that are crossed.
+	// Each factor is:
+	//   - a simple collection ($cs), or
+	//   - a parenthesized ZIP group ($as, $bs) whose collections are paired by index
+	//     (lockstep): as[i] only goes with bs[i]; they must have the same length.
+	// The obligation set is the cartesian product of the factors, where a zip factor
+	// iterates index-aligned. The tuple variables map POSITIONALLY to the FLATTENED
+	// order of the sources in the expression (which is why the zipped ones are
+	// adjacent): (a, b, c) <- [as, bs, cs]. The '×' is the cross between factors; '*'
+	// is also accepted as a typeable alternative. The pure cartesian product
+	// ($x × $y × $z, each factor a single source) remains the default case.
 	internal sealed class ForEachSpec
 	{
 		private readonly string[] tupleVars;
@@ -102,14 +101,14 @@ namespace Puppeteer.EventSourcing.Follower
 			return new ForEachSpec(tuple, sources, sizes.ToArray(), text);
 		}
 
-		// Materializa el conjunto de obligaciones: el producto cartesiano de los FACTORES.
-		// Un factor simple (grupo de 1 fuente) aporta una fila por elemento; un factor zip
-		// (grupo de >=2 fuentes) aporta una fila por indice, emparejando las fuentes por
-		// posicion (deben tener la misma longitud, si no LanguageException). Cada obligacion
-		// es un object[] de longitud TupleVars.Count en el orden APLANADO de las fuentes
-		// (el mismo orden en que se reciben aqui y en que mapean las variables de la tupla).
-		// Recibe las colecciones en orden aplanado, igual que las alimenta
-		// MatchTree.MaterializeObligations leyendo por SourceVars (que sigue plano).
+		// Materializes the obligation set: the cartesian product of the FACTORS.
+		// A simple factor (group of 1 source) contributes one row per element; a zip factor
+		// (group of >=2 sources) contributes one row per index, pairing the sources by
+		// position (they must have the same length, otherwise LanguageException). Each
+		// obligation is an object[] of length TupleVars.Count in the FLATTENED order of the
+		// sources (the same order in which they are received here and in which the tuple
+		// variables map). Receives the collections in flattened order, the same way
+		// MatchTree.MaterializeObligations feeds them by reading SourceVars (which stays flat).
 		internal List<object[]> CrossProduct(IReadOnlyList<System.Collections.IEnumerable> sources)
 		{
 			ArgumentNullException.ThrowIfNull(sources);
@@ -128,8 +127,8 @@ namespace Puppeteer.EventSourcing.Follower
 				materialized.Add(elements);
 			}
 
-			// Filas por factor: un factor simple -> una fila [elem] por elemento; un factor
-			// zip -> una fila [src0[i], src1[i], ...] por indice (longitudes iguales).
+			// Rows per factor: a simple factor -> one row [elem] per element; a zip
+			// factor -> one row [src0[i], src1[i], ...] per index (equal lengths).
 			List<List<object[]>> factorRows = new List<List<object[]>>(groupSizes.Length);
 			int offset = 0;
 			for (int g = 0; g < groupSizes.Length; g++)
@@ -233,8 +232,8 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Vista de solo lectura de los grupos zip (cada grupo = las fuentes que se
-		// emparejan por indice). Un grupo de longitud 1 es una fuente simple.
+		// Read-only view of the zip groups (each group = the sources paired by index).
+		// A group of length 1 is a simple source.
 		private sealed class ReadOnlyGroups : IReadOnlyList<IReadOnlyList<string>>
 		{
 			private readonly IReadOnlyList<string>[] groups;

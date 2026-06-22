@@ -70,10 +70,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
 		}
 
-		// Aplica la regla simbolo-primero / clase-fallback para decidir si 'Id.Metodo(args)' es
-		// una llamada static (receptor = clase registrada) o de instancia (receptor = variable).
-		// Retorna el Type de la clase para el caso static; null para el caso instancia. Solo aplica
-		// a llamadas a metodo (con parentesis); el acceso a propiedad/campo static no esta soportado.
+		// Applies the symbol-first / class-fallback rule to decide whether 'Id.Method(args)' is
+		// a static call (receiver = registered class) or an instance call (receiver = variable).
+		// Returns the class Type for the static case; null for the instance case. It only applies
+		// to method calls (with parentheses); static property/field access is not supported.
 		protected internal override Type ResolveStaticReceiverType()
 		{
 			if (Method() == null)
@@ -93,11 +93,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private Type ResolveStaticReceiverTypeUncached()
 		{
-			// (A) Instancia vs clase: simbolo-primero. Si el receptor esta ligado a una
-			// variable/parametro/global (o existe como global en la tabla de simbolos), es una
-			// llamada de instancia y NUNCA static, aunque su nombre coincida (case-insensitive)
-			// con una clase registrada. Esto evita que una variable 'cliente' se interprete como
-			// la clase 'Cliente'.
+			// (A) Instance vs class: symbol-first. If the receiver is bound to a
+			// variable/parameter/global (or exists as a global in the symbol table), it is an
+			// instance call and NEVER static, even if its name matches (case-insensitive)
+			// a registered class. This prevents a variable 'obj' from being interpreted as
+			// the class 'Obj'.
 			bool boundToSymbol = id.HasResolvedScope || symbolTable.HasVariable(id.Name);
 			if (boundToSymbol)
 			{
@@ -108,12 +108,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return null;
 			}
 
-			// (A continuacion) clase-fallback: el receptor no es un binding; intentar resolverlo
-			// como una clase registrada en Libraries (case-insensitive).
+			// (Next) class-fallback: the receiver is not a binding; try to resolve it
+			// as a class registered in Libraries (case-insensitive).
 			if (!libraries.TryFindClassesByName(id.Name, out var classesEnumerable))
 			{
-				// Ni binding ni clase registrada: no es static. La ruta de instancia / resolucion
-				// de metodo producira el error apropiado (variable no definida, etc.).
+				// Neither binding nor registered class: it is not static. The instance / method
+				// resolution path will produce the appropriate error (undefined variable, etc.).
 				return null;
 			}
 
@@ -123,8 +123,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return null;
 			}
 
-			// (B) Homonimia de namespace: si se dio la clausula 'in', filtrar por ese namespace
-			// (misma maquinaria que la construccion Clase(args) in Namespace).
+			// (B) Namespace homonymy: if the 'in' clause was given, filter by that namespace
+			// (same machinery as the Class(args) in Namespace construction).
 			List<DomainLibraries.ClassInfo> candidates = allCandidates;
 			if (targetNamespace != null)
 			{
@@ -139,15 +139,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 			}
 
-			// Un solo candidato (un solo namespace): resolvemos a esa clase directamente. Si el
-			// metodo static no existe, ComputeCallExpressionType/InvokeStaticMethod lo reportara.
+			// A single candidate (a single namespace): we resolve to that class directly. If the
+			// static method does not exist, ComputeCallExpressionType/InvokeStaticMethod will report it.
 			if (candidates.Count == 1)
 			{
 				return candidates[0].Type;
 			}
 
-			// Varios candidatos por homonimia: desambiguar por cual declara un metodo static con
-			// firma compatible. Si exactamente una clase matchea, resuelto; si varias, ambiguo.
+			// Several candidates by homonymy: disambiguate by which one declares a static method with
+			// a compatible signature. If exactly one class matches, resolved; if several, ambiguous.
 			Type[] signature = RequiredMethodSignature();
 			List<Type> matching = new List<Type>();
 			foreach (DomainLibraries.ClassInfo classInfo in candidates)
@@ -171,8 +171,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				throw new LanguageException($"Ambiguous reference: class '{id.Name}' with a static method '{Method()}' matching the given signature exists in multiple namespaces: {namespaces}. Use the 'in' clause to specify the namespace (e.g. {id.Name}.{Method()}(...) in MyNamespace).");
 			}
 
-			// Ningun candidato declara el metodo static con esa firma, pero la clase existe en
-			// varios namespaces: pedir 'in' para acotar y obtener el error preciso del namespace.
+			// No candidate declares the static method with that signature, but the class exists in
+			// several namespaces: ask for 'in' to narrow it and get the precise namespace error.
 			string allNamespaces = string.Join(", ", candidates.Select(ci => ci.Namespace).Distinct());
 			throw new LanguageException($"Ambiguous reference: class '{id.Name}' exists in multiple namespaces: {allNamespaces}, and no static method '{Method()}' with a compatible signature was found to disambiguate. Use the 'in' clause to specify the namespace (e.g. {id.Name}.{Method()}(...) in MyNamespace).");
 		}
@@ -198,12 +198,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			System.Diagnostics.Debug.WriteLine($"[DottedId.PreparePatternMatching] Processing: {id.Name}.{Property() ?? Method()}");
 
-			// Recursar en los argumentos PRIMERO, para que una llamada anidada como
-			// argumento (p.ej. transform($x) usado como parametro) quede registrada y
-			// sea matcheable como obligacion. Mismo orden args-first que
-			// NewInstance.PreparePatternMatching: las llamadas anidadas reciben una
-			// position menor que la llamada externa. Literales/Ids se auto-registran
-			// sin mover 'position'; solo metodos/constructores la incrementan.
+			// Recurse into the arguments FIRST, so that a nested call as an
+			// argument (e.g. transform($x) used as a parameter) is registered and
+			// matchable as an obligation. Same args-first order as
+			// NewInstance.PreparePatternMatching: nested calls receive a
+			// position lower than the outer call. Literals/Ids self-register
+			// without moving 'position'; only methods/constructors increment it.
 			AstExpression[] nestedArgs = this.Arguments();
 			if (nestedArgs != null)
 			{

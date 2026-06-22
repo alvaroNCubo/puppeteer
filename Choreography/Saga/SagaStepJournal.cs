@@ -3,13 +3,13 @@ using System.Collections.Concurrent;
 
 namespace Choreography.Saga
 {
-    // La idempotencia de SagaStepJournal es SOLO intra-proceso.
-    // Tras un restart el diccionario arranca vacio y el mismo evento reentregado
-    // por el sentinel dispara la re-ejecucion del step (incluyendo I/O externo
-    // como broadcast de TX en blockchain). Para proteccion cross-restart el
-    // dominio debe rechazar via Check (ej: Check(!swap.ApproveBroadcasted)) de
-    // modo que el PerformCommand falle si la etapa ya quedo registrada en el
-    // journal. Los checkpoints viven en el journal del actor, no aqui.
+    // The idempotency of SagaStepJournal is intra-process ONLY.
+    // After a restart the dictionary starts empty and the same event redelivered
+    // by the sentinel triggers re-execution of the step (including external I/O
+    // such as a transaction broadcast). For cross-restart protection the
+    // domain must reject via Check (e.g. Check(!swap.ApproveBroadcasted)) so
+    // that the PerformCommand fails if the step was already recorded in the
+    // journal. The checkpoints live in the actor journal, not here.
     internal sealed class SagaStepJournal
     {
         private readonly ConcurrentDictionary<SagaStepKey, DateTime> completedSteps = new();

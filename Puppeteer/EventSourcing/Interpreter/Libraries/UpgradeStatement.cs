@@ -27,9 +27,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal Statement Body => body;
 
-		// Firma canonica del body del upgrade, usada para detectar ediciones silenciosas
-		// de un upgrade ya aplicado al actor. Siempre se calcula con IN_MEMORY para que
-		// la signature sea independiente del backend de persistencia.
+		// Canonical signature of the upgrade body, used to detect silent edits
+		// of an upgrade already applied to the actor. Always computed with IN_MEMORY so
+		// the signature is independent of the persistence backend.
 		private string ComputeBodySignature()
 		{
 			StringBuilder sb = new StringBuilder();

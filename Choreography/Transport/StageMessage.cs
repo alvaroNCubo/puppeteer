@@ -39,14 +39,14 @@ namespace Choreography.Transport
         UsherForward = 50,
         UsherResponse = 51,
 
-        // Fase 5 — Playbill cross-pod replication. Paralelo a CueEvent pero
-        // sobre el PlaybillStore del actor en lugar del journal.
+        // Phase 5 — Playbill cross-pod replication. Parallel to CueEvent but
+        // over the actor's PlaybillStore instead of the journal.
         PlaybillSchemaCue = 60,
         PlaybillCue = 61,
 
-        // Bug 18 — Failover replication gap. Re-handshake in-band de los data
-        // channels sobre el bus de Coordination tras una rotacion de roles.
-        // Ver Choreography/Transport/Messages/RehandshakeMessages.cs.
+        // Bug 18 — Failover replication gap. In-band re-handshake of the data
+        // channels over the Coordination bus after a role rotation.
+        // See Choreography/Transport/Messages/RehandshakeMessages.cs.
         RehandshakeRequest = 70,
         RehandshakeProposal = 71
     }

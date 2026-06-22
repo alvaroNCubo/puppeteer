@@ -33,13 +33,13 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 
-			// File-doesn't-exist es el caso valido "actor nuevo". Cualquier otra
-			// causa de fallo (truncado, magic numbers incorrectos, version
-			// desconocida) significa que el archivo SI esta presente pero el
-			// formato no es interpretable -- silenciarlo y devolver false haria
-			// que el caller resetee el actor a fresh perdiendo el journal previo.
-			// Mismo patron de bug que el MySQL del reporte 9553: silent fallback
-			// produce NRE downstream. Aqui falla rapido con mensaje accionable.
+			// File-doesn't-exist is the valid "new actor" case. Any other
+			// failure cause (truncated, incorrect magic numbers, unknown
+			// version) means the file IS present but its
+			// format is not interpretable -- silencing it and returning false would
+			// make the caller reset the actor to fresh, losing the previous journal.
+			// Same bug pattern as the MySQL backend silent fallback: it
+			// produces an NRE downstream. Here it fails fast with an actionable message.
 			if (!File.Exists(filePath))
 				return false;
 

@@ -238,37 +238,37 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			activeStream.Seek(0, SeekOrigin.End);
 		}
 
-		// Distill: reescribe los journal files en sitio dejando solo los records que
-		// shouldKeep(entryId) acepta. Etapa 3: hot-trim en dos fases.
+		// Distill: rewrites the journal files in place keeping only the records that
+		// shouldKeep(entryId) accepts. Stage 3: two-phase hot-trim.
 		//
-		// Fase 1 (LOCK-FREE): para cada archivo sealed (FileNumber < activeFileSequence
-		// al momento del snapshot), se reescribe a `.new` aplicando shouldKeep. Los
-		// archivos sealed son inmutables (no se les apenda), asi que esta fase puede
-		// correr sin tomar writeLock — productores siguen haciendo AppendRecord
-		// libremente sobre el archivo activo.
+		// Phase 1 (LOCK-FREE): for each sealed file (FileNumber < activeFileSequence
+		// at snapshot time), it is rewritten to `.new` applying shouldKeep. Sealed
+		// files are immutable (nothing is appended to them), so this phase can
+		// run without taking writeLock — producers keep doing AppendRecord
+		// freely on the active file.
 		//
-		// Fase 2 (BAJO writeLock): commit de los `.new` preparados (AtomicReplace
-		// + update de SparseIndex) y procesamiento del archivo activo (y de cualquier
-		// archivo que se haya sellado durante la fase 1 por rollover). Ventana
-		// corta — solo procesa el archivo activo, no los sealed grandes.
+		// Phase 2 (UNDER writeLock): commit of the prepared `.new` files (AtomicReplace
+		// + SparseIndex update) and processing of the active file (and of any
+		// file that got sealed during phase 1 due to rollover). Short
+		// window — it only processes the active file, not the large sealed ones.
 		//
-		// Retorna la lista de EntryIds fisicamente removidos para que el caller pueda
-		// limpiar stores auxiliares (SkipStore, EventElisionStorage).
+		// Returns the list of physically removed EntryIds so the caller can
+		// clean auxiliary stores (SkipStore, EventElisionStorage).
 		//
-		// Garantia: el caller debe asegurarse de que shouldKeep retorna true para al
-		// menos un EntryId del archivo activo (invariante "ultimo record no se elide
-		// fisicamente"). Esta clase no valida la invariante; confia en el caller.
+		// Guarantee: the caller must ensure that shouldKeep returns true for at
+		// least one EntryId of the active file (invariant "the last record is not
+		// physically elided"). This class does not validate the invariant; it trusts the caller.
 		//
-		// Snapshot semantics: shouldKeep captura el skipSet al momento del snapshot. Si
-		// reactions marcan nuevos events como elided durante fases 1/2, esos no entran
-		// en este Distill (los procesara el proximo).
+		// Snapshot semantics: shouldKeep captures the skipSet at snapshot time. If
+		// reactions mark new events as elided during phases 1/2, those do not enter
+		// this Distill (the next one will process them).
 		internal List<long> Distill(Func<long, bool> shouldKeep)
 		{
 			if (shouldKeep == null) throw new ArgumentNullException(nameof(shouldKeep));
 
 			var removed = new List<long>();
 
-			// Fase 0: lock breve para snapshot atomico de activeFileSequence + lista de sealed.
+			// Phase 0: brief lock for an atomic snapshot of activeFileSequence + the list of sealed files.
 			int activeSeqAtStart;
 			List<int> sealedFileNumbers;
 			lock (writeLock)
@@ -281,7 +281,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					.ToList();
 			}
 
-			// Fase 1: LOCK-FREE. Prepara `.new` para cada archivo sealed.
+			// Phase 1: LOCK-FREE. Prepares `.new` for each sealed file.
 			var preparedSealed = new List<PreparedDistilledFile>();
 			foreach (var fileNumber in sealedFileNumbers)
 			{
@@ -290,15 +290,15 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				TestHookBetweenPhase1Files?.Invoke();
 			}
 
-			// Fase 2: lock + commit + procesar tail (activo + cualquier rollover ocurrido en fase 1).
+			// Phase 2: lock + commit + process the tail (active + any rollover that occurred in phase 1).
 			lock (writeLock)
 			{
 				if (disposed) throw new ObjectDisposedException(nameof(JournalWriter));
 
 				foreach (var prepared in preparedSealed)
 				{
-					// Defensivo: si el archivo original ya no esta en el index (improbable
-					// sin otro purger), saltar y limpiar el `.new` huerfano.
+					// Defensive: if the original file is no longer in the index (unlikely
+					// without another purger), skip it and clean up the orphan `.new`.
 					if (index.GetEntryByFileNumber(prepared.FileNumber) == null)
 					{
 						string newPath = GetJournalFilePath(prepared.FileNumber) + ".new";
@@ -308,8 +308,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					CommitPreparedFile(prepared, isActive: false);
 				}
 
-				// Tail: archivos con FileNumber >= activeSeqAtStart que sigan en el index.
-				// Puede incluir el ex-activo (si hubo rollover) Y el activo actual.
+				// Tail: files with FileNumber >= activeSeqAtStart still in the index.
+				// May include the former-active one (if there was a rollover) AND the current active one.
 				var tailFileNumbers = index.GetAllEntries()
 					.Where(e => e.FileNumber >= activeSeqAtStart)
 					.Select(e => e.FileNumber)
@@ -330,18 +330,18 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					CommitPreparedFile(prepared, isActive);
 				}
 
-				// Recalcular metadata counts a partir del estado fisico tras Distill.
+				// Recompute metadata counts from the physical state after Distill.
 				long realCount = ComputeRealTotalEventCount();
 				metadata.TotalEventCount = realCount;
-				// TotalNonSkippedCount lo recalcula el caller con el nuevo SkipStore.
+				// TotalNonSkippedCount is recomputed by the caller with the new SkipStore.
 			}
 			return removed;
 		}
 
-		// Lee filePath, filtra con shouldKeep, escribe a filePath.new. Lock-free —
-		// el caller debe garantizar que filePath es sealed (no recibe appends) o que
-		// el writeLock esta tomado. CALLER debe llamar CommitPreparedFile bajo
-		// writeLock para hacer efectivo el reemplazo.
+		// Reads filePath, filters with shouldKeep, writes to filePath.new. Lock-free —
+		// the caller must guarantee that filePath is sealed (receives no appends) or that
+		// the writeLock is held. The CALLER must call CommitPreparedFile under
+		// writeLock to make the replacement effective.
 		private PreparedDistilledFile PrepareFilteredFile(int fileNumber, Func<long, bool> shouldKeep, List<long> removed)
 		{
 			string filePath = GetJournalFilePath(fileNumber);
@@ -352,7 +352,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				return new PreparedDistilledFile { FileNumber = fileNumber, ResultsInEmpty = true };
 			}
 
-			// Limpiar cualquier .new huerfano de un Distill previo incompleto.
+			// Clean up any orphan .new from a previous incomplete Distill.
 			try { if (File.Exists(newPath)) File.Delete(newPath); } catch { }
 
 			int survivorCount = 0;
@@ -431,8 +431,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			};
 		}
 
-		// Commit del reemplazo preparado. Debe correr bajo writeLock.
-		// Para el archivo activo: el caller debe haber cerrado activeStream ANTES.
+		// Commit of the prepared replacement. Must run under writeLock.
+		// For the active file: the caller must have closed activeStream BEFORE.
 		private void CommitPreparedFile(PreparedDistilledFile prepared, bool isActive)
 		{
 			string filePath = GetJournalFilePath(prepared.FileNumber);
@@ -446,8 +446,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 				if (isActive)
 				{
-					// Caso defensivo: si el archivo activo quedo vacio (no deberia pasar bajo
-					// la invariante del caller), reabrir nuevo archivo con header limpio.
+					// Defensive case: if the active file ended up empty (should not happen under
+					// the caller's invariant), reopen a new file with a clean header.
 					OpenNewFile(activeFileSequence);
 				}
 			}
@@ -455,7 +455,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			{
 				if (!File.Exists(filePath))
 				{
-					// Defensivo: si el original fue borrado entre prepare y commit, mover .new.
+					// Defensive: if the original was deleted between prepare and commit, move .new.
 					File.Move(newPath, filePath);
 				}
 				else
@@ -463,9 +463,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					atomicOp.AtomicReplace(newPath, filePath);
 				}
 
-				// Actualizar SparseIndex: remover entry vieja, agregar nueva con first/last actualizados.
-				// El ordenamiento del index se preserva porque los rangos por file siguen siendo
-				// disjuntos y monotonicos (Distill solo encoge rangos, no los entrelaza).
+				// Update SparseIndex: remove the old entry, add a new one with updated first/last.
+				// The index ordering is preserved because the per-file ranges remain
+				// disjoint and monotonic (Distill only shrinks ranges, it does not interleave them).
 				index.RemoveByFileNumber(prepared.FileNumber);
 				index.AddEntry(prepared.NewFirstEntryId, prepared.FileNumber, prepared.NewLastEntryId);
 
@@ -480,9 +480,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Test seam: invocado entre el procesamiento de cada archivo sealed en la fase 1
-		// (lock-free). Tests lo usan para frenar la fase 1 y comprobar que productores
-		// pueden hacer AppendRecord concurrentemente. Produccion jamas lo setea.
+		// Test seam: invoked between the processing of each sealed file in phase 1
+		// (lock-free). Tests use it to stall phase 1 and verify that producers
+		// can do AppendRecord concurrently. Production never sets it.
 		internal Action TestHookBetweenPhase1Files;
 
 		// Computes the exact total event count by reading the EventCount field from every
@@ -571,10 +571,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		internal int EventCount { get; set; }
 	}
 
-	// Resultado de la fase 1 de Distill (PrepareFilteredFile): describe lo que el
-	// commit en fase 2 (CommitPreparedFile) debe hacer con el archivo. ResultsInEmpty
-	// implica borrado del original (todos los records fueron filtrados); en otro caso
-	// el .new ya tiene los survivors escritos y solo falta el AtomicReplace.
+	// Result of Distill's phase 1 (PrepareFilteredFile): describes what the
+	// phase 2 commit (CommitPreparedFile) must do with the file. ResultsInEmpty
+	// implies deletion of the original (all records were filtered out); otherwise
+	// the .new already has the survivors written and only the AtomicReplace remains.
 	internal sealed class PreparedDistilledFile
 	{
 		internal int FileNumber;

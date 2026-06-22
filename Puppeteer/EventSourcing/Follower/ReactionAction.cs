@@ -24,7 +24,14 @@ namespace Puppeteer.EventSourcing.Follower
 		None,
 		Program,
 		Causation,
-		Metadata
+		Metadata,
+		// Journal-outbox emit: a write-mode emit that RECORDS the outgoing message
+		// (destination + payload + deterministic idempotency key) into the diary's
+		// outbox table, committed atomically with the reaction cursor advance. A
+		// relay delivers it at-least-once. Distinct from the read-only Program
+		// plane — it touches the journal, so it is never the isQuery PerformEmit
+		// path. See notes/reactions-outbox-emit.md.
+		Outbox
 	}
 
 	// Sub-distinction inside the Metadata plane: which journal-level
@@ -46,10 +53,10 @@ namespace Puppeteer.EventSourcing.Follower
 		internal string CheckScript { get; set; }
 		internal List<long> EventIdsToSkip { get; set; }
 
-		// F4 Elide(seek:/seeks:): nombres de los Seek cuyos entryIds se eliden. null =
-		// la cadena completa del match (comportamiento por defecto de Elide()). Cuando
-		// esta seteado, CollectEventIdsFromChain solo recolecta los ids de los nodos cuyo
-		// Seek (Engine.PatternDescription) esta en este conjunto.
+		// F4 Elide(seek:/seeks:): names of the Seeks whose entryIds are elided. null =
+		// the full match chain (the default behavior of Elide()). When this is set,
+		// CollectEventIdsFromChain only collects the ids of the nodes whose Seek
+		// (Engine.PatternDescription) is in this set.
 		internal string[] ElideTargetSeeks { get; set; }
 
 		// True when ActionType == Program and a `when:` check script is

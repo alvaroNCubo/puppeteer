@@ -117,13 +117,13 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					try
 					{
-						// 0. Limpiar buffer (los rollback dejarian residuo).
+						// 0. Clear buffer (rollbacks would leave residue).
 						using (MySqlCommand clearCmd = new MySqlCommand("DELETE FROM EventElisionBuffer", connection, transaction))
 						{
 							clearCmd.ExecuteNonQuery();
 						}
 
-						// 1. Insertar en buffer con batched VALUES.
+						// 1. Insert into buffer with batched VALUES.
 						const int BATCH_SIZE = 1000;
 						int totalBatches = (dairyIds.Length + BATCH_SIZE - 1) / BATCH_SIZE;
 
@@ -158,11 +158,11 @@ namespace Puppeteer.EventSourcing.DB
 							sql.Clear();
 						}
 
-						// 2. Commit logico bajo la misma transaccion DB:
-						//    (a) copiar buffer → EventElision (registry completo con reactionId/timestamp).
-						//    (b) UPDATE journal SET Skip = 1 para los DiaryIds del buffer — column
-						//        autoritativa para rehidratacion (sin LEFT JOIN). Materialize v2 /
-						//        Fase 0.5: Skip column es el dato; rehidratacion lee Skip = 0 sin join.
+						// 2. Logical commit under the same DB transaction:
+						//    (a) copy buffer → EventElision (complete registry with reactionId/timestamp).
+						//    (b) UPDATE journal SET Skip = 1 for the buffer's DiaryIds — authoritative
+						//        column for rehydration (no LEFT JOIN). Materialize v2 /
+						//        Fase 0.5: the Skip column is the data; rehydration reads Skip = 0 without a join.
 						string commitSql = $@"
 							INSERT INTO EventElision (DiaryId, ReactionId, Timestamp)
 							SELECT DiaryId, ReactionId, Timestamp FROM EventElisionBuffer;
@@ -406,9 +406,9 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange. Ordenado por
-		// (Timestamp, DiaryId) desde EventElision.Timestamp (sin tabla nueva, sin
-		// MarkingOrder autoincrement — firmado por Alvaro 2026-05-13 PM).
+		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange. Ordered by
+		// (Timestamp, DiaryId) from EventElision.Timestamp (no new table, no
+		// MarkingOrder autoincrement — signed 2026-05-13 PM).
 		protected internal override void ReadElisionMarkersInRange(long fromDairyId, long toDairyId, List<MaterializationElisionMarker> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);

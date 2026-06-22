@@ -4,13 +4,13 @@ using System.Collections.Generic;
 
 namespace Puppeteer
 {
-	// Paper 5 / Materialize v2 — Fase 4. Implementacion in-process de
-	// IMaterializeSource que envuelve un primary actor.Materialization para tests
-	// integradores. En produccion el equivalente seria un HttpMaterializeSource
-	// que llama wire HTTP al primary (fuera de scope I1).
+	// Paper 5 / Materialize v2 — Phase 4. In-process implementation of
+	// IMaterializeSource that wraps a primary actor.Materialization for integration
+	// tests. In production the equivalent would be an HttpMaterializeSource
+	// that calls wire HTTP to the primary (out of I1 scope).
 	//
-	// Esta implementacion no agrega logica — solo proxy directo a las APIs del
-	// primary, con destinationName como contexto fijo.
+	// This implementation adds no logic — only a direct proxy to the primary's
+	// APIs, with destinationName as fixed context.
 	public class LocalMaterializeSource : IMaterializeSource
 	{
 		private readonly Materialization primary;

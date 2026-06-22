@@ -6,10 +6,10 @@ using System.IO;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Backend SQL Server del Playbill. Mismo modelo de datos que el backend MySQL,
-	// distintas idiomaticas SQL: brackets [Name] en vez de backticks, IF OBJECT_ID
-	// en vez de CREATE TABLE IF NOT EXISTS, SELECT INTO + sp_rename para el
-	// rebuild-via-shadow-swap (RENAME TABLE no existe en SQL Server).
+	// SQL Server backend of the Playbill. Same data model as the MySQL backend,
+	// different SQL idioms: brackets [Name] instead of backticks, IF OBJECT_ID
+	// instead of CREATE TABLE IF NOT EXISTS, SELECT INTO + sp_rename for the
+	// rebuild-via-shadow-swap (RENAME TABLE does not exist in SQL Server).
 	internal sealed class PlaybillStoreSQLServer : PlaybillStore
 	{
 		private const string SCHEMAS_TABLE = "PlaybillSchemas";
@@ -328,12 +328,12 @@ namespace Puppeteer.EventSourcing.Playbill
 			}
 		}
 
-		// Rebuild-via-shadow-swap en SQL Server: SELECT INTO crea
-		// PlaybillRecords_new con los records vivos (sin indices/constraints —
-		// SELECT INTO solo copia datos), luego DROP la vieja y sp_rename la nueva
-		// al nombre canonico. Recrea el indice secundario y el PK explicitamente.
-		// Toda la operacion bajo una transaccion explicita para que la ausencia
-		// de la tabla no sea observable por otros conexiones.
+		// Rebuild-via-shadow-swap in SQL Server: SELECT INTO creates
+		// PlaybillRecords_new with the live records (without indexes/constraints —
+		// SELECT INTO only copies data), then DROPs the old one and sp_renames the new
+		// one to the canonical name. Recreates the secondary index and the PK explicitly.
+		// The whole operation runs under an explicit transaction so the absence
+		// of the table is not observable by other connections.
 		internal override void Distill()
 		{
 			string newTable = RECORDS_TABLE + "_new";
@@ -345,7 +345,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				{
 					connection.Open();
 
-					// Limpieza defensiva por si un Distill previo aborto.
+					// Defensive cleanup in case a previous Distill aborted.
 					using (var dropCmd = new SqlCommand($"IF OBJECT_ID('{newTable}') IS NOT NULL DROP TABLE [{newTable}]", connection))
 					{
 						dropCmd.ExecuteNonQuery();
@@ -360,7 +360,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						WHERE EXISTS (SELECT 1 FROM [{ActorName}] j WHERE j.id = pr.EntryId)";
 					ExecuteNonQuery(connection, tx, selectInto);
 
-					// SELECT INTO no copia PK / indices. Recrearlos sobre la sombra.
+					// SELECT INTO does not copy PK / indexes. Recreate them on the shadow.
 					ExecuteNonQuery(connection, tx, $"ALTER TABLE [{newTable}] ADD PRIMARY KEY (EntryId)");
 					ExecuteNonQuery(connection, tx, $"CREATE INDEX IX_PlaybillRecords_SchemaName ON [{newTable}] (SchemaName)");
 

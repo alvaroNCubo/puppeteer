@@ -5,32 +5,32 @@ using System.Diagnostics;
 
 namespace Puppeteer
 {
-	// Paper 5 / Materialize v2 — Fase 4 (firmado D1 2026-05-13). Cliente del
-	// destination side que orquesta los 4 wire verbs del primary side. Patron
-	// fluido firmado:
+	// Paper 5 / Materialize v2 — Phase 4 (signed D1 2026-05-13). Destination-side
+	// client that orchestrates the 4 primary-side wire verbs. Signed fluent
+	// pattern:
 	//
-	//   mirror.Sync();                       // Capa 1 — orquesta (a) + (b).
-	//   mirror.AsProgramMirror().Sync();     // Capa 2 — orquesta (a) + (c) + (d) + (b).
+	//   mirror.Sync();                       // Layer 1 — orchestrates (a) + (b).
+	//   mirror.AsProgramMirror().Sync();     // Layer 2 — orchestrates (a) + (c) + (d) + (b).
 	//
-	// Sync agnostico de transport: el caller provee IMaterializeSource que abstrae
-	// HTTP / in-process / loopback. MaterializeMirror solo coordina el ciclo y
-	// actualiza el watermark local.
+	// Transport-agnostic Sync: the caller provides an IMaterializeSource that
+	// abstracts HTTP / in-process / loopback. MaterializeMirror only coordinates the
+	// cycle and updates the local watermark.
 	//
-	// IMPORTANTE — diseño firmado en Fase 4: MaterializeMirror NO aplica los
-	// datos fetched a un storage local. Retorna MirrorSyncResult con todo lo
-	// recibido — el caller decide que hacer con los records / reactions /
-	// elision markers. Esto separa "fetch + confirm" (responsabilidad del
-	// mirror cliente) de "apply locally" (responsabilidad del operador del
-	// destination que sabe si tiene un journal local, replicacion async,
-	// pure passive consumer, etc.). La aplicacion local es Hueco para Fase
-	// futura cuando se firme el modelo destination-side completo.
+	// IMPORTANT — design signed in Phase 4: MaterializeMirror does NOT apply the
+	// fetched data to a local storage. It returns a MirrorSyncResult with everything
+	// received — the caller decides what to do with the records / reactions /
+	// elision markers. This separates "fetch + confirm" (responsibility of the
+	// mirror client) from "apply locally" (responsibility of the destination
+	// operator who knows whether it has a local journal, async replication, a pure
+	// passive consumer, etc.). Local application is a Hole for a future phase, when
+	// the complete destination-side model is signed.
 	public class MaterializeMirror
 	{
 		private readonly IMaterializeSource source;
 		private long watermark;
 
-		// Watermark actual: el ultimo EntryId confirmado al primary via (b).
-		// Inicia en startingFrom (default 0); avanza con cada Sync exitoso.
+		// Current watermark: the last EntryId confirmed to the primary via (b).
+		// Starts at startingFrom (default 0); advances with each successful Sync.
 		public long Watermark => watermark;
 
 		public IMaterializeSource Source => source;
@@ -43,19 +43,18 @@ namespace Puppeteer
 			this.watermark = startingFrom;
 		}
 
-		// Capa 1 sync: orquesta (a) ReadRecordsAfter + (b) ConfirmUntil. No
-		// incluye reaction state ni elision markers — el caller solo recibe
-		// los records raw. Util para destination que NO necesita re-ejecutar
-		// reactions localmente (e.g. archive-only mirror).
+		// Layer 1 sync: orchestrates (a) ReadRecordsAfter + (b) ConfirmUntil. Does
+		// not include reaction state or elision markers — the caller only receives
+		// the raw records. Useful for a destination that does NOT need to re-execute
+		// reactions locally (e.g. archive-only mirror).
 		public MirrorSyncResult Sync()
 		{
 			return SyncInternal(includeCapa2: false);
 		}
 
-		// Activa Capa 2 para el siguiente .Sync() — agrega (c) + (d) al
-		// orchestracion. Decision D1 firmada: el destination que quiere
-		// reconstruir program state (reactions + elision) opt-in expresso
-		// via este patron.
+		// Activates Layer 2 for the next .Sync() — adds (c) + (d) to the
+		// orchestration. Signed decision D1: a destination that wants to rebuild
+		// program state (reactions + elision) opts in expressly via this pattern.
 		public MaterializeMirrorBuilder AsProgramMirror()
 		{
 			return new MaterializeMirrorBuilder(this);
@@ -66,7 +65,7 @@ namespace Puppeteer
 			long previousWatermark = watermark;
 			Stopwatch stopwatch = Stopwatch.StartNew();
 
-			// (a) Capa 1 — records raw desde el watermark actual.
+			// (a) Layer 1 — raw records from the current watermark.
 			IReadOnlyList<MaterializationRecord> records = source.ReadRecordsAfter(watermark);
 
 			MaterializationReactionsSnapshot? reactionsSnapshot = null;
@@ -80,20 +79,20 @@ namespace Puppeteer
 
 			if (includeCapa2 && records.Count > 0)
 			{
-				// (c) Snapshot atomic AS-IS del registry + checkpoints.
+				// (c) Atomic AS-IS snapshot of the registry + checkpoints.
 				reactionsSnapshot = source.ReadReactions();
 
-				// (d) Elision markers en el rango [previousWatermark + 1, newHead].
-				// Solo si hay un rango valido (records.Count > 0 garantiza newHead > previousWatermark
-				// pero forzamos el chequeo defensivo).
+				// (d) Elision markers in the range [previousWatermark + 1, newHead].
+				// Only if there is a valid range (records.Count > 0 guarantees newHead > previousWatermark
+				// but we force the defensive check).
 				if (newHead > previousWatermark)
 				{
 					elisionMarkers = source.ReadElidedRange(previousWatermark + 1, newHead);
 				}
 			}
 
-			// (b) Confirm — Max-monotonic. Solo si avanzamos. Si records vacio,
-			// no hay nada que confirmar (no-op silencioso, recovery natural).
+			// (b) Confirm — Max-monotonic. Only if we advanced. If records is empty,
+			// there is nothing to confirm (silent no-op, natural recovery).
 			bool watermarkAdvanced = false;
 			if (newHead > previousWatermark)
 			{
@@ -141,11 +140,11 @@ namespace Puppeteer
 		}
 	}
 
-	// Builder intermediario entre AsProgramMirror() y Sync(). Existe para que
-	// el patron firmado D1 (`mirror.AsProgramMirror().Sync()`) tenga el verbo
-	// `Sync()` como terminator natural, paralelo a `mirror.Sync()` simple. El
-	// flag includeCapa2 es per-call, no persiste en el mirror — coherente con
-	// patron de DistillCommand.
+	// Intermediary builder between AsProgramMirror() and Sync(). Exists so the
+	// signed D1 pattern (`mirror.AsProgramMirror().Sync()`) has the `Sync()` verb
+	// as a natural terminator, parallel to the simple `mirror.Sync()`. The
+	// includeCapa2 flag is per-call, it does not persist in the mirror — consistent
+	// with the DistillCommand pattern.
 	public class MaterializeMirrorBuilder
 	{
 		private readonly MaterializeMirror mirror;
@@ -162,15 +161,15 @@ namespace Puppeteer
 		}
 	}
 
-	// Resultado de un .Sync() ciclo. Inmutable. Public para que el caller
-	// inspeccione lo recibido y decida que aplicar localmente. PreviousWatermark
-	// y NewWatermark estan ambos presentes para permitir auditoria del avance.
+	// Result of a .Sync() cycle. Immutable. Public so the caller can inspect what
+	// was received and decide what to apply locally. PreviousWatermark and
+	// NewWatermark are both present to allow auditing of the advance.
 	public readonly struct MirrorSyncResult
 	{
 		public IReadOnlyList<MaterializationRecord> Records { get; }
-		// ReactionsSnapshot es null si IncludedCapa2 es false (el destination
-		// pidio Capa 1 solo). Si IncludedCapa2 es true pero records vacio, queda
-		// tambien null (no se hizo la llamada a (c) por optimizacion).
+		// ReactionsSnapshot is null if IncludedCapa2 is false (the destination
+		// requested Layer 1 only). If IncludedCapa2 is true but records is empty, it
+		// also stays null (the call to (c) was not made, as an optimization).
 		public MaterializationReactionsSnapshot? ReactionsSnapshot { get; }
 		public IReadOnlyList<MaterializationElisionMarker> ElisionMarkers { get; }
 		public long PreviousWatermark { get; }

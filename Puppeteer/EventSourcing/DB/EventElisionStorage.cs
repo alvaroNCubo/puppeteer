@@ -27,11 +27,11 @@ namespace Puppeteer.EventSourcing.DB
 		protected internal abstract Task GetElidedEventsInRangeAsync(long fromDairyId, long toDairyId, HashSet<long> result);
 
 		// Paper 5 / Materialize v2 — Fase 3. Wire verb (d) DameElidedRange.
-		// Lee elision markers en el rango [fromDairyId, toDairyId] inclusive,
-		// ordenados por (Timestamp, DiaryId) — el orden de marcaje temporal
-		// sale de EventElision.Timestamp con DiaryId como tie-break determinista.
-		// Sin tabla nueva ni MarkingOrder autoincrement (decision firmada
-		// 2026-05-13 PM por Alvaro: "no crear nuevos conceptos").
+		// Reads elision markers in the range [fromDairyId, toDairyId] inclusive,
+		// ordered by (Timestamp, DiaryId) — the temporal marking order
+		// comes from EventElision.Timestamp with DiaryId as a deterministic tie-break.
+		// No new table and no MarkingOrder autoincrement (decision signed
+		// 2026-05-13 PM: "do not create new concepts").
 		protected internal virtual void ReadElisionMarkersInRange(long fromDairyId, long toDairyId, List<MaterializationElisionMarker> result)
 		{
 			throw new NotImplementedException($"{GetType().Name} has not adopted ReadElisionMarkersInRange yet (Materialize v2 Fase 3).");

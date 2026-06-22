@@ -5,12 +5,12 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Persistencia de las invitaciones emitidas por el Usher. Tiene que sobrevivir
-    // restart de ContactSecret: una invitacion emitida hace 10 minutos debe seguir siendo
-    // valida si el operador reinicio mientras tanto, hasta que llegue su TTL.
+    // Persistence of the invitations issued by the Usher. It has to survive
+    // a ContactSecret restart: an invitation issued 10 minutes ago must still be
+    // valid if the operator restarted in the meantime, until its TTL elapses.
     //
-    // El handoff real puede persistir en sqlite/file/etc. Para el test scaffold
-    // basta con una impl in-memory (incluida en el test project).
+    // The real handoff may persist in sqlite/file/etc. For the test scaffold
+    // an in-memory impl is enough (included in the test project).
     public interface IUsherInvitationStore
     {
         Task SaveAsync(PendingInvitation invitation, CancellationToken ct);

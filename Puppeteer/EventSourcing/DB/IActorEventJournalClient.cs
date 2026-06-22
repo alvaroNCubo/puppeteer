@@ -5,9 +5,9 @@ namespace Puppeteer.EventSourcing.DB
 		string ActorName { get; }
 		bool IsNew { set; }
 
-		// Logger per-actor expuesto al Diary/storage/JournalReader/ReplicationAgent.
-		// Cada uno ya recibe IActorEventJournalClient por ctor, asi que con esta
-		// extension no hay que tocar firmas ni plumbing adicional.
+		// Per-actor logger exposed to Diary/storage/JournalReader/ReplicationAgent.
+		// Each one already receives IActorEventJournalClient through its ctor, so this
+		// extension requires no signature changes or additional plumbing.
 		IPuppeteerLogger Logger { get; }
 
 

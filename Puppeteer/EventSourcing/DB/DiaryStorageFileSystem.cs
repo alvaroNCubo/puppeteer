@@ -36,8 +36,8 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal long LastWrittenEntryId => metadata.LastWrittenEntryId;
 
-		// Test seam: expone el JournalWriter para que los tests de Distill puedan
-		// instalar TestHookBetweenPhase1Files. Produccion no necesita este acceso.
+		// Test seam: exposes the JournalWriter so the Distill tests can install
+		// TestHookBetweenPhase1Files. Production does not need this access.
 		internal FileSystem.JournalWriter JournalWriter => journalWriter;
 
 		internal DiaryStorageFileSystem(IActorEventJournalClient eventJournalClient, string connectionString)
@@ -110,10 +110,10 @@ namespace Puppeteer.EventSourcing.DB
 				metadata.Save();
 			}
 
-			// Pending batch dir + witness coordinan los writes cross-proceso al elision.bin
-			// y skips.bin. Cada MarkEventsAsElided escribe un .batch unico ahi (commit via
-			// rename atomico) y la consolidacion mergea bajo un OS-level lock sobre el
-			// witness. Detalle del diseño: PendingBatchDirectory.cs.
+			// Pending batch dir + witness coordinate cross-process writes to elision.bin
+			// and skips.bin. Each MarkEventsAsElided writes a unique .batch there (commit via
+			// atomic rename) and consolidation merges under an OS-level lock on the
+			// witness. Design detail: PendingBatchDirectory.cs.
 			string pendingSubDir = Path.Combine(elisionDir, "pending");
 			string witnessPath = Path.Combine(elisionDir, "elision.witness");
 			var pendingBatchDir = new PendingBatchDirectory(pendingSubDir, witnessPath);
@@ -301,7 +301,7 @@ namespace Puppeteer.EventSourcing.DB
 		}
 
 		// Phase 4 atomic write — see DiaryStorage.cs for the contract. Honest limit
-		// for FileSystem (firmado Q-fs-atomicity = α): both AppendRecord calls run
+		// for FileSystem (signed Q-fs-atomicity = α): both AppendRecord calls run
 		// under the same writeLock, but a crash between the two flushes can leave
 		// the Define orphan (same atomicity level as the legacy WriteNewActionEntry,
 		// which also did two writes: _ACTION lateral + journal row).
@@ -360,9 +360,9 @@ namespace Puppeteer.EventSourcing.DB
 			return reactionStore.GetCheckpoint(reactionId, seekLevel);
 		}
 
-		// Resume optimization (paso 2): dos cursores globales por reaction. FileSystem es un
-		// backend "journal local" (fila Job/Cue de la matriz) -> resume re-leyendo [closed,
-		// high-water]; no usa snapshot (esa es la fila consumidor-puro, sin journal local).
+		// Resume optimization (step 2): two global cursors per reaction. FileSystem is a
+		// "local journal" backend (Job/Cue row of the matrix) -> resume by re-reading [closed,
+		// high-water]; it does not use a snapshot (that is the pure-consumer row, without local journal).
 		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
 		{
 			return reactionStore.GetFrontier(reactionId);
@@ -491,18 +491,18 @@ namespace Puppeteer.EventSourcing.DB
 			metadata.Save();
 		}
 
-		// Distill: ver contrato en DiaryStorage.cs. Etapa 3 hot-trim — solo se toma el
-		// outer writeLock al final (fase 3) para sincronizar cleanup de skipStore /
-		// elision / metadata con MarkEventsAsElidedWithCheckpoint. Las fases 1 (lock-free
-		// sealed prep) y 2 (writeLock interno de JournalWriter solo para el archivo
-		// activo y commits) corren SIN el outer lock, asi que productores siguen haciendo
-		// WriteScriptEntry/WriteRawRecord libremente sobre el archivo activo durante la
-		// fase larga del Distill.
+		// Distill: see the contract in DiaryStorage.cs. Stage 3 hot-trim — the outer
+		// writeLock is only taken at the end (phase 3) to synchronize cleanup of skipStore /
+		// elision / metadata with MarkEventsAsElidedWithCheckpoint. Phases 1 (lock-free
+		// sealed prep) and 2 (JournalWriter's internal writeLock only for the active
+		// file and commits) run WITHOUT the outer lock, so producers keep calling
+		// WriteScriptEntry/WriteRawRecord freely on the active file during the
+		// long phase of the Distill.
 		protected internal override void Distill()
 		{
-			// Fase 0: snapshot SIN outer lock. skipSet y preserveEntryId quedan congelados
-			// para este Distill; nuevas elisiones que entren durante fases 1/2 no son
-			// procesadas aqui (las recoge el proximo Distill).
+			// Phase 0: snapshot WITHOUT outer lock. skipSet and preserveEntryId are frozen
+			// for this Distill; new elisions that arrive during phases 1/2 are not
+			// processed here (the next Distill picks them up).
 			var skipSet = skipStore.Load();
 			if (skipSet.Count == 0) return;
 
@@ -517,23 +517,23 @@ namespace Puppeteer.EventSourcing.DB
 
 			Func<long, bool> shouldKeep = id => id == preserveEntryId || !skipSet.Contains(id);
 
-			// Fases 1 + 2 dentro de JournalWriter.Distill (fase 1 lock-free, fase 2 bajo
-			// JournalWriter.writeLock interno solo para procesar el activo + commits).
-			// El outer writeLock NO esta tomado aqui: WriteScriptEntry, WriteRawRecord,
-			// MarkEventsAsElidedWithCheckpoint pueden correr libremente sobre el archivo
-			// activo durante la fase 1.
+			// Phases 1 + 2 inside JournalWriter.Distill (phase 1 lock-free, phase 2 under
+			// JournalWriter's internal writeLock only to process the active file + commits).
+			// The outer writeLock is NOT held here: WriteScriptEntry, WriteRawRecord,
+			// MarkEventsAsElidedWithCheckpoint can run freely on the active file
+			// during phase 1.
 			List<long> removed = journalWriter.Distill(shouldKeep);
 			if (removed.Count == 0) return;
 
-			// Fase 3: outer lock para serializar el update de skipStore/elision/metadata
-			// con MarkEventsAsElidedWithCheckpoint. Antes de leer skipStore forzamos un
-			// drain de pending/*.batch al consolidado para que el snapshot vea TODO lo
-			// que otros procesos hayan escrito (sino, sus markers quedarian "vivos" en
-			// pending/ y se reaplicarian post-distill referenciando entries que ya no
-			// existen — accumulation benigna pero indeseable). Re-leer skipStore actual
-			// (puede tener entradas nuevas agregadas durante fases 1/2): solo removemos
-			// las que NOSOTROS removimos fisicamente; las nuevas entries siguen en
-			// skipStore para el proximo Distill.
+			// Phase 3: outer lock to serialize the update of skipStore/elision/metadata
+			// with MarkEventsAsElidedWithCheckpoint. Before reading skipStore we force a
+			// drain of pending/*.batch into the consolidated file so the snapshot sees ALL
+			// that other processes have written (otherwise their markers would stay "alive" in
+			// pending/ and be reapplied post-distill referencing entries that no longer
+			// exist — benign but undesirable accumulation). Re-read the current skipStore
+			// (it may have new entries added during phases 1/2): we only remove
+			// the ones WE physically removed; the new entries stay in
+			// skipStore for the next Distill.
 			lock (writeLock)
 			{
 				elisionStorage.ForceConsolidate();
@@ -590,11 +590,11 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Paper 5 / Materialize v2 — Fase 2: read raw records (sin filtrar skipSet).
-		// Reusa ForEachRawRecord (iteracion del journal) + BinaryEventCodec.TryDecode
-		// / TryDecodeDefine (decodificacion por tipo). NO filtra elididos — Capa 1 es
-		// raw por contrato. El destination side decide si combina con (c)+(d) para
-		// reconstruir Capa 2.
+		// Paper 5 / Materialize v2 — Phase 2: read raw records (without filtering skipSet).
+		// Reuses ForEachRawRecord (journal iteration) + BinaryEventCodec.TryDecode
+		// / TryDecodeDefine (decoding by type). Does NOT filter elided ones — Layer 1 is
+		// raw by contract. The destination side decides whether to combine with (c)+(d) to
+		// reconstruct Layer 2.
 		protected internal override void ReadRecordsAfter(long afterEntryId, List<MaterializationRecord> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -607,7 +607,7 @@ namespace Puppeteer.EventSourcing.DB
 
 			ForEachRawRecord(afterEntryId, (entryId, fullRecord) =>
 			{
-				// fullRecord = [4-byte length prefix][body]. TryDecode espera body.
+				// fullRecord = [4-byte length prefix][body]. TryDecode expects body.
 				int bodyLength = fullRecord.Length - 4;
 				byte[] body = new byte[bodyLength];
 				Buffer.BlockCopy(fullRecord, 4, body, 0, bodyLength);
@@ -672,9 +672,9 @@ namespace Puppeteer.EventSourcing.DB
 			return Task.CompletedTask;
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (c) DameCheckpointsHasta.
-		// Delega al ReactionStore que ya mantiene registry + checkpoints
-		// snapshot-atomic via storeLock interno.
+		// Materialize v2 / Phase 3 — wire verb (c) DameCheckpointsHasta.
+		// Delegates to the ReactionStore which already maintains registry + checkpoints
+		// snapshot-atomic via its internal storeLock.
 		protected internal override void ReadReactionRegistry(List<MaterializationReactionDefinition> result)
 		{
 			reactionStore.ListRegistry(result);

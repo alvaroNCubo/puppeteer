@@ -20,8 +20,8 @@ namespace Puppeteer.EventSourcing.DB
 			public Dictionary<int, long> FollowerCheckpoints = new Dictionary<int, long>();
 			public Dictionary<string, long> ReactionRegistry = new Dictionary<string, long>();
 			public Dictionary<(long, int), (long detected, long confirmed)> ReactionCheckpoints = new Dictionary<(long, int), (long, long)>();
-			// Resume optimization (rediseño de checkpoint): dos cursores globales por reaction
-			// (high-water + frontera-cerrada) y snapshot de matches de cobertura abiertos.
+			// Resume optimization (checkpoint redesign): two global cursors per reaction
+			// (high-water + closed-frontier) and a snapshot of open coverage matches.
 			public Dictionary<long, (long highWater, long closedFrontier)> ReactionFrontiers = new Dictionary<long, (long, long)>();
 			public Dictionary<long, string> ReactionMatchSnapshots = new Dictionary<long, string>();
 			public long NextEntryId = 1;
@@ -29,6 +29,7 @@ namespace Puppeteer.EventSourcing.DB
 			public EventElisionStorageInMemory EventElisionStorage;
 			public EventMaterializationStorageInMemory EventMaterializationStorage;
 			public MaterializationCheckpointStorageInMemory MaterializationCheckpointStorage;
+			public OutboxStorageInMemory OutboxStorage;
 		}
 
 		private readonly SharedStorageData storage;
@@ -54,6 +55,7 @@ namespace Puppeteer.EventSourcing.DB
 					storage.EventElisionStorage = new EventElisionStorageInMemory(eventJournalClient);
 					storage.EventMaterializationStorage = new EventMaterializationStorageInMemory(eventJournalClient);
 					storage.MaterializationCheckpointStorage = new MaterializationCheckpointStorageInMemory(eventJournalClient);
+					storage.OutboxStorage = new OutboxStorageInMemory();
 					sharedStorages[actorName] = storage;
 				}
 			}
@@ -67,12 +69,13 @@ namespace Puppeteer.EventSourcing.DB
 			eventElisionStorage = storage.EventElisionStorage;
 			eventMaterializationStorage = storage.EventMaterializationStorage;
 			materializationCheckpointStorage = storage.MaterializationCheckpointStorage;
+			outboxStorage = storage.OutboxStorage;
 		}
 
-		// Peek de solo lectura para PlaybillStoreInMemory.Distill (cross-storage
-		// coupling pragmatico: ambos viven en el mismo proceso/sharedStorages
-		// estatico para tests). Retorna un snapshot inmutable de los EventData
-		// del actor; null si el actor no esta inicializado en este storage.
+		// Read-only peek for PlaybillStoreInMemory.Distill (pragmatic cross-storage
+		// coupling: both live in the same process / static sharedStorages for
+		// tests). Returns an immutable snapshot of the actor's EventData;
+		// null if the actor is not initialized in this storage.
 		internal static IReadOnlyList<EventData> PeekEventsForActor(string actorName)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(actorName);
@@ -161,6 +164,11 @@ namespace Puppeteer.EventSourcing.DB
 			{
 				storage.MaterializationCheckpointStorage.Clear();
 			}
+
+			if (storage.OutboxStorage != null)
+			{
+				storage.OutboxStorage.Clear();
+			}
 		}
 
 		internal EventData GetLastEvent()
@@ -216,7 +224,7 @@ namespace Puppeteer.EventSourcing.DB
 		// WriteDefineEntry materialises a Define statement directly in the journal
 		// (no lateral _ACTION-equivalent registration); WriteInvocationEntry is the
 		// invocation-only counterpart. Phase 4 flips the live caller and split
-		// model firmado: Define entries carry no arguments — first invocation lives
+		// model signed: Define entries carry no arguments — first invocation lives
 		// in a separate Invocation entry written immediately after, so MarkAsSkip
 		// on a first invocation cannot collaterally erase the Define.
 		protected internal override void WriteDefineEntry(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData = null)
@@ -313,11 +321,11 @@ namespace Puppeteer.EventSourcing.DB
 			followerCheckpoints[followerId] = entryId;
 		}
 
-		// Paper 5 / Materialize v2 — Fase 2: read raw records (sin filtrar elided).
-		// Itera la lista shared in-order y proyecta cada EventData a un
-		// MaterializationRecord public segun su kind. Defensiva: copia los campos
-		// porque los EventData en la lista son owned by SharedStorageData (no por
-		// el caller).
+		// Paper 5 / Materialize v2 — Phase 2: read raw records (without filtering elided).
+		// Iterates the shared list in-order and projects each EventData to a
+		// public MaterializationRecord according to its kind. Defensive: copies the fields
+		// because the EventData in the list are owned by SharedStorageData (not by
+		// the caller).
 		protected internal override void ReadRecordsAfter(long afterEntryId, List<MaterializationRecord> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -343,8 +351,8 @@ namespace Puppeteer.EventSourcing.DB
 			return Task.CompletedTask;
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (c) DameCheckpointsHasta:
-		// snapshot atomic del reaction registry + checkpoints.
+		// Materialize v2 / Phase 3 — wire verb (c) DameCheckpointsHasta:
+		// atomic snapshot of the reaction registry + checkpoints.
 		protected internal override void ReadReactionRegistry(List<MaterializationReactionDefinition> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);
@@ -444,17 +452,17 @@ namespace Puppeteer.EventSourcing.DB
 			throw new NotImplementedException("Trim not supported in InMemory storage.");
 		}
 
-		// Distill: ver contrato en DiaryStorage.cs. InMemory reescribe la lista de
-		// eventos en sitio bajo el lock compartido, respetando la invariante "ultimo
-		// record no se elimina fisicamente aunque su elision logica lo marque".
+		// Distill: see the contract in DiaryStorage.cs. InMemory rewrites the event
+		// list in place under the shared lock, honoring the invariant "the last
+		// record is not physically removed even if its logical elision marks it".
 		protected internal override void Distill()
 		{
 			lock (sharedStoragesLock)
 			{
 				if (events.Count == 0) return;
 
-				// "Ultimo record" = el de mayor EntryId. Es la unica granularidad de
-				// preservacion: el resto de elididos se materializa.
+				// "Last record" = the one with the greatest EntryId. It is the only
+				// preservation granularity: the rest of the elided records are materialized.
 				long lastEntryId = 0;
 				for (int i = 0; i < events.Count; i++)
 				{
@@ -484,8 +492,8 @@ namespace Puppeteer.EventSourcing.DB
 				events.Clear();
 				events.AddRange(survivors);
 
-				// Limpiar el registro de elisiones: los IDs removidos ya no existen
-				// fisicamente, dejan de ser "elididos" para volverse "ausentes".
+				// Clear the elision registry: the removed IDs no longer exist
+				// physically, they stop being "elided" to become "absent".
 				storage.EventElisionStorage.RemoveElidedIds(removed);
 			}
 		}
@@ -522,7 +530,7 @@ namespace Puppeteer.EventSourcing.DB
 
 				EventJournalClient.BeginJournalReplay(eventCount);
 
-				// Replay de eventos en el orden especificado
+				// Replay events in the specified order.
 				foreach (var evt in orderedEvents)
 				{
 					if (!EventJournalClient.CanContinueReplay(lastEntryId))
@@ -717,8 +725,66 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Resume optimization (paso 2): dos cursores globales por reaction. Monotonia y default
-		// (0,0)=génesis los gobierna el caller (Reaction.Execute); aqui solo se persiste/lee.
+		// Journal-outbox emit. Same single-critical-section template as
+		// MarkEventsAsElidedWithCheckpoint, but the journal-internal effect is an
+		// outbox row insert instead of an elision marker, and BOTH cursors advance
+		// here: the recording IS the action (no separate external effect to gate
+		// Confirmed on later), so the row + (detected, confirmed) advance commit as
+		// one write. That collapses the dual-write — there is no crash window that
+		// records without advancing or advances without recording.
+		protected internal override bool RecordOutboxWithCheckpoint(Follower.OutboxCommit commit)
+		{
+			ArgumentNullException.ThrowIfNull(commit);
+			if (outboxStorage == null)
+				throw new LanguageException("OutboxStorage is not configured on this DiaryStorageInMemory.");
+
+			long reactionId = commit.ReactionId;
+			Follower.CheckpointVector newCheckpoint = commit.CheckpointVector;
+
+			lock (reactionCheckpoints)
+			{
+				// Monotonic detected-cursor guard (identical to the elide path): the
+				// first seek level where new != current decides. Not greater => a
+				// peer pod already recorded this match; no-op.
+				bool isGreater = false;
+				for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+				{
+					long newDetected = newCheckpoint.Get(seekLevel);
+					var (currentDetected, _) = GetReactionCheckpoint(reactionId, seekLevel);
+
+					if (newDetected > currentDetected) { isGreater = true; break; }
+					if (newDetected < currentDetected) { isGreater = false; break; }
+				}
+
+				if (!isGreater)
+					return false;
+
+				var record = new OutboxRecord(
+					reactionId: commit.ReactionId,
+					anchorEntryId: commit.AnchorEntryId,
+					destination: commit.Destination,
+					payload: commit.Payload,
+					idempotencyKey: commit.IdempotencyKey,
+					recordedAt: commit.Timestamp);
+
+				// Idempotent on the key: a re-detected match (crash/handoff) does not
+				// create a second row. Combined with the monotonic guard above, the
+				// recording is exactly-once.
+				outboxStorage.TryInsert(record);
+
+				// Advance BOTH cursors atomically with the row insert.
+				for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+				{
+					long newDetected = newCheckpoint.Get(seekLevel);
+					reactionCheckpoints[(reactionId, seekLevel)] = (newDetected, newDetected);
+				}
+
+				return true;
+			}
+		}
+
+		// Resume optimization (step 2): two global cursors per reaction. Monotonicity and the
+		// (0,0)=genesis default are governed by the caller (Reaction.Execute); here we only persist/read.
 		protected internal override (long highWater, long closedFrontier) GetReactionFrontier(long reactionId)
 		{
 			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");
@@ -743,7 +809,7 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Resume optimization (paso 4): snapshot de matches de cobertura abiertos.
+		// Resume optimization (step 4): snapshot of open coverage matches.
 		protected internal override string GetReactionMatchSnapshot(long reactionId)
 		{
 			if (reactionId <= 0) throw new LanguageException("reactionId must be greater than zero.");

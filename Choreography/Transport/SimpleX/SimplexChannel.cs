@@ -43,17 +43,17 @@ namespace Choreography.Transport.SimpleX
 
         internal async Task StartAsync(CancellationToken ct)
         {
-            // Subscribe to inbound queue to receive messages. El `ct` acota el connect
-            // (SUB es parte del handshake), pero NO debe gobernar la vida del pump.
+            // Subscribe to inbound queue to receive messages. The `ct` bounds the connect
+            // (SUB is part of the handshake), but must NOT govern the lifetime of the pump.
             await _client.SubscribeAsync(_inboundQueue, ct);
 
-            // El ReceivePump vive mientras viva el CANAL, no mientras viva el connect/handshake.
-            // Antes el CTS se linkeaba al `ct` del connect (CreateLinkedTokenSource(ct)). Cuando
-            // el caller acota el handshake con un CancelAfter (p.ej. the host Performance envuelve
-            // JoinPeerNetworkAsync en un timeout) y ese token se cancela DESPUES de un handshake
-            // exitoso, el pump moria y el canal se caia: los 3 canales (Coordination/Replication/
-            // Command) -> perdida de heartbeats -> BecomeDirector -> split-brain. El CTS propio se
-            // cancela unicamente en Dispose/disconnect, desacoplando el pump del timeout del handshake.
+            // The ReceivePump lives as long as the CHANNEL lives, not as long as the connect/handshake.
+            // Previously the CTS was linked to the connect's `ct` (CreateLinkedTokenSource(ct)). When
+            // the caller bounds the handshake with a CancelAfter (e.g. the host Performance wraps
+            // JoinPeerNetworkAsync in a timeout) and that token is cancelled AFTER a successful
+            // handshake, the pump died and the channel dropped: the 3 channels (Coordination/Replication/
+            // Command) -> loss of heartbeats -> BecomeDirector -> split-brain. The dedicated CTS is
+            // cancelled only on Dispose/disconnect, decoupling the pump from the handshake timeout.
             _pumpCts = new CancellationTokenSource();
             _receivePumpTask = Task.Run(() => ReceivePumpAsync(_pumpCts.Token));
         }
@@ -85,24 +85,24 @@ namespace Choreography.Transport.SimpleX
                 {
                     try
                     {
-                        // Wire layout que el SMP server entrega al recipient (mismo formato
-                        // que reciben AcceptInvitationAsync/WaitForConnectionAsync durante el
+                        // Wire layout the SMP server delivers to the recipient (same format
+                        // received by AcceptInvitationAsync/WaitForConnectionAsync during the
                         // handshake):
                         //
                         //   Layer 1 (C2S, server-to-recipient):
                         //     smpMsg.EncryptedBody = [16B Poly1305 tag][16106B padded crypto_box]
-                        //     -> DecryptServerEnvelope hace C2S unwrap + strip del meta block
-                        //        (SystemTime + MsgFlags + ' ') y devuelve el msgBody original
-                        //        que el sender envio.
+                        //     -> DecryptServerEnvelope does the C2S unwrap + strips the meta block
+                        //        (SystemTime + MsgFlags + ' ') and returns the original msgBody
+                        //        the sender sent.
                         //
                         //   Layer 2 (E2E, peer-to-peer):
                         //     msgBody = [24B sender nonce][crypto_box(stage payload)]
-                        //     -> peer-decrypt con ECDH(myRecDhSec, peerSenderDhPub).
+                        //     -> peer-decrypt with ECDH(myRecDhSec, peerSenderDhPub).
                         //
-                        // Antes del fix este path aplicaba la Layer 2 directamente al
-                        // EncryptedBody sin haber strippeado el wrap C2S del server, lo que
-                        // disparaba Poly1305 tag mismatch en el primer (y todos los demas)
-                        // mensaje post-handshake (caso reportado en 2-Stage demos).
+                        // Before the fix this path applied Layer 2 directly to the
+                        // EncryptedBody without having stripped the server's C2S wrap, which
+                        // triggered a Poly1305 tag mismatch on the first (and every other)
+                        // post-handshake message (case reported in 2-Stage demos).
                         byte[] msgBody = SimplexTransport.DecryptServerEnvelope(smpMsg, _inboundQueue);
 
                         if (msgBody.Length <= SmpCrypto.NonceSize) continue;
@@ -113,8 +113,8 @@ namespace Choreography.Transport.SimpleX
                         byte[] ciphertext = new byte[msgBody.Length - SmpCrypto.NonceSize];
                         Buffer.BlockCopy(msgBody, SmpCrypto.NonceSize, ciphertext, 0, ciphertext.Length);
 
-                        // ECDH para decryptar: shared = ECDH(myRecDhSec, peerSenderDhPub).
-                        // peerSenderDhPub se aprende del envelope de handshake (ver SimplexTransport).
+                        // ECDH to decrypt: shared = ECDH(myRecDhSec, peerSenderDhPub).
+                        // peerSenderDhPub is learned from the handshake envelope (see SimplexTransport).
                         if (_inboundQueue.PeerSenderDhPublicKey == null)
                             throw new InvalidOperationException(
                                 "Inbound queue PeerSenderDhPublicKey not set; envelope handshake incomplete");
@@ -167,18 +167,18 @@ namespace Choreography.Transport.SimpleX
 
     // Control message for bidirectional channel setup.
     //
-    // Lo manda el joiner al creator sobre la forward queue (la creada por el creator),
-    // como primer SEND unsigned. Contiene:
-    //   - ReverseQueueUri: invitation URI de la queue creada por el joiner para SENDs del creator.
-    //   - PerformerId: identidad del joiner.
-    //   - SenderSignPubKey: la pubkey Ed25519 del joiner para firmar SENDs en la forward queue.
-    //     El creator la registra via KEY para securizar la forward queue.
-    //   - SenderDhPubKey: la pubkey X25519 ephemeral del joiner usada como sender en la forward queue.
-    //     El creator la guarda en forwardQueue.PeerSenderDhPublicKey para decryptar SENDs posteriores.
+    // Sent by the joiner to the creator over the forward queue (the one created by the creator),
+    // as the first unsigned SEND. Contains:
+    //   - ReverseQueueUri: invitation URI of the queue created by the joiner for the creator's SENDs.
+    //   - PerformerId: identity of the joiner.
+    //   - SenderSignPubKey: the joiner's Ed25519 pubkey for signing SENDs on the forward queue.
+    //     The creator registers it via KEY to secure the forward queue.
+    //   - SenderDhPubKey: the joiner's ephemeral X25519 pubkey used as sender on the forward queue.
+    //     The creator stores it in forwardQueue.PeerSenderDhPublicKey to decrypt subsequent SENDs.
     //
-    // Layout v2 (back-compat con v1 que no llevaba pubkeys):
+    // Layout v2 (back-compat with v1 which carried no pubkeys):
     //   [Marker(1)] [UriLen(4)] [UriBytes] [PerformerId(16)] [SenderSignPubKey(32)?] [SenderDhPubKey(32)?]
-    // Las dos ultimas son opcionales y se detectan por longitud restante (>= 64).
+    // The last two are optional and detected by remaining length (>= 64).
     internal sealed class ReverseQueueEnvelope
     {
         public const byte Marker = 0xFF;
@@ -240,11 +240,11 @@ namespace Choreography.Transport.SimpleX
         }
     }
 
-    // Inverse handshake envelope: lo manda el creator al joiner sobre la reverse queue
-    // (la creada por el joiner), como primer SEND unsigned. Contiene las dos pubkeys del
-    // creator en rol de Sender sobre la reverse queue. El joiner las usa para:
-    //   - SenderSignPubKey: KEY sobre la reverse queue (joiner es recipient ahi).
-    //   - SenderDhPubKey: guardar en reverseQueue.PeerSenderDhPublicKey para decryptar.
+    // Inverse handshake envelope: sent by the creator to the joiner over the reverse queue
+    // (the one created by the joiner), as the first unsigned SEND. Contains the creator's two
+    // pubkeys in the Sender role over the reverse queue. The joiner uses them to:
+    //   - SenderSignPubKey: KEY over the reverse queue (the joiner is recipient there).
+    //   - SenderDhPubKey: store in reverseQueue.PeerSenderDhPublicKey to decrypt.
     internal sealed class ForwardKeyEnvelope
     {
         public const byte Marker = 0xFE;

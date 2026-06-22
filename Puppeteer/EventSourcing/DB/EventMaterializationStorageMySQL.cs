@@ -159,9 +159,9 @@ namespace Puppeteer.EventSourcing.DB
 						sql.Clear();
 					}
 
-					// 2. Commit: mover buffer -> tabla definitiva. ON DUPLICATE KEY hace
-					// idempotente la entrega — re-marcar el mismo (DiaryId, Destination)
-					// no produce filas duplicadas, solo refresca el Timestamp.
+					// 2. Commit: move buffer -> final table. ON DUPLICATE KEY makes
+					// delivery idempotent — re-marking the same (DiaryId, Destination)
+					// produces no duplicate rows, it only refreshes the Timestamp.
 					string commitSql = @"
 						INSERT INTO EventMaterialization (DiaryId, ReactionId, Destination, Timestamp)
 						SELECT DiaryId, ReactionId, Destination, Timestamp

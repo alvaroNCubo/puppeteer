@@ -36,7 +36,7 @@ namespace Choreography.StageManager
         // output via a per-Output instance of this prototype (CreateNew +
         // Reset lifecycle managed by the ExecutionOutput pool).
         //
-        // Limitation (out-of-scope until firma posterior): when this Stage
+        // Limitation (out-of-scope until later sign-off): when this Stage
         // is in Cast role and forwards a command to the Director over the
         // transport, the formatter context does NOT cross the wire. The
         // Director executes with its own formatter context. Each Stage
@@ -48,8 +48,8 @@ namespace Choreography.StageManager
             return this;
         }
 
-        // Shadow del Logger base para preservar StageV2 en la cadena fluent
-        // (asi se puede encadenar con Formatter/ConfigureStorage V2-tipados).
+        // Shadow of the base Logger to preserve StageV2 in the fluent chain
+        // (so it can be chained with V2-typed Formatter/ConfigureStorage).
         public new StageV2 Logger(IPuppeteerLogger logger)
         {
             base.Logger(logger);

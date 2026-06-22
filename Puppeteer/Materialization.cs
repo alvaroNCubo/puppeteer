@@ -5,15 +5,15 @@ using System.Collections.Generic;
 
 namespace Puppeteer
 {
-	// Paper 5 / Materialize v2 — Fase 0 (firmado D1 2026-05-13). Sub-namespace
-	// administrativo del actor para registrar destinations que van a recibir
-	// transferencia de estado. Una vez registrada una destination, el actor
-	// asume el contrato Materialize-then-Distill: Fase 1 hara que Distill
-	// falle si la destination no confirmo expresamente.
+	// Paper 5 / Materialize v2 — Phase 0 (signed D1 2026-05-13). Administrative
+	// sub-namespace of the actor for registering destinations that will receive
+	// state transfer. Once a destination is registered, the actor assumes the
+	// Materialize-then-Distill contract: Phase 1 makes Distill fail if the
+	// destination has not expressly confirmed.
 	//
-	// Naming sub-namespace firmado por andragogia de DSL — evita verb-soup en
-	// autocomplete cuando se agreguen Confirm(...) / AsProgramMirror(...) en
-	// fases posteriores. Paralelo al patron de actor.Reactions.
+	// Sub-namespace naming chosen for DSL learnability — avoids verb-soup in
+	// autocomplete when Confirm(...) / AsProgramMirror(...) are added in later
+	// phases. Parallel to the actor.Reactions pattern.
 	public class Materialization
 	{
 		private readonly ActorHandler handler;
@@ -25,10 +25,10 @@ namespace Puppeteer
 			this.handler = handler;
 		}
 
-		// Test seam paralelo a actor.Reactions.SetDairyStorage(...) — permite
-		// conectar la API a un storage in-memory sin pasar por EventSourcingStorage.
-		// Produccion no llama este metodo; lo llama el ActorHandler internamente
-		// cuando EventSourcingStorage configura el Diary.
+		// Test seam parallel to actor.Reactions.SetDairyStorage(...) — lets the
+		// API be wired to an in-memory storage without going through EventSourcingStorage.
+		// Production does not call this method; the ActorHandler calls it internally
+		// when EventSourcingStorage configures the Diary.
 		internal void SetCheckpointStorage(MaterializationCheckpointStorage storage)
 		{
 			ArgumentNullException.ThrowIfNull(storage);
@@ -49,11 +49,11 @@ namespace Puppeteer
 			}
 		}
 
-		// Registra una destination con watermark inicial = head actual del actor
-		// (decision D1 #12: nueva registracion = head al momento, no genesis).
-		// Idempotente: si la destination ya esta registrada, retorna false y
-		// preserva el watermark existente (decision firmada). El caller debe
-		// hacer Deregister + Register explicito para resetear.
+		// Registers a destination with initial watermark = the actor's current head
+		// (decision D1 #12: a new registration = head at the moment, not genesis).
+		// Idempotent: if the destination is already registered, returns false and
+		// preserves the existing watermark (signed decision). The caller must do an
+		// explicit Deregister + Register to reset.
 		public bool Register(string destination)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
@@ -61,24 +61,24 @@ namespace Puppeteer
 			return Storage.Register(destination, head, DateTime.Now);
 		}
 
-		// Unilateral (decision D1 #11): no falla si la destination no existe.
-		// El otro lado (destination process) tolera el estado huerfano — los
-		// handshakes bidireccionales se cuelgan en redes reales.
+		// Unilateral (decision D1 #11): does not fail if the destination does not
+		// exist. The other side (destination process) tolerates the orphaned state —
+		// bidirectional handshakes hang on real networks.
 		public bool Deregister(string destination)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
 			return Storage.Deregister(destination);
 		}
 
-		// Fase 1 — wire verb (b) ConfirmoUntil (decision D1 #14). Llamado por el
-		// destination process (push del destination al actor, decision D1 #10) para
-		// declarar que recibio events hasta entryId inclusive. Max-monotonic: si
-		// el watermark ya estaba en N o mas, no-op (retorna false). Si avanza,
-		// retorna true y habilita Distill().Until(entryId) hasta ese punto.
+		// Phase 1 — wire verb (b) ConfirmoUntil (decision D1 #14). Called by the
+		// destination process (push from destination to actor, decision D1 #10) to
+		// declare that it received events up to entryId inclusive. Max-monotonic: if
+		// the watermark was already at N or more, no-op (returns false). If it advances,
+		// returns true and enables Distill().Until(entryId) up to that point.
 		//
-		// Lanza LanguageException si la destination no esta registrada — la
-		// registracion es prerequisito (decisiones D1 #11/#12 sobre forward-fidelity
-		// desde registration time, no genesis).
+		// Throws LanguageException if the destination is not registered — registration
+		// is a prerequisite (decisions D1 #11/#12 on forward-fidelity from registration
+		// time, not genesis).
 		public bool ConfirmUntil(string destination, long entryId)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
@@ -86,8 +86,8 @@ namespace Puppeteer
 			return Storage.ConfirmUntil(destination, entryId, DateTime.Now);
 		}
 
-		// Snapshot inmutable del registry. Orden alfabetico estable por
-		// destination para determinismo en tests.
+		// Immutable snapshot of the registry. Stable alphabetical order by
+		// destination for determinism in tests.
 		public IReadOnlyList<MaterializationCheckpointRow> List()
 		{
 			List<MaterializationCheckpointRow> result = new List<MaterializationCheckpointRow>();
@@ -95,23 +95,23 @@ namespace Puppeteer
 			return result;
 		}
 
-		// Fase 2 — wire verb (a) EnviameDesde (Capa 1). Llamado por el destination
-		// process via HTTP (en produccion) o directo (in-process tests) para pedir
-		// los records del journal desde fromEntryId (exclusivo) hasta el head actual.
-		// Capa 1 = records solos, raw (sin filtrar Skip). El destination decide si
-		// combina con (c)+(d) en Fase 3 para Capa 2 (derived state).
+		// Phase 2 — wire verb (a) EnviameDesde (Layer 1). Called by the destination
+		// process via HTTP (in production) or directly (in-process tests) to request
+		// the journal records from fromEntryId (exclusive) up to the current head.
+		// Layer 1 = records only, raw (without filtering Skip). The destination decides
+		// whether to combine with (c)+(d) in Phase 3 for Layer 2 (derived state).
 		//
-		// Validaciones:
-		// - Destination debe estar registrada (LanguageException si no).
-		// - fromEntryId debe ser >= RegisteredAtEntryId de la destination (decision D1
-		//   #12 forward-fidelity: una destination registrada en EntryId R no puede
-		//   pedir records anteriores a R — esa historia no es responsabilidad del
-		//   actor hacia ella).
+		// Validations:
+		// - Destination must be registered (LanguageException if not).
+		// - fromEntryId must be >= the destination's RegisteredAtEntryId (decision D1
+		//   #12 forward-fidelity: a destination registered at EntryId R cannot request
+		//   records earlier than R — that history is not the actor's responsibility
+		//   toward it).
 		//
-		// Caso edge: si primary distilo entre registration y read (e.g. con
-		// .Forced()), los records distilados estaran fisicamente ausentes y el
-		// resultado tendra "hole" silencioso. Responsabilidad del operador que
-		// uso .Forced() (decision D1 #7).
+		// Edge case: if primary distilled between registration and read (e.g. with
+		// .Forced()), the distilled records will be physically absent and the result
+		// will have a silent "hole". Responsibility of the operator who used .Forced()
+		// (decision D1 #7).
 		public IReadOnlyList<MaterializationRecord> ReadRecordsAfter(string destination, long fromEntryId)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
@@ -154,10 +154,10 @@ namespace Puppeteer
 			return result;
 		}
 
-		// Fase 3 — wire verb (c) DameCheckpointsHasta (decision D1 #13). Snapshot
-		// atomic del reaction registry + checkpoints. AS-IS, sin filtering por
-		// watermark (el matcher en destination side controla via GetMinimum +
-		// IsCheckpointGreater). Validacion: destination registrada.
+		// Phase 3 — wire verb (c) DameCheckpointsHasta (decision D1 #13). Atomic
+		// snapshot of the reaction registry + checkpoints. AS-IS, without filtering by
+		// watermark (the matcher on the destination side controls it via GetMinimum +
+		// IsCheckpointGreater). Validation: destination registered.
 		public MaterializationReactionsSnapshot ReadReactions(string destination)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(destination);
@@ -177,14 +177,14 @@ namespace Puppeteer
 			return new MaterializationReactionsSnapshot(reactions, checkpoints);
 		}
 
-		// Fase 3 — wire verb (d) DameElidedRange. Lee elision markers en el rango
-		// [fromEntryId, toEntryId] inclusive, ordenados por (Timestamp, DiaryId).
-		// Capa 2 = derived state — combinado con (c) ReadReactions y (a) ReadRecordsAfter
-		// permite al destination reconstruir su EventElision local sin replay del
+		// Phase 3 — wire verb (d) DameElidedRange. Reads elision markers in the range
+		// [fromEntryId, toEntryId] inclusive, ordered by (Timestamp, DiaryId).
+		// Layer 2 = derived state — combined with (c) ReadReactions and (a) ReadRecordsAfter
+		// it lets the destination rebuild its local EventElision without replaying the
 		// pattern matcher.
 		//
-		// Validaciones:
-		// - Destination registrada.
+		// Validations:
+		// - Destination registered.
 		// - fromEntryId >= RegisteredAtEntryId (forward-fidelity D1 #12).
 		// - fromEntryId <= toEntryId.
 		public IReadOnlyList<MaterializationElisionMarker> ReadElidedRange(string destination, long fromEntryId, long toEntryId)
@@ -213,9 +213,9 @@ namespace Puppeteer
 			return result;
 		}
 
-		// Helper compartido por ReadReactions/ReadElidedRange para verificar que la
-		// destination esta registrada. Retorna la row del registry para que el caller
-		// pueda usar RegisteredAtEntryId si lo necesita.
+		// Helper shared by ReadReactions/ReadElidedRange to verify that the
+		// destination is registered. Returns the registry row so the caller can use
+		// RegisteredAtEntryId if needed.
 		private MaterializationCheckpointRow RequireRegistered(string destination)
 		{
 			MaterializationCheckpointStorage checkpointStorage = Storage;

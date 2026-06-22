@@ -3,13 +3,13 @@ using System.IO;
 
 namespace Puppeteer.EventSourcing.DB
 {
-	// Validacion eager de paths declarados en la configuracion de almacenamiento.
-	// Se ejecuta al construir el Diary, NO al procesar el primer perform command,
-	// para que una mala configuracion (path inexistente, sin permisos, read-only)
-	// falle ruidosamente lo antes posible con un mensaje accionable. Aplica al
-	// `localBufferPath` independientemente del dbType del backend canonico, y al
-	// `path=` del FileSystem. No valida conexiones remotas a MySQL/SQLServer:
-	// ellas fallan organicamente al inicio del rehidratar.
+	// Eager validation of paths declared in the storage configuration.
+	// Runs when constructing the Diary, NOT when processing the first perform command,
+	// so that a bad configuration (non-existent path, no permissions, read-only)
+	// fails loudly as early as possible with an actionable message. Applies to the
+	// `localBufferPath` regardless of the canonical backend's dbType, and to the
+	// FileSystem `path=`. It does not validate remote connections to MySQL/SQLServer:
+	// those fail organically at the start of rehydration.
 	internal static class StoragePathValidator
 	{
 		internal static void EnsureLocalBufferPathIsUsable(string localBufferPath)

@@ -9,9 +9,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 {
 	internal sealed class MaterializationCheckpointStorageFileSystem : MaterializationCheckpointStorage
 	{
-		// "PPMC" = Puppeteer Materialization Checkpoint. Distinto de "PPMT"
-		// (EventMaterialization v1 markers) para que un mismatch de archivo sea
-		// detectable.
+		// "PPMC" = Puppeteer Materialization Checkpoint. Distinct from "PPMT"
+		// (EventMaterialization v1 markers) so that a file mismatch is detectable.
 		private static readonly byte[] MAGIC = new byte[] { (byte)'P', (byte)'P', (byte)'M', (byte)'C' };
 		private const ushort FORMAT_VERSION = 1;
 		private const int HEADER_SIZE = 10;

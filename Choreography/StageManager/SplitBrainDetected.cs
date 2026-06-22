@@ -2,22 +2,22 @@ using System;
 
 namespace Choreography.StageManager
 {
-    // Payload del evento Stage.OnDirectorElectionLost. Surface explicit del
-    // split-brain detectado tras una eleccion: este Stage estaba como Director
-    // cuando recibio un DirectorAnnounce de otro peer que tambien se declaraba
-    // Director, y el tiebreaker (MaxEntryId desc, PerformerId asc) lo deja
-    // del lado del loser.
+    // Payload of the Stage.OnDirectorElectionLost event. Explicit surface of the
+    // split-brain detected after an election: this Stage was acting as Director
+    // when it received a DirectorAnnounce from another peer that also declared itself
+    // Director, and the tiebreaker (MaxEntryId desc, PerformerId asc) leaves it
+    // on the loser side.
     //
-    // HasDivergentTail==true significa que MyMaxEntryId > 0 y este Stage escribio
-    // entries que el winner NO tiene en su journal (el winner gano con menos o
-    // igual entries, lo cual implica que el loser tiene tail propia). La
-    // reconciliacion sin perdida requeriria CRDT merge o policy app-defined; sin
-    // primitiva de truncate en el journal, la rehidratacion-desde-winner
-    // perderia esa tail. La decision de como reconciliar queda en la aplicacion.
+    // HasDivergentTail==true means that MyMaxEntryId > 0 and this Stage wrote
+    // entries that the winner does NOT have in its journal (the winner won with fewer or
+    // equal entries, which implies that the loser has its own tail). Lossless
+    // reconciliation would require a CRDT merge or app-defined policy; without a
+    // truncate primitive in the journal, rehydration-from-winner
+    // would lose that tail. The decision of how to reconcile is left to the application.
     //
-    // HasDivergentTail==false significa que MyMaxEntryId <= WinnerMaxEntryId y
-    // potencialmente puede reconciliarse via SendCatchUpAsync desde el winner
-    // (si los prefijos coinciden — lo cual no se valida aqui, queda en la app).
+    // HasDivergentTail==false means that MyMaxEntryId <= WinnerMaxEntryId and
+    // can potentially be reconciled via SendCatchUpAsync from the winner
+    // (if the prefixes match — which is not validated here, left to the app).
     public sealed class SplitBrainDetected
     {
         public PerformerId Winner { get; }

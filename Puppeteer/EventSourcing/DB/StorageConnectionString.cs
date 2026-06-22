@@ -4,11 +4,12 @@ using System.Text;
 
 namespace Puppeteer.EventSourcing.DB
 {
-	// Pre-parser ortogonal al backend: extrae la key `localBufferPath=<path>` de
-	// cualquier connection string (FS / MySQL / SQLServer / IN_MEMORY) y devuelve
-	// el CS saneado (sin esa key) mas el path del buffer si vino. Se quita la key
-	// antes de pasar el CS al parser del backend para no contaminar a MySQL/SQLServer
-	// (ADO.NET conocen sus propias keys y rechazan/ignoran las ajenas).
+	// Backend-orthogonal pre-parser: extracts the `localBufferPath=<path>` key from
+	// any connection string (FS / MySQL / SQLServer / IN_MEMORY) and returns the
+	// sanitized connection string (without that key) plus the buffer path if present.
+	// The key is stripped before passing the connection string to the backend parser
+	// so it does not contaminate MySQL/SQLServer (ADO.NET drivers know their own keys
+	// and reject/ignore foreign ones).
 	internal static class StorageConnectionString
 	{
 		internal const string LocalBufferPathKey = "localBufferPath";

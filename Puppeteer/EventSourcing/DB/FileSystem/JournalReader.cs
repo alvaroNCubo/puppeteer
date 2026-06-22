@@ -112,10 +112,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 						if (!BinaryEventCodec.ValidateCrc(recordBody, recordLen))
 						{
-							// Integridad rota: la rehidratacion abandona el resto del archivo
-							// por contrato (recovery best-effort), pero el evento es serio. Va a
-							// IPuppeteerLogger.Error para que se vea en stderr (ConsoleLogger
-							// default) o en el sink que el host inyecto via Performance.Logger(...).
+							// Broken integrity: rehydration abandons the rest of the file
+							// by contract (best-effort recovery), but the event is serious. It goes to
+							// IPuppeteerLogger.Error so it is visible on stderr (ConsoleLogger
+							// default) or on the sink the host injected via Performance.Logger(...).
 							client.Logger.Error(
 								$"[REHYDRATION] CRC mismatch in file {filePath} at position {fs.Position - recordLen}. Skipping rest of file.",
 								new System.IO.InvalidDataException("CRC mismatch detected"));
@@ -171,10 +171,10 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 						{
 							if (!client.IsActionKnown(actionId))
 							{
-								// Replay sin contexto: el actionId no esta en el cache de acciones
-								// del actor. Phase 5 garantiza Define-precede-Invocation por
-								// construccion, asi que esto SOLO deberia disparar con journals
-								// pre-Phase-5 o corrupcion. Visibilidad via logger del host.
+								// Replay without context: the actionId is not in the actor's
+								// action cache. Phase 5 guarantees Define-precedes-Invocation by
+								// construction, so this should ONLY fire with pre-Phase-5
+								// journals or corruption. Visibility via the host logger.
 								client.Logger.Error(
 									$"[REHYDRATION] Action {actionId} not known for entryId {entryId}. Skipping.",
 									new System.IO.InvalidDataException($"Orphan Invocation: actionId={actionId} entryId={entryId}"));
@@ -275,8 +275,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 			else
 			{
-				// Caso esperado: archivo purgado correctamente, todos sus entryIds estan
-				// en el skipSet. No es un problema — solo informacion para debug.
+				// Expected case: file purged correctly, all its entryIds are
+				// in the skipSet. Not a problem — just information for debug.
 				client.Logger.Debug(
 					$"[REHYDRATION] Missing journal file for sequence {indexEntry.FileNumber} (entryIds [{firstId}..{lastId}]). " +
 					$"All entryIds verified as skipped. File was correctly purged.");

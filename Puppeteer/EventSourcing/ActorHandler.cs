@@ -53,8 +53,8 @@ namespace Puppeteer.EventSourcing
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(name);
 			ArgumentNullException.ThrowIfNull(libraryAssemblies);
 
-			// Si el caller no aporta libraries, fallback al assembly del actor (back-compat).
-			// El path idiomatico es pasar las DLLs de dominio explicitamente.
+			// If the caller does not supply libraries, fall back to the actor's assembly (back-compat).
+			// The idiomatic path is to pass the domain DLLs explicitly.
 			LibraryAssemblies = libraryAssemblies.Length > 0
 				? libraryAssemblies
 				: new[] { actor.GetType().Assembly };
@@ -78,11 +78,11 @@ namespace Puppeteer.EventSourcing
 
 		internal DomainLibraries Libraries => libraries;
 
-		// Logger per-actor (source-of-truth). Default ConsoleLogger es util en
-		// desarrollo: Error -> stderr, Debug -> stdout. El host inyecta su impl
-		// (Serilog, MEL, NLog) via Actor.UseLogger(...). Cada ActorHandler tiene
-		// su propio sink; dos actores en el mismo proceso pueden tener loggers
-		// distintos sin pisarse.
+		// Per-actor logger (source-of-truth). The default ConsoleLogger is useful in
+		// development: Error -> stderr, Debug -> stdout. The host injects its impl
+		// (Serilog, MEL, NLog) via Actor.UseLogger(...). Each ActorHandler has
+		// its own sink; two actors in the same process can have different
+		// loggers without clobbering each other.
 		private IPuppeteerLogger logger = new ConsoleLogger();
 		public IPuppeteerLogger Logger => logger;
 		internal void UseLogger(IPuppeteerLogger newLogger)
@@ -128,28 +128,28 @@ namespace Puppeteer.EventSourcing
 		internal void EnterReactionActionScope() { inReactionAction = true; }
 		internal void ExitReactionActionScope() { inReactionAction = false; }
 
-		// Modo follower: solo el primary tiene autoridad de escribir al journal
-		// canonico (invariante 1-escritor). Cuando este flag esta encendido, los
-		// Tell terminators de las Reactions SI ejecutan (construyen el envelope y
-		// lo encolan en PendingTells) y el envelope SI se despacha via Transport
-		// tras soltar el lock — pero NO se escribe la entrada `tell ...` al journal
-		// compartido del actor. Set por Performance.Start(asFollower:true) antes de
-		// arrancar las Cued reactions; el primary lo deja false (default) y
-		// journaliza normal.
+		// Follower mode: only the primary has authority to write to the canonical
+		// journal (1-writer invariant). When this flag is on, the Reactions'
+		// Tell terminators DO execute (they build the envelope and enqueue
+		// it into PendingTells) and the envelope IS dispatched via Transport
+		// after releasing the lock — but the `tell ...` entry is NOT written to the
+		// actor's shared journal. Set by Performance.Start(asFollower:true) before
+		// starting the Cued reactions; the primary leaves it false (default) and
+		// journals normally.
 		//
-		// Etapa 2 (dispatch-without-journaling) implementada: el gate de la
-		// escritura vive en ExecuteCommandWithWriteLock (writeNewEntry=false cuando
-		// SuppressReactionJournaling && InReactionAction), no en TellStatement.
+		// Stage 2 (dispatch-without-journaling) implemented: the write gate
+		// lives in ExecuteCommandWithWriteLock (writeNewEntry=false when
+		// SuppressReactionJournaling && InReactionAction), not in TellStatement.
 		internal bool SuppressReactionJournaling { get; set; }
 
-		// Provider del rol vivo para el gate de ReactionActivation
-		// (DirectorOnly / CastOnly / Company). Default: el actor actua como
-		// director/primary — un actor standalone (sin Stage ni Performance) es
-		// el unico escritor de si mismo, asi que corre DirectorOnly + Company y
-		// nunca CastOnly. Choreography lo sobreescribe con el rol vivo: el Stage
-		// P2P pasa () => IsDirector; la Performance Theater () => !isFollower
-		// (cambia en el handover). Se consulta en cada Reaction.Execute para que
-		// un fan-out replicado no re-dispare la reaction en el nodo equivocado.
+		// Provider of the live role for the ReactionActivation gate
+		// (DirectorOnly / CastOnly / Company). Default: the actor acts as
+		// director/primary — a standalone actor (without Stage or Performance) is
+		// the only writer of itself, so it runs DirectorOnly + Company and
+		// never CastOnly. Choreography overrides it with the live role: the P2P
+		// Stage passes () => IsDirector; the Theater Performance () => !isFollower
+		// (changes at the handover). It is consulted on each Reaction.Execute so
+		// a replicated fan-out does not re-fire the reaction on the wrong node.
 		private Func<bool> actingAsDirectorProvider = () => true;
 		internal bool IsActingAsDirector => actingAsDirectorProvider();
 		internal void SetActingAsDirectorProvider(Func<bool> provider)
@@ -158,11 +158,11 @@ namespace Puppeteer.EventSourcing
 			actingAsDirectorProvider = provider;
 		}
 
-		// Check transitorio de una Causation.Continue(check:, ...). NO se evalua
-		// aqui (el origen siempre cumpliria); se hornea en el TellEnvelope.Check
-		// que TellStatement.Execute construye durante el PerformCmd del body, para
-		// que el RECEPTOR lo corra como CheckThenCommand. Set/clear por
-		// ExecuteCausation; leido por TellStatement via SymbolTable.
+		// Transient check from a Causation.Continue(check:, ...). It is NOT evaluated
+		// here (the origin would always satisfy it); it is baked into the TellEnvelope.Check
+		// that TellStatement.Execute builds during the body's PerformCmd, so that
+		// the RECEIVER runs it as a CheckThenCommand. Set/cleared by
+		// ExecuteCausation; read by TellStatement via SymbolTable.
 		internal string CausationTellCheck
 		{
 			get => symbolTable.CurrentCausationCheck;
@@ -170,23 +170,23 @@ namespace Puppeteer.EventSourcing
 		}
 
 		// Shadow Replay — S1 (handoff_shadow_S1_implementation.md / design §3.0).
-		// Cuando IsShadow esta encendido, este ActorHandler es una derivacion
-		// laboratorio de un actor de produccion: lee el journal real (replay) pero
-		// escribe en su PROPIO storage y NO produce efecto externo. El aislamiento
-		// se conduce desde aqui: los Tell cross-actor de una Reaction NO se despachan
-		// (se dropean en el drain de PendingTells) y EnsureTransportConfigured no
-		// exige un Transport. El shadow tampoco se registra como destination de
-		// Materialization del primary (es un unregistered reader — no bloquea el
-		// Distill del primary), por construccion: CreateShadow nunca llama
-		// primary.Materialization.Register. El shadow es un primitivo del actor,
-		// NO un subtipo de Performance — un ShadowPerformance lo hospeda por
-		// composicion.
+		// When IsShadow is on, this ActorHandler is a laboratory derivation
+		// of a production actor: it reads the real journal (replay) but
+		// writes to its OWN storage and produces NO external effect. The isolation
+		// is driven from here: a Reaction's cross-actor Tells are NOT dispatched
+		// (they are dropped in the PendingTells drain) and EnsureTransportConfigured does not
+		// require a Transport. The shadow is also not registered as a
+		// Materialization destination of the primary (it is an unregistered reader — it does not block the
+		// primary's Distill), by construction: CreateShadow never calls
+		// primary.Materialization.Register. The shadow is an actor primitive,
+		// NOT a Performance subtype — a ShadowPerformance hosts it by
+		// composition.
 		internal bool IsShadow { get; private set; }
 
-		// Shadow Replay — S3 (skip-preview). Cuando esta encendido (solo valido en un
-		// shadow), las reactions Elide corren en dry-run: capturan el batch en
-		// Reaction.WouldSkip pero NO commitean la elision (no
-		// MarkEventsAsElidedWithCheckpoint). Default false; encender via EnableSkipPreview().
+		// Shadow Replay — S3 (skip-preview). When on (only valid on a
+		// shadow), Elide reactions run in dry-run: they capture the batch in
+		// Reaction.WouldSkip but do NOT commit the elision (no
+		// MarkEventsAsElidedWithCheckpoint). Default false; turn on via EnableSkipPreview().
 		internal bool SkipPreviewEnabled { get; private set; }
 
 		internal void EnableSkipPreview()
@@ -195,33 +195,33 @@ namespace Puppeteer.EventSourcing
 			SkipPreviewEnabled = true;
 		}
 
-		// Fuente de replay del shadow: el journal del actor primary en modo
-		// solo-lectura. Solo se setea en el handler shadow (via CreateShadow). El
-		// shadow lee records crudos del primary por SyncUntil y los re-aplica contra
-		// su propio storage. null en un handler normal.
+		// Shadow replay source: the primary actor's journal in read-only
+		// mode. Set only on the shadow handler (via CreateShadow). The
+		// shadow reads raw records from the primary through SyncUntil and re-applies them against
+		// its own storage. null on a normal handler.
 		private DiaryStorage shadowReplaySource;
 
-		// Shadow Replay — S2 (continuous mirror). shadowingActive: el loop de
-		// StartShadowing esta corriendo. shadowingTask: el background Task del mirror.
-		// SHADOW_POLL_MILLIS: intervalo de poll del head del primary.
+		// Shadow Replay — S2 (continuous mirror). shadowingActive: the
+		// StartShadowing loop is running. shadowingTask: the mirror's background Task.
+		// SHADOW_POLL_MILLIS: poll interval for the primary's head.
 		private volatile bool shadowingActive;
 		private Task shadowingTask;
 		private const int SHADOW_POLL_MILLIS = 50;
 
-		// Shadow Replay — S1. Primitivo del actor: produce un ActorHandler aislado
-		// (storage PROPIO, IsShadow=true) alimentado por replay del journal de ESTE
-		// actor (el primary). Mismas Libraries (dominio identico). Las reactions NO
-		// se clonan automaticamente del primary (el builder es imperativo y no
-		// serializable en S1); el caller las re-declara via cfg.ConfigureReactions
-		// con la misma API de Tema A apuntando al shadow.
+		// Shadow Replay — S1. Actor primitive: produces an isolated ActorHandler
+		// (its OWN storage, IsShadow=true) fed by replay of THIS actor's journal
+		// (the primary). Same Libraries (identical domain). Reactions are NOT
+		// cloned automatically from the primary (the builder is imperative and not
+		// serializable in S1); the caller re-declares them via cfg.ConfigureReactions
+		// with the same Theme A API pointing at the shadow.
 		//
-		// Guard de aislamiento: el storage del shadow debe ser DISTINTO del primary.
-		// Se valida por nombre de actor — el shadow corre con un nombre derivado
-		// (`<primary>-shadow-<Id>`), de modo que los backends por-nombre (InMemory) o
-		// por-path-con-nombre (FileSystem) nunca comparten storage fisico con el
-		// primary aunque la connection coincida. Ademas, si el connection del shadow
-		// es literalmente el del primary Y el backend no particiona por nombre, se
-		// rechaza explicitamente.
+		// Isolation guard: the shadow's storage must be DIFFERENT from the primary's.
+		// It is validated by actor name — the shadow runs with a derived name
+		// (`<primary>-shadow-<Id>`), so that per-name backends (InMemory) or
+		// per-path-with-name backends (FileSystem) never share physical storage with the
+		// primary even if the connection matches. In addition, if the shadow's connection
+		// is literally the primary's AND the backend does not partition by name, it is
+		// rejected explicitly.
 		internal ActorHandler CreateShadow(ShadowConfig cfg)
 		{
 			ArgumentNullException.ThrowIfNull(cfg);
@@ -231,10 +231,10 @@ namespace Puppeteer.EventSourcing
 			if (string.Equals(shadowName, this.Name, StringComparison.Ordinal))
 				throw new LanguageException("Shadow name collided with the primary actor name. This is impossible by construction (the name carries a '-shadow-' infix); if you see this, ShadowConfig.Id was empty.");
 
-			// Construye el actor shadow en la MISMA familia (V1/V2) que el primary,
-			// con las mismas LibraryAssemblies (dominio identico) y el mismo
-			// CompiledModePolicy. Un shadow no puede ser de familia distinta: las
-			// ramas de rehidratacion del handler discriminan `actor is ActorV1`.
+			// Build the shadow actor in the SAME family (V1/V2) as the primary,
+			// with the same LibraryAssemblies (identical domain) and the same
+			// CompiledModePolicy. A shadow cannot be of a different family: the
+			// handler's rehydration branches discriminate on `actor is ActorV1`.
 			Actor shadowActor;
 			if (this.actor is ActorV1)
 				shadowActor = new ActorV1(shadowName, this.LibraryAssemblies);
@@ -248,55 +248,55 @@ namespace Puppeteer.EventSourcing
 			ActorHandler shadow = shadowActor.Handler;
 			shadow.IsShadow = true;
 
-			// Storage PROPIO del shadow — JAMAS el del primary. Esto wirea el Diary,
-			// deja el handler en estado Recovered (IsAlive) y conecta el storage a
-			// Reactions del shadow.
+			// The shadow's OWN storage — NEVER the primary's. This wires the Diary,
+			// leaves the handler in Recovered state (IsAlive) and connects the storage to
+			// the shadow's Reactions.
 			shadow.EventSourcingStorage(cfg.ShadowStorageType, cfg.ShadowStorageConnection);
 
-			// Guard duro: el storage fisico del shadow no puede ser el mismo objeto
-			// que el del primary. Con nombres de actor distintos esto se cumple por
-			// construccion en los 4 backends; el assert protege contra una regresion
-			// futura del factory de storage.
+			// Hard guard: the shadow's physical storage cannot be the same object
+			// as the primary's. With distinct actor names this holds by
+			// construction across the 4 backends; the assert protects against a
+			// future regression in the storage factory.
 			DiaryStorage shadowStorage = shadow.TryGetDiaryStorage();
 			DiaryStorage primaryStorage = this.TryGetDiaryStorage();
 			if (shadowStorage != null && ReferenceEquals(shadowStorage, primaryStorage))
 				throw new LanguageException("Shadow isolation violated: the shadow's storage resolved to the SAME storage instance as the primary. A shadow must write to its own storage and never touch the primary's journal.");
 
-			// Replay source = journal del primary, solo-lectura. El shadow lee records
-			// crudos de aqui en SyncUntil y los re-aplica contra su propio storage.
+			// Replay source = the primary's journal, read-only. The shadow reads raw
+			// records from here in SyncUntil and re-applies them against its own storage.
 			shadow.shadowReplaySource = primaryStorage;
 
-			// Reactions: el caller re-declara las que quiera observar + experimentales
-			// (misma API de Tema A apuntando al shadow). No se clonan automaticamente
-			// en S1.
+			// Reactions: the caller re-declares the ones it wants to observe + experimental ones
+			// (same Theme A API pointing at the shadow). They are not cloned automatically
+			// in S1.
 			cfg.ConfigureReactions?.Invoke(shadowActor);
 
 			return shadow;
 		}
 
-		// Accessor del Actor que envuelve a este handler. Usado por la fachada
-		// actor.Shadow(cfg) para construir el objeto Shadow sobre el actor shadow
-		// recien creado por CreateShadow.
+		// Accessor for the Actor wrapping this handler. Used by the
+		// actor.Shadow(cfg) facade to build the Shadow object over the shadow actor
+		// just created by CreateShadow.
 		internal Actor ShadowActor => actor;
 
-		// Shadow Replay — S1. SyncUntil(toEntryId): replay del journal del primary
-		// desde GENESIS (EntryId 0) hasta toEntryId inclusive, aplicado al storage
-		// PROPIO del shadow. Es TECHO, no piso — el replay SIEMPRE arranca en genesis
-		// porque el estado en toEntryId depende de toda la historia previa. Tras
-		// SyncUntil el shadow queda FORKEADO: acepta PerformCmd local en su propio
-		// storage (linea de tiempo divergente). Mirror continuo (StartShadowing) es
-		// S2 y es mutuamente excluyente con el fork — no se implementa aqui.
+		// Shadow Replay — S1. SyncUntil(toEntryId): replay of the primary's journal
+		// from GENESIS (EntryId 0) up to toEntryId inclusive, applied to the
+		// shadow's OWN storage. It is a CEILING, not a floor — replay ALWAYS starts at genesis
+		// because the state at toEntryId depends on the entire prior history. After
+		// SyncUntil the shadow is FORKED: it accepts local PerformCmd on its own
+		// storage (a divergent timeline). Continuous mirror (StartShadowing) is
+		// S2 and is mutually exclusive with the fork — not implemented here.
 		//
-		// Mecanismo V1+V2 (firmado: S1 sirve ambas familias): se COPIAN los records
-		// crudos del primary al storage del shadow via la API estructurada de escritura
-		// (WriteScriptEntry para V1; WriteDefineEntry + WriteInvocationEntry para V2),
-		// preservando EntryId / OccurredAt / ExposeData y los datos V2
-		// (DefineStatementText + Arguments que el MaterializationRecord ya transporta).
-		// Luego se rehidrata el estado in-memory del shadow desde su propio storage via
-		// CatchUpFromJournal — la rehidratacion estandar maneja V1 (Script) y V2
-		// (Define -> actionCommands, Invocation) de forma uniforme. NO se re-ejecuta
-		// como comando nuevo: copiar+rehidratar es cross-backend, preserva los EntryIds
-		// exactos del primary, y reusa la maquinaria de replay ya probada (la misma de
+		// V1+V2 mechanism (signed: S1 serves both families): the primary's raw
+		// records are COPIED into the shadow's storage via the structured write API
+		// (WriteScriptEntry for V1; WriteDefineEntry + WriteInvocationEntry for V2),
+		// preserving EntryId / OccurredAt / ExposeData and the V2 data
+		// (DefineStatementText + Arguments that the MaterializationRecord already carries).
+		// Then the shadow's in-memory state is rehydrated from its own storage via
+		// CatchUpFromJournal — standard rehydration handles V1 (Script) and V2
+		// (Define -> actionCommands, Invocation) uniformly. It is NOT re-executed
+		// as a new command: copy+rehydrate is cross-backend, preserves the primary's
+		// exact EntryIds, and reuses the already-proven replay machinery (the same as
 		// red-black / CatchUpFromJournal).
 		internal void SyncUntil(long toEntryId)
 		{
@@ -306,21 +306,21 @@ namespace Puppeteer.EventSourcing
 			if (dairy == null) throw new LanguageException("Shadow storage is not configured. Call EventSourcingStorage on the shadow before SyncUntil.");
 			if (shadowingActive) throw new LanguageException("Cannot SyncUntil while continuous shadowing is active. Continuous mirror and point-in-time fork are mutually exclusive — call StopShadowing first.");
 
-			// Copia records crudos del primary desde GENESIS (techo = toEntryId) al
-			// storage propio del shadow, luego rehidrata. Ver CopyPrimaryRecordsToShadow.
+			// Copy raw records from the primary starting at GENESIS (ceiling = toEntryId) to
+			// the shadow's own storage, then rehydrate. See CopyPrimaryRecordsToShadow.
 			long lastWritten = CopyPrimaryRecordsToShadow(0, toEntryId);
 			if (lastWritten > 0)
 				CatchUpFromJournal(lastWritten);
 		}
 
-		// Shadow Replay. Copia records crudos del primary (afterEntryId exclusivo;
-		// toEntryIdCap inclusivo, 0 => sin tope) al storage PROPIO del shadow via la API
-		// estructurada — V1 (Script) y V2 (Define + Invocation) uniforme, preservando
-		// EntryId / OccurredAt / ExposeData y los datos V2 (DefineStatementText +
-		// Arguments que el MaterializationRecord ya transporta). Unregistered reader: NO
-		// pasa por Materialization.Register, asi que no participa del watermark del primary
-		// ni bloquea su Distill. Retorna el ultimo EntryId escrito (0 si nada). NO
-		// rehidrata — eso lo hace el caller (CatchUpFromJournal).
+		// Shadow Replay. Copies raw records from the primary (afterEntryId exclusive;
+		// toEntryIdCap inclusive, 0 => no cap) to the shadow's OWN storage via the
+		// structured API — V1 (Script) and V2 (Define + Invocation) uniform, preserving
+		// EntryId / OccurredAt / ExposeData and the V2 data (DefineStatementText +
+		// Arguments that the MaterializationRecord already carries). Unregistered reader: it does NOT
+		// go through Materialization.Register, so it does not participate in the primary's watermark
+		// nor block its Distill. Returns the last EntryId written (0 if nothing). It does NOT
+		// rehydrate — the caller does that (CatchUpFromJournal).
 		private long CopyPrimaryRecordsToShadow(long afterEntryId, long toEntryIdCap)
 		{
 			List<Puppeteer.EventSourcing.DB.MaterializationRecord> records = new List<Puppeteer.EventSourcing.DB.MaterializationRecord>();
@@ -357,11 +357,11 @@ namespace Puppeteer.EventSourcing
 			return lastWritten;
 		}
 
-		// Shadow Replay — S4. Seedea el shadow desde su replay source hasta toEntryId pero
-		// con un set de EntryIds marcados como ELIDIDOS antes de rehidratar, de modo que la
-		// rehidratacion los salta (RehydrateFromEvent filtra IsEventElided). Usado por el
-		// elision-impact diff para construir el "twin elidido". Marca con reactionId
-		// sentinel 0 (la rehidratacion solo chequea presencia del EntryId, no el reactionId).
+		// Shadow Replay — S4. Seeds the shadow from its replay source up to toEntryId but
+		// with a set of EntryIds marked as ELIDED before rehydrating, so that
+		// rehydration skips them (RehydrateFromEvent filters IsEventElided). Used by the
+		// elision-impact diff to build the "elided twin". Marks with sentinel reactionId
+		// 0 (rehydration only checks presence of the EntryId, not the reactionId).
 		internal void SeedElided(long toEntryId, long[] elideEntryIds)
 		{
 			if (!IsShadow) throw new LanguageException("SeedElided is only valid on a shadow ActorHandler.");
@@ -374,9 +374,9 @@ namespace Puppeteer.EventSourcing
 			{
 				DiaryStorage storage = TryGetDiaryStorage();
 				if (storage != null && storage.EventElisionStorage != null)
-					// reactionId sentinel positivo (MarkEventsAsElided exige > 0). El twin
-					// no tiene reactions reales, asi que no colisiona; la rehidratacion solo
-					// chequea presencia del EntryId, no el reactionId.
+					// positive sentinel reactionId (MarkEventsAsElided requires > 0). The twin
+					// has no real reactions, so it does not collide; rehydration only
+					// checks presence of the EntryId, not the reactionId.
 					storage.EventElisionStorage.MarkEventsAsElided(elideEntryIds, 1, DateTime.UtcNow);
 			}
 
@@ -386,11 +386,11 @@ namespace Puppeteer.EventSourcing
 
 		internal bool IsShadowingActive => shadowingActive;
 
-		// Shadow Replay — S2. StartShadowing(): continuous mirror — un loop en background
-		// que sigue el head del primary en near-real-time (pull incremental de records
-		// nuevos + rehidratacion). Mutuamente excluyente con el fork de SyncUntil. Lossy
-		// by design (B.2): si una iteracion falla, se reintenta en la proxima. Guarded
-		// contra doble-arranque. Parar via StopShadowing() (lo llama el Dispose del Shadow).
+		// Shadow Replay — S2. StartShadowing(): continuous mirror — a background loop
+		// that follows the primary's head in near-real-time (incremental pull of new
+		// records + rehydration). Mutually exclusive with the SyncUntil fork. Lossy
+		// by design (B.2): if an iteration fails, it is retried on the next one. Guarded
+		// against double-start. Stop via StopShadowing() (called by the Shadow's Dispose).
 		internal void StartShadowing()
 		{
 			if (!IsShadow) throw new LanguageException("StartShadowing is only valid on a shadow ActorHandler. Build one via actor.Shadow(cfg) / ActorHandler.CreateShadow(cfg).");
@@ -427,8 +427,8 @@ namespace Puppeteer.EventSourcing
 				}
 				catch
 				{
-					// Lossy by design: una falla transitoria no detiene el mirror;
-					// la proxima iteracion reintenta desde this.EntryId.
+					// Lossy by design: a transient failure does not stop the mirror;
+					// the next iteration retries from this.EntryId.
 				}
 
 				if (shadowingActive)
@@ -436,12 +436,12 @@ namespace Puppeteer.EventSourcing
 			}
 		}
 
-		// Shadow Replay — S1. TTL kill-all del storage del shadow. Solo aplica a un
-		// handler shadow (IsShadow). Para el backend InMemory limpia la lista de
-		// eventos compartida del actor shadow (su nombre es unico, no toca al primary).
-		// Para FileSystem/SQL el borrado fisico del schema/PVC es responsabilidad del
-		// host/operador (S6 K8s) — aqui es un no-op silencioso (no se borra una DB de
-		// produccion por accidente). Idempotente.
+		// Shadow Replay — S1. TTL kill-all of the shadow's storage. Applies only to a
+		// shadow handler (IsShadow). For the InMemory backend it clears the shadow
+		// actor's shared event list (its name is unique, it does not touch the primary).
+		// For FileSystem/SQL, physical deletion of the schema/PVC is the
+		// host/operator's responsibility (S6 K8s) — here it is a silent no-op (a
+		// production DB is not deleted by accident). Idempotent.
 		internal void TryClearShadowStorage()
 		{
 			if (!IsShadow) return;
@@ -637,22 +637,28 @@ namespace Puppeteer.EventSourcing
 
 		internal Reactions Reactions => reactions;
 
-		// Paper 5 / Materialize v2 — Fase 0. Sub-namespace para administrar destinations
-		// del actor. La instancia se materializa lazy en el primer acceso; el storage
-		// concreto se obtiene del Diary via TryGetMaterializationCheckpointStorage()
-		// y por ende requiere EventSourcingStorage configurado primero (consistente con
-		// como Reactions necesita SetDairyStorage tras EventSourcingStorage).
+		// Paper 5 / Materialize v2 — Phase 0. Sub-namespace to administer the actor's
+		// destinations. The instance is materialized lazily on first access; the
+		// concrete storage is obtained from the Diary via TryGetMaterializationCheckpointStorage()
+		// and therefore requires EventSourcingStorage configured first (consistent with
+		// how Reactions needs SetDairyStorage after EventSourcingStorage).
 		private Materialization materialization;
 		internal Materialization Materialization => materialization ??= new Materialization(this);
+
+		// Journal-outbox emit — delivery side. Lazy like Materialization; resolves
+		// the diary's OutboxStorage through TryGetDiaryStorage, so it needs
+		// EventSourcingStorage configured first. See notes/reactions-outbox-emit.md.
+		private OutboxRelay outboxRelay;
+		internal OutboxRelay OutboxRelay => outboxRelay ??= new OutboxRelay(this);
 
 		internal Puppeteer.EventSourcing.DB.MaterializationCheckpointStorage TryGetMaterializationCheckpointStorage()
 		{
 			return dairy?.Storage?.MaterializationCheckpointStorage;
 		}
 
-		// Fase 2 — Materialize v2 wire verb (a) EnviameDesde. Materialization.cs accede
-		// al DiaryStorage para enumerar records raw del journal sin pasar por la API
-		// publica de rehidratacion (que filtra elididos).
+		// Phase 2 — Materialize v2 wire verb (a) EnviameDesde. Materialization.cs accesses
+		// the DiaryStorage to enumerate raw journal records without going through the
+		// public rehydration API (which filters elided ones).
 		internal Puppeteer.EventSourcing.DB.DiaryStorage TryGetDiaryStorage()
 		{
 			return dairy?.Storage;
@@ -687,14 +693,14 @@ namespace Puppeteer.EventSourcing
 
 		}
 
-		// Configure storage SIN rehidratacion. Util para IActorIntrospection: el CLI
-		// quiere leer entries crudos de un journal cualquiera sin necesitar las
-		// LibraryAssemblies del dominio (que pueden no estar disponibles en el
-		// binario puppeteer-cli generico). Solo habilita los paths de lectura raw
-		// (ReadRecordsAfter); invocacion / rehidratacion / reactions quedan
-		// inactivos. Si se intenta usar Perform / Tell / Reactions sobre un actor
-		// configurado por aqui, fallaran porque el symbol table esta vacio y las
-		// libraries no fueron cargadas.
+		// Configure storage WITHOUT rehydration. Useful for IActorIntrospection: the CLI
+		// wants to read raw entries from any journal without needing the domain's
+		// LibraryAssemblies (which may not be available in the
+		// generic puppeteer-cli binary). It only enables the raw read paths
+		// (ReadRecordsAfter); invocation / rehydration / reactions stay
+		// inactive. If one tries to use Perform / Tell / Reactions on an actor
+		// configured through here, they will fail because the symbol table is empty and the
+		// libraries were not loaded.
 		internal void ConfigureStorageForIntrospection(DatabaseType dbType, string connection)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(connection);
@@ -719,12 +725,10 @@ namespace Puppeteer.EventSourcing
 		private BlockingCollection<EventData> eventsQueue;
 		private long EventSourcingStorage(Diary dairy)
 		{
-			// Validacion defensiva: una NRE silenciosa originada aqui es muy dificil de
-			// diagnosticar (sin mensaje, stack solo apunta a este metodo). Si en algun
-			// path llegamos con dairy o un colaborador requerido en null, queremos un
-			// LanguageException explicito que diga que pieza falto. Reportado por
-			// LiquidityAPI sobre 2.0.1-beta.9553 (BUG_EventSourcingStorage_NRE_9553_LiquidityAPI.md
-			// §9.2).
+			// Defensive validation: a silent NRE originating here is very hard to
+			// diagnose (no message, the stack only points to this method). If on some
+			// path we arrive with dairy or a required collaborator null, we want an
+			// explicit LanguageException stating which piece was missing.
 			if (dairy == null) throw new LanguageException("Diary backend not initialized. EventSourcingStorage(Diary) was invoked with a null Diary. The caller path constructs the Diary in EventSourcingStorage(DatabaseType, string, string); if you see this, that construction silently returned null — likely a regression in the storage backend factory.");
 			if (libraries == null) throw new LanguageException("DomainLibraries is null. The ActorHandler constructor populates 'libraries' via DomainLibraries.GetOrLoad(LibraryAssemblies); if you see this, the loader returned null — likely a regression in the library-loading path.");
 			if (symbolTable == null) throw new LanguageException("SymbolTable is null. The ActorHandler constructor populates 'symbolTable' inline; if you see this, the field was never assigned — instance is corrupt and cannot start.");
@@ -750,33 +754,33 @@ namespace Puppeteer.EventSourcing
 
 				currentTransition = ActorTransitions.Recovering;
 
-				// Pipeline de rehidratacion (3 etapas): RehydrateFromEvent -> eventsQueue ->
+				// Rehydration pipeline (3 stages): RehydrateFromEvent -> eventsQueue ->
 				// parser -> parsedQueue -> resolver -> preparedQueue -> exec.
-				// Cada task envuelve su foreach en try/finally para garantizar CompleteAdding
-				// sobre la queue de output (y la de entry) incluso si lanza excepcion.
-				// Sin esto, una excepcion en cualquier etapa dejaria los workers downstream bloqueados
-				// indefinidamente en GetConsumingEnumerable() y Task.WaitAll nunca retornaria.
+				// Each task wraps its foreach in try/finally to guarantee CompleteAdding
+				// on the output queue (and the input one) even if it throws.
+				// Without this, an exception in any stage would leave the downstream workers blocked
+				// indefinitely in GetConsumingEnumerable() and Task.WaitAll would never return.
 				//
-				// Antes habia una etapa extra (preparer + collector) donde el parse corria en un
-				// Task.Run que se await-eaba de inmediato. Como GenerateAndRentProgram usa un unico
-				// parserForRecovering, eso NO paralelizaba el parse: solo agregaba una asignacion de
-				// Task + dos saltos de thread-pool + un handoff de cola (programTaskQueue) por entry.
-				// Se fusiono en una sola etapa de parseo sincrona; el solapamiento parse||resolve||exec
-				// lo siguen dando las queues y los Task.Run de cada etapa.
+				// There used to be an extra stage (preparer + collector) where the parse ran in a
+				// Task.Run that was awaited immediately. Since GenerateAndRentProgram uses a single
+				// parserForRecovering, that did NOT parallelize the parse: it only added a Task
+				// allocation + two thread-pool hops + a queue handoff (programTaskQueue) per entry.
+				// It was fused into a single synchronous parse stage; the parse||resolve||exec overlap
+				// is still provided by the queues and the Task.Run of each stage.
 				//
-				// Rehidratacion permisiva (firmado 2026-05-19, post-mortem reporte 9553):
-				// si un record individual falla en cualquier stage (parser, resolver, executor),
-				// el error se loguea via IPuppeteerLogger.Error con entryId + script + exception
-				// y la rehidratacion SIGUE con el siguiente record. Este es el contrato del
-				// Puppeteer anterior (Dairy.cs:508-535) que se perdio en el
-				// refactor del pipeline multi-stage; el consumidor que se migra esperaba este
-				// comportamiento. Si el host quiere ser estricto (abortar al primer error),
-				// inyecta un IPuppeteerLogger custom que throw-ee en Error -- los catches lo
-				// dejan escapar como faulted Task y Task.WaitAll lo propaga.
+				// Permissive rehydration (signed 2026-05-19):
+				// if an individual record fails in any stage (parser, resolver, executor),
+				// the error is logged via IPuppeteerLogger.Error with entryId + script + exception
+				// and rehydration CONTINUES with the next record. This is the contract of the
+				// previous Puppeteer (Dairy.cs:508-535) that was lost in the
+				// multi-stage pipeline refactor; the consumer being migrated expected this
+				// behaviour. If the host wants to be strict (abort on the first error),
+				// it injects a custom IPuppeteerLogger that throws on Error -- the catches
+				// let it escape as a faulted Task and Task.WaitAll propagates it.
 				bool stageTiming = LabInstrumentation.StageTimingEnabled;
-				// Snapshot de ticks acumulados ANTES de esta rehidratacion: los acumuladores de
-				// LabInstrumentation son estaticos/globales (suman todos los actores), asi que el
-				// print del final reporta el DELTA de esta corrida, no el acumulado del proceso.
+				// Snapshot of accumulated ticks BEFORE this rehydration: the LabInstrumentation
+				// accumulators are static/global (they sum across all actors), so the
+				// final print reports the DELTA of this run, not the process accumulated total.
 				long parseTicksBefore = LabInstrumentation.ParseTicks;
 				long resolveTicksBefore = LabInstrumentation.ResolveTicks;
 				long executeTicksBefore = LabInstrumentation.ExecuteTicks;
@@ -798,9 +802,9 @@ namespace Puppeteer.EventSourcing
 								long parseT0 = stageTiming ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 								Program rentedProgram = GenerateAndRentProgram(retornableEventData);
 								if (stageTiming) LabInstrumentation.AddParseTicks(System.Diagnostics.Stopwatch.GetTimestamp() - parseT0);
-								// GenerateAndRentProgram retorna null para Invocations huerfanas
-								// (cache miss del actionId), camino inalcanzable post-Fase-4 por
-								// construccion; se omite en silencio.
+								// GenerateAndRentProgram returns null for orphan Invocations
+								// (actionId cache miss), an unreachable path post-Phase-4 by
+								// construction; it is silently skipped.
 								if (rentedProgram != null)
 								{
 									parsedQueue.Add(rentedProgram);
@@ -808,22 +812,22 @@ namespace Puppeteer.EventSourcing
 							}
 							catch (Exception ex)
 							{
-								// El tipo + mensaje del inner exception se intercala en el
-								// message porque algunos hosts (p.ej. ASP.NET con loggers
-								// que no encadenan ex.ToString()) descartan la segunda linea
-								// que el ConsoleLogger.Error escribe via WriteLine(exception).
-								// Sin esto el consumidor solo ve "Rehydration parser failed"
-								// sin pista de que fallo realmente.
+								// The inner exception's type + message is interleaved into the
+								// message because some hosts (e.g. ASP.NET with loggers
+								// that do not chain ex.ToString()) discard the second line
+								// that ConsoleLogger.Error writes via WriteLine(exception).
+								// Without this the consumer only sees "Rehydration parser failed"
+								// with no clue about what actually failed.
 								Logger.Error(
 									$"Rehydration parser failed. EntryId={parserEntryId}, OccurredAt={parserOccurredAt:O}, Cause={ex.GetType().FullName}: {ex.Message}, Script:\n{parserScript ?? "<action invocation>"}",
 									ex);
 							}
 							finally
 							{
-								// El EventData ya no se necesita: GenerateAndRentProgram copio
-								// EntryId/OccurredAt/Arguments al Program y este no retiene el
-								// EventData. Se devuelve al pool exactamente una vez, en exito o
-								// error (antes lo hacia el collector tras el await).
+								// The EventData is no longer needed: GenerateAndRentProgram copied
+								// EntryId/OccurredAt/Arguments into the Program and the latter does not retain the
+								// EventData. It is returned to the pool exactly once, on success or
+								// error (previously the collector did this after the await).
 								retornableEventData.ReturnToEventDataPool();
 							}
 						}
@@ -847,19 +851,19 @@ namespace Puppeteer.EventSourcing
 							{
 								long resolveT0 = stageTiming ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 								if (!actionCommands.ContainsAction(rentedProgram.Script))
-									// Rehidratacion = replay de eventos que YA fueron validados estaticamente
-									// cuando se ejecutaron en vivo (el path de escritura valida). Re-validarlos
-									// aqui es redundante por definicion — solo encontraria errores que ya se
-									// habrian encontrado al escribirlos — y agrega CPU que contiende con la
-									// etapa de ejecucion (la rehidratacion es CPU-bound). El Puppeteer viejo
-									// 100% interpretado NO validaba en replay (resolvia lazy en ejecucion) y
-									// rehidrataba mas rapido. Se mantiene SolveIdReferences (el binding, que la
-									// ejecucion necesita y la version vieja tambien hacia).
+									// Rehydration = replay of events that were ALREADY statically validated
+									// when they ran live (the write path validates). Re-validating them
+									// here is redundant by definition — it would only find errors that would
+									// already have been found when writing them — and it adds CPU that contends with the
+									// execution stage (rehydration is CPU-bound). The old 100%-interpreted
+									// Puppeteer did NOT validate on replay (it resolved lazily at execution) and
+									// rehydrated faster. SolveIdReferences is kept (the binding, which
+									// execution needs and the old version also did).
 									//
-									// withStaticValidation se ata a HasEval: ValidateStatically solo tiene un
-									// efecto necesario (no-validacion) en su rama eval, donde propaga tipos de
-									// globals para resolucion cross-entry. Sin evals (todo el journal) se salta
-									// la validacion completa; con evals (raro) se conserva esa propagacion.
+									// withStaticValidation is tied to HasEval: ValidateStatically only has a
+									// necessary effect (non-validation) in its eval branch, where it propagates
+									// types of globals for cross-entry resolution. Without evals (the whole journal) the
+									// full validation is skipped; with evals (rare) that propagation is preserved.
 									rentedProgram.SolveReferences(rentedProgram.Parameters, withStaticValidation: rentedProgram.HasEval);
 								if (stageTiming) LabInstrumentation.AddResolveTicks(System.Diagnostics.Stopwatch.GetTimestamp() - resolveT0);
 
@@ -867,14 +871,12 @@ namespace Puppeteer.EventSourcing
 							}
 							catch (Exception ex)
 							{
-								// Inner exception intercalado en el message — ver
-								// comentario equivalente en el preparerTask. Pedido
-								// explicito de LiquidityAPI en el reporte
-								// BUG_RehydrationStaticValidation_LiquidityUpgrader: la
-								// segunda linea que escribe ConsoleLogger.Error
-								// (WriteLine(exception)) no llega al stdout del host en
-								// algunos consumidores y el equipo queda sin pista del
-								// LanguageException que ValidateStatically esta lanzando.
+								// Inner exception interleaved into the message — see the
+								// equivalent comment in the preparerTask. The second
+								// line that ConsoleLogger.Error writes
+								// (WriteLine(exception)) does not reach the host's stdout in
+								// some consumers, leaving the team with no clue about the
+								// LanguageException that ValidateStatically is throwing.
 								Logger.Error(
 									$"Rehydration resolver failed (static validation). EntryId={resolverEntryId}, Cause={ex.GetType().FullName}: {ex.Message}, Script:\n{resolverScript}",
 									ex);
@@ -909,10 +911,10 @@ namespace Puppeteer.EventSourcing
 							}
 							catch (Exception ex)
 							{
-								// Inner exception intercalado — misma razon que en
-								// preparerTask/resolverTask: el consumidor pierde la
-								// segunda linea de ConsoleLogger.Error en hosts sin
-								// captura de WriteLine(exception).
+								// Inner exception interleaved — same reason as in
+								// preparerTask/resolverTask: the consumer loses the
+								// second line of ConsoleLogger.Error on hosts without
+								// WriteLine(exception) capture.
 								Logger.Error(
 									$"Rehydration execution failed. EntryId={execEntryId}, Cause={ex.GetType().FullName}: {ex.Message}, Script:\n{execScript}",
 									ex);
@@ -924,8 +926,8 @@ namespace Puppeteer.EventSourcing
 								// Paper 5 Lab 1: counts events applied during the bulk
 								// replay of EventSourcingStorage (initial Start path).
 								// ReplayPendingEventsForRedBlack covers the handover tail.
-								// Solo contamos events ejecutados correctamente — un error
-								// permisivo NO cuenta como "applied".
+								// We only count successfully executed events — a permissive
+								// error does NOT count as "applied".
 								LabInstrumentation.IncrementReplayEventsCounted();
 								LabInstrumentation.OnReplayEventCounted?.Invoke(execEntryId);
 							}
@@ -978,12 +980,12 @@ namespace Puppeteer.EventSourcing
 
 				if (producerException != null) throw producerException;
 
-				// Desglose de tiempo por etapa de ESTA rehidratacion. El pipeline corre las 3
-				// etapas concurrentes, asi que el wall-clock ~= max(etapa) + fill/drain: la etapa
-				// con mas ms es el cuello de botella y decide donde rinde la siguiente mejora
-				// (parse -> parallel parse; resolve -> coleccion-durante-parse; exec -> piso serial,
-				// la palanca es el cache estructural o abaratar el interprete). Se imprime solo con
-				// StageTimingEnabled (o PUPPETEER_STAGE_TIMING=1).
+				// Per-stage time breakdown of THIS rehydration. The pipeline runs the 3
+				// stages concurrently, so wall-clock ~= max(stage) + fill/drain: the stage
+				// with the most ms is the bottleneck and decides where the next improvement pays off
+				// (parse -> parallel parse; resolve -> collection-during-parse; exec -> serial floor,
+				// the lever is the structural cache or making the interpreter cheaper). Printed only with
+				// StageTimingEnabled (or PUPPETEER_STAGE_TIMING=1).
 				if (stageTiming)
 				{
 					double freq = System.Diagnostics.Stopwatch.Frequency;
@@ -1050,7 +1052,7 @@ namespace Puppeteer.EventSourcing
 		// ActionDefinition-message replication that depended on the lateral
 		// _ACTION table being populated. Post-cutover, replication propagates
 		// Define + Invocation entries via OnRecordWritten → CueEvent per record
-		// (firmado: cross-stage atomicity is unnecessary because the director's
+		// (signed: cross-stage atomicity is unnecessary because the director's
 		// journal already persisted the pair transactionally).
 
 		internal void WriteRawRecord(byte[] record, long entryId)
@@ -1101,9 +1103,9 @@ namespace Puppeteer.EventSourcing
 						// running the same writes live. B.3.3 returns a
 						// PromotionResult here only if the counter tipped AND the
 						// candidate is not yet in the index — we DISCARD it during
-						// rehydration because per Alvaro's signed clarification
-						// "no cambia nada: solo a partir de la siguiente
-						// PerformCommand que se escriba aparece el Define". Replay
+						// rehydration because (signed clarification) nothing
+						// changes: the Define only appears from the next
+						// PerformCommand that is written onwards. Replay
 						// must not write new journal entries; the in-memory
 						// materialization (actionCommands + index update) is left
 						// in place since it is naturally re-derivable from the
@@ -1132,12 +1134,12 @@ namespace Puppeteer.EventSourcing
 						throw new LanguageException($"Unsupported event data type: {eventData.GetType().Name}");
 				}
 
-				// Now es un parametro de SISTEMA excluido del journal; en rehidratacion se
-				// re-inyecta desde el OccurredAt journaleado (determinista, no wall-clock).
-				// Aplica a Script (V1, re-parseado) y Action (V2, reconstruida del define
-				// que ya excluye Now). Se inyecta ANTES de SolveReferences/Perform: en el
-				// primer Perform, ExecuteExpression llama SolveReferences(program.Parameters)
-				// y asi @Now resuelve como parametro.
+				// Now is a SYSTEM parameter excluded from the journal; on rehydration it is
+				// re-injected from the journaled OccurredAt (deterministic, not wall-clock).
+				// Applies to Script (V1, re-parsed) and Action (V2, reconstructed from the define
+				// that already excludes Now). It is injected BEFORE SolveReferences/Perform: on the
+				// first Perform, ExecuteExpression calls SolveReferences(program.Parameters)
+				// so @Now resolves as a parameter.
 				program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
 
 				if (!actionCommands.ContainsAction(program.Script))
@@ -1209,14 +1211,13 @@ namespace Puppeteer.EventSourcing
 
 					program = parserForRecovering.Rehydrate();
 
-					// Simetria con PrepareCommandProgram (ActorHandler.cs:1209): el path
-					// vivo siempre llama SetContextInfo() despues de parsear para que
-					// cada Statement tenga su Program backref. Lo replicamos aqui despues
-					// de Rehydrate() para que el program rehidratado sea estructural-
-					// mente identico al recien parseado y los visitors que se apoyen en
-					// statement.Program (hoy EvalStatement) no caigan silenciosos durante
-					// la rehidratacion. Reportado en
-					// BUG_RehydrationStaticValidation_LiquidityUpgrader_LiquidityAPI §4.bis.a.
+					// Symmetry with PrepareCommandProgram (ActorHandler.cs:1209): the
+					// live path always calls SetContextInfo() after parsing so that
+					// each Statement has its Program backref. We replicate it here after
+					// Rehydrate() so the rehydrated program is structurally
+					// identical to the freshly-parsed one and the visitors that rely on
+					// statement.Program (today EvalStatement) do not fail silently during
+					// rehydration.
 					program.SetContextInfo();
 
 					program.Parameters = ParametersPool.Rent();
@@ -1251,11 +1252,11 @@ namespace Puppeteer.EventSourcing
 					throw new LanguageException($"Unsupported event data type: {eventData.GetType().Name}");
 			}
 
-			// Now es un parametro de SISTEMA excluido del journal; se re-inyecta desde el
-			// OccurredAt journaleado para Script (V1) y Action (V2). Viaja en program.Parameters
-			// hasta la etapa de ejecucion del pipeline de rehidratacion, donde el primer
-			// Perform corre ExecuteExpression -> SolveReferences(program.Parameters) y @Now
-			// resuelve como parametro.
+			// Now is a SYSTEM parameter excluded from the journal; it is re-injected from the
+			// journaled OccurredAt for Script (V1) and Action (V2). It travels in program.Parameters
+			// up to the execution stage of the rehydration pipeline, where the first
+			// Perform runs ExecuteExpression -> SolveReferences(program.Parameters) and @Now
+			// resolves as a parameter.
 			program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
 
 			program.EntryId = eventData.EntryId;
@@ -1370,11 +1371,11 @@ namespace Puppeteer.EventSourcing
 		}
 
 
-		// Playbill final refactor: V1 entry path. La firma (ip, user) sobrevive por compat
-		// con StageHook.PerformCmd(script) pero los valores se ignoran — ip/user dejaron de
-		// viajar como parametros del script. La inyeccion de Now (V1 backward compat) la hace
-		// el overload PerformCmd(script, parameters, now) tras PrepareCommandProgram para no
-		// alterar la decision IsScript/IsNewAction.
+		// Playbill final refactor: V1 entry path. The (ip, user) signature survives for compat
+		// with StageHook.PerformCmd(script) but the values are ignored — ip/user no longer
+		// travel as script parameters. The Now injection (V1 backward compat) is done by
+		// the PerformCmd(script, parameters, now) overload after PrepareCommandProgram so as not to
+		// alter the IsScript/IsNewAction decision.
 		internal string PerformCmd(string script, string ip, string user)
 		{
 			Parameters parameters = ParametersPool.Rent();
@@ -1396,9 +1397,9 @@ namespace Puppeteer.EventSourcing
 
 		internal static readonly Parameters EMPTY_PARAMETERS = EmptyParameters();
 
-		// Fase 4.5 + Playbill final refactor: EMPTY_PARAMETERS ya no precarga ip/user
-		// (eliminados del journal) ni Now (ya no es system param — solo V1 entry path
-		// lo inyecta via indexer; V2 declara Now explicito si el script lo necesita).
+		// Phase 4.5 + Playbill final refactor: EMPTY_PARAMETERS no longer preloads ip/user
+		// (removed from the journal) nor Now (no longer a system param — only the V1 entry path
+		// injects it via the indexer; V2 declares Now explicitly if the script needs it).
 		private static Parameters EmptyParameters()
 		{
 			Parameters parameters = new Parameters();
@@ -1444,7 +1445,7 @@ namespace Puppeteer.EventSourcing
 		// the body (not the wrapper), the same shape the live cache stores.
 		//
 		// Cache key: the canonical body text (= program.ConvertToString of the body
-		// statements). Q1 = (a) firmado at start of Phase 4: post-replay, a write
+		// statements). Q1 = (a) signed at start of Phase 4: post-replay, a write
 		// path that re-encounters the same logical body re-resolves to this cached
 		// entry (by canonicalising its parsed program before lookup).
 		void IActorEventJournalClient.AddKnownActionFromDefine(int actionId, string defineStatementText)
@@ -1489,9 +1490,9 @@ namespace Puppeteer.EventSourcing
 			string parametersDeclarationText = Parameters.CanonicalDeclarationsToParametersString(defineStmt.ParametersText);
 			if (!string.IsNullOrEmpty(parametersDeclarationText))
 			{
-				// Se pasan las DomainLibraries para que un @parametro tipado como enum del
-				// dominio (journalizado por nombre de tipo) se resuelva al reconstruir los
-				// Parameters desde texto; sin esto el parser interno solo aceptaria primitivos.
+				// DomainLibraries are passed so that an @parameter typed as a domain
+				// enum (journaled by type name) resolves when reconstructing the
+				// Parameters from text; without this the internal parser would only accept primitives.
 				bodyProgram.Parameters = new Parameters(parametersDeclarationText, libraries);
 			}
 
@@ -1533,24 +1534,24 @@ namespace Puppeteer.EventSourcing
 			}
 		}
 
-		// Instancia reutilizable para PerformCmd sync: es seguro porque PerformCmd se ejecuta bajo write lock (un solo thread a la vez).
-		// No aplica para PerformCmdAsync que tiene sus propias variables locales.
+		// Reusable instance for sync PerformCmd: it is safe because PerformCmd runs under the write lock (a single thread at a time).
+		// Does not apply to PerformCmdAsync, which has its own local variables.
 		private readonly CommandPrepared _reusableCommandPrepared = new CommandPrepared();
 
-		// Modelo de compilacion y cache para Commands (PerformCmd):
+		// Compilation and cache model for Commands (PerformCmd):
 		//
-		// Un script funciona como F(x1,x2,...,xn). La primera vez se parsea, se resuelven todas las referencias
-		// (SolveReferences: LValues, RValues, variables globales, parameters) y se cachea el Program compilado.
-		// En invocaciones subsiguientes, el lambda F compilado se reutiliza; solo se rebindean los parameters
-		// (SolveParameters) con la nueva instance de values.
+		// A script behaves as F(x1,x2,...,xn). The first time it is parsed, all references are resolved
+		// (SolveReferences: LValues, RValues, global variables, parameters) and the compiled Program is cached.
+		// On subsequent invocations, the compiled lambda F is reused; only the parameters are rebound
+		// (SolveParameters) with the new values instance.
 		//
-		// Cache: actionCommands (por script string).
-		// - Sin parameters de user: modo interpretado, NO se cachea, se persiste como Script en el journal.
-		// - Con parameters de user: modo compilado, SE cachea con ActionId, se persiste como Action en el journal.
+		// Cache: actionCommands (by script string).
+		// - Without user parameters: interpreted mode, NOT cached, persisted as a Script in the journal.
+		// - With user parameters: compiled mode, IS cached with an ActionId, persisted as an Action in the journal.
 		//
-		// PerformCmd es secuencial (write lock), asi que el mismo Program cacheado puede ser reutilizado
-		// sin riesgo de concurrencia. Esto difiere de PerformQry/PerformChk/PerformEmit que usan read lock
-		// y pueden ejecutarse en paralelo (ver documentacion en esos methods).
+		// PerformCmd is sequential (write lock), so the same cached Program can be reused
+		// without concurrency risk. This differs from PerformQry/PerformChk/PerformEmit, which use a read lock
+		// and can run in parallel (see documentation in those methods).
 		private void PrepareCommandProgram(string script, Parameters parameters, CommandPrepared commandPrepared)
 		{
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
@@ -1561,7 +1562,7 @@ namespace Puppeteer.EventSourcing
 
 			if (!actionCommands.TryGetValue(script, out commandPrepared.CacheEntry))
 			{
-				// CACHE MISS: primera vez que se ve este script.
+				// CACHE MISS: first time this script is seen.
 				Parser parser = ParsersPool.Rent();
 
 				parser.SetSource(script);
@@ -1571,8 +1572,8 @@ namespace Puppeteer.EventSourcing
 
 				commandPrepared.Program.SetContextInfo();
 
-				// HasAnyUserParameter excluye el Now de sistema: la clasificacion solo
-				// depende de los parametros de usuario (ver Parameters.HasAnyUserParameter).
+				// HasAnyUserParameter excludes the system Now: the classification only
+				// depends on the user parameters (see Parameters.HasAnyUserParameter).
 				if (parameters == EMPTY_PARAMETERS || !parameters.HasAnyUserParameter())
 				{
 					// Sin parameters de user: would be a V1 Script unless the
@@ -1601,31 +1602,31 @@ namespace Puppeteer.EventSourcing
 				}
 				else
 				{
-					// Con parameters de user: modo compilado, se cachea con ActionId.
-					// Se serializa como Action (ActionId + arguments) en el journal.
+					// With user parameters: compiled mode, cached with an ActionId.
+					// Serialized as an Action (ActionId + arguments) in the journal.
 					commandPrepared.Entry = JournalEntry.IsNewAction;
 					var nextActionId = this.TakeAndIncrementActionId();
 					commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
 					commandPrepared.CacheEntry = actionCommands.Add(nextActionId, script, commandPrepared.Program);
 					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
 				}
-				// En cache miss siempre se necesita SolveReferences para resolver la estructura completa
-				// del program (LValues, RValues, variables globales, parameters).
+				// On a cache miss, SolveReferences is always needed to resolve the program's full
+				// structure (LValues, RValues, global variables, parameters).
 				commandPrepared.NeedsToSolveReferences = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
-				// CACHE HIT: el Program ya fue parseado, compilado y sus referencias resueltas.
-				// Solo se necesita rebindear los parameters con los nuevos values (SolveParameters).
+				// CACHE HIT: the Program was already parsed, compiled and its references resolved.
+				// Only the parameters need to be rebound with the new values (SolveParameters).
 				commandPrepared.Entry = JournalEntry.IsExistingAction;
 				commandPrepared.Program = (Program)commandPrepared.CacheEntry.Program;
 				commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 		}
 
-		// Ejecuta el program ya preparado bajo write lock.
-		// Flujo: LoadArguments -> SolveReferences/SolveParameters -> Perform -> persistir al journal.
-		// writeNewEntry es false durante rehidratacion (RecoveringState) para no re-persistir eventos.
+		// Executes the already-prepared program under the write lock.
+		// Flow: LoadArguments -> SolveReferences/SolveParameters -> Perform -> persist to the journal.
+		// writeNewEntry is false during rehydration (RecoveringState) so events are not re-persisted.
 		private string ExecuteCommandWithWriteLock(CommandPrepared commandPrepared, Parameters parameters, DateTime now, string Ip, string User)
 		{
 			if (commandPrepared == null) throw new ArgumentNullException(nameof(commandPrepared));
@@ -1633,15 +1634,15 @@ namespace Puppeteer.EventSourcing
 
 			string result = null;
 			bool executionError = false;
-			// SuppressReactionJournaling (modo follower, Etapa 2): permite que el
-			// script ejecute en write-lock (TellStatement.Execute construye el
-			// envelope y lo enqueua) pero NO escribe al journal canonico, asi se
-			// preserva el invariante 1-escritor. El drain de PendingTells despues
-			// del lock release despacha el envelope via Transport igual que en
-			// el primary. El gate solo aplica DENTRO de un .Do(...) Action de
-			// Reaction (InReactionAction == true) — PerformCmd directos del usuario
-			// (en produccion no llegan al follower porque el gate esta cerrado,
-			// pero los tests pueden invocarlos) journalizan normal. Cross-ref:
+			// SuppressReactionJournaling (follower mode, Stage 2): lets the
+			// script execute under the write-lock (TellStatement.Execute builds the
+			// envelope and enqueues it) but does NOT write to the canonical journal, so the
+			// 1-writer invariant is preserved. The PendingTells drain after
+			// the lock release dispatches the envelope via Transport just like on
+			// the primary. The gate only applies INSIDE a Reaction's .Do(...) Action
+			// (InReactionAction == true) — direct user PerformCmds
+			// (in production they never reach the follower because the gate is closed,
+			// but tests can invoke them) journal normally. Cross-ref:
 			// project_follower_materialize_roles.md.
 			bool writeNewEntry = dairy != null && !symbolTable.RecoveringState
 				&& !(SuppressReactionJournaling && InReactionAction);
@@ -1697,17 +1698,17 @@ namespace Puppeteer.EventSourcing
 
 				result = Perform(commandPrepared.Program, effectiveParameters);
 
-				// Eval determinism: el snapshot del dairy se tomo en PrepareCommand
-				// ANTES de Perform, cuando EvalStatement.forDairy aun era null — por
-				// eso renderizaba la forma LITERAL `Eval(<expr>);` (no deterministica
-				// en replay porque re-evalua una expresion que depende de estado de
-				// runtime). Re-renderizamos aqui, ya ejecutado el programa: cada Eval
-				// ejecutado tiene su forDairy poblado con la asignacion EVALUADA (e.g.
-				// `available = 5;`), asi el journal queda deterministico. Un Eval que
-				// no se ejecuto (condicional/rama no tomada) conserva forDairy==null y
-				// sigue renderizando el literal, que es lo correcto: el replay lo
-				// re-evalua en su mismo contexto. Gated en HasEval para no pagar el
-				// ConvertToString doble en scripts sin Eval.
+				// Eval determinism: the dairy snapshot was taken in PrepareCommand
+				// BEFORE Perform, when EvalStatement.forDairy was still null — that
+				// is why it rendered the LITERAL form `Eval(<expr>);` (not deterministic
+				// on replay because it re-evaluates an expression that depends on
+				// runtime state). We re-render here, with the program already executed: each executed
+				// Eval has its forDairy populated with the EVALUATED assignment (e.g.
+				// `available = 5;`), so the journal stays deterministic. An Eval that
+				// did not execute (conditional/branch not taken) keeps forDairy==null and
+				// still renders the literal, which is correct: replay
+				// re-evaluates it in its own context. Gated on HasEval so as not to pay the
+				// double ConvertToString on scripts without Eval.
 				if (commandPrepared.Program.HasEval)
 				{
 					commandPrepared.Program.InvalidateDairyRenderCache();
@@ -1809,11 +1810,11 @@ namespace Puppeteer.EventSourcing
 					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(dairy.DatabaseType);
 					if (!String.IsNullOrWhiteSpace(commandPrepared.FormatedScriptForDairy))
 					{
-						// El script se persiste INTEGRO en el journal (sin tag de error). La
-						// informacion del fallo vive en el sink de IPuppeteerLogger.Error y
-						// puede llegar al host via inyeccion de logger custom (Serilog/MEL/
-						// NLog/bridge-a-email). Asi el journal es un registro fidedigno de los
-						// comandos intentados, no un canal de transporte de metadata de errores.
+						// The script is persisted WHOLE in the journal (without an error tag). The
+						// failure information lives in the IPuppeteerLogger.Error sink and
+						// can reach the host via custom logger injection (Serilog/MEL/
+						// NLog/bridge-to-email). This way the journal is a faithful record of the
+						// attempted commands, not a transport channel for error metadata.
 						Logger.Error(
 							$"Script execution failed at write-time. EntryId={nextEntryId}, OccurredAt={now:O}, Script:\n{commandPrepared.FormatedScriptForDairy}",
 							executionEx);
@@ -1821,12 +1822,12 @@ namespace Puppeteer.EventSourcing
 					}
 				}
 				if (executionError) throw;
-				// executionError == false: la ejecucion EN MEMORIA ya tuvo exito y el fallo
-				// ocurrio journalizando el comando (p.ej. serializar argumentos/firma). La
-				// memoria avanzo pero el diario no -> en replay el comando desaparece (perdida
-				// silenciosa). Un comando ejecutado-pero-no-persistido es estado corrupto: se
-				// propaga, nunca se traga. (No hay backup util aqui: el script ya se ejecuto y
-				// el WriteScriptEntry de respaldo solo aplica a fallos de EJECUCION.)
+				// executionError == false: the IN-MEMORY execution already succeeded and the failure
+				// occurred while journaling the command (e.g. serializing arguments/signature).
+				// Memory advanced but the diary did not -> on replay the command disappears (silent
+				// loss). A command executed-but-not-persisted is corrupt state: it is
+				// propagated, never swallowed. (There is no useful backup here: the script already executed and
+				// the fallback WriteScriptEntry only applies to EXECUTION failures.)
 				commandLineError = commandPrepared.Program.GetCommandErrorLine();
 				throw;
 			}
@@ -1855,10 +1856,10 @@ namespace Puppeteer.EventSourcing
 			return PerformCmd(script, parameters, DateTime.Now);
 		}
 
-		// PerformCmd (sync): ejecuta un source contra el actor y persiste al journal.
-		// Concurrencia: WRITE LOCK — un solo thread a la vez. Usa _reusableCommandPrepared (instance compartida).
-		// Cache: actionCommands — los Programas con parameters se compilan y cachean con ActionId.
-		// Journal: escribe el evento (Script o Action) al diary si no esta en rehidratacion.
+		// PerformCmd (sync): executes a source against the actor and persists to the journal.
+		// Concurrency: WRITE LOCK — a single thread at a time. Uses _reusableCommandPrepared (shared instance).
+		// Cache: actionCommands — Programs with parameters are compiled and cached with an ActionId.
+		// Journal: writes the event (Script or Action) to the diary if not in rehydration.
 		internal string PerformCmd(string script, Parameters parameters, DateTime now)
 		{
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
@@ -1880,15 +1881,15 @@ namespace Puppeteer.EventSourcing
 				{
 					PrepareCommandProgram(script, parameters, _reusableCommandPrepared);
 
-					// Now es un parametro de SISTEMA inyectado por el framework (V1 y V2) con
-					// el valor del comando. Es per-call (thread-safe) y visible al pattern
-					// matching como id.IsParameter, pero queda EXCLUIDO de la firma del Action
-					// y del blob de argumentos (Parameters.IsSystemNow). Se inyecta DESPUES de
-					// PrepareCommandProgram para que la decision IsScript/IsNewAction observe
-					// solo los parametros de usuario, no el Now de sistema.
-					// Lever 1: solo se inyecta si el programa referencia @Now (ReferencesNow);
-					// los comandos que no usan el reloj no pagan box ni set. OccurredAt sale del
-					// 'now' local, no del parametro. Lever 3: SetNow tipado (sin busqueda+ImplicitCast).
+					// Now is a SYSTEM parameter injected by the framework (V1 and V2) with
+					// the command's value. It is per-call (thread-safe) and visible to pattern
+					// matching as id.IsParameter, but it is EXCLUDED from the Action signature
+					// and from the argument blob (Parameters.IsSystemNow). It is injected AFTER
+					// PrepareCommandProgram so the IsScript/IsNewAction decision observes
+					// only the user parameters, not the system Now.
+					// Lever 1: it is only injected if the program references @Now (ReferencesNow);
+					// commands that do not use the clock pay neither box nor set. OccurredAt comes from the
+					// local 'now', not from the parameter. Lever 3: typed SetNow (no lookup+ImplicitCast).
 					if (parameters != EMPTY_PARAMETERS && _reusableCommandPrepared.Program.ReferencesNow)
 					{
 						parameters.SetNow(now);
@@ -1933,16 +1934,16 @@ namespace Puppeteer.EventSourcing
 				throw;
 			}
 
-			// Playbill final refactor: timeStamp ya no se lee de parameters["Now"] (V2 puede no
-			// declararlo). El `now` que llega como argumento es la fuente autoritativa.
+			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
+			// declare it). The `now` arriving as an argument is the authoritative source.
 			timeStamp = now;
 
 			return result;
 		}
 
-		// Playbill final refactor: V1 entry path async. ip/user se ignoran. La inyeccion de
-		// Now (V1 backward compat) la hace el overload PerformCmdAsync(script, parameters)
-		// tras el branch IsScript/IsNewAction para no alterar la decision de persistencia.
+		// Playbill final refactor: V1 entry path async. ip/user are ignored. The Now injection
+		// (V1 backward compat) is done by the PerformCmdAsync(script, parameters) overload
+		// after the IsScript/IsNewAction branch so as not to alter the persistence decision.
 		internal async Task<string> PerformCmdAsync(string script, string ip, string user)
 		{
 			Parameters parameters = ParametersPool.Rent();
@@ -1954,13 +1955,13 @@ namespace Puppeteer.EventSourcing
 			return result;
 		}
 
-		// PerformCmdAsync: version async de PerformCmd.
-		// Concurrencia: usa _block (SemaphoreSlim) en lugar de rwLock.EnterWriteLock, pero garantiza
-		// exclusion mutua igualmente. Usa variables locales (no _reusableCommandPrepared) porque
-		// la preparacion y ejecucion pueden estar en continuaciones async distintas.
-		// Cache y journal: misma logica que PrepareCommandProgram/ExecuteCommandWithWriteLock pero inline.
-		// La persistencia al journal (dairy.Write*Async) se hace FUERA del write lock para no bloquear
-		// otros readers durante I/O.
+		// PerformCmdAsync: async version of PerformCmd.
+		// Concurrency: uses _block (SemaphoreSlim) instead of rwLock.EnterWriteLock, but still guarantees
+		// mutual exclusion. Uses local variables (not _reusableCommandPrepared) because
+		// preparation and execution may be on different async continuations.
+		// Cache and journal: same logic as PrepareCommandProgram/ExecuteCommandWithWriteLock but inline.
+		// Persistence to the journal (dairy.Write*Async) is done OUTSIDE the write lock so as not to block
+		// other readers during I/O.
 		internal async Task<string> PerformCmdAsync(string script, Parameters parameters)
 		{
 			ArgumentNullException.ThrowIfNull(script);
@@ -1991,10 +1992,10 @@ namespace Puppeteer.EventSourcing
 			// place of the caller's `parameters` for LoadArguments and for
 			// the Invocation row's ArgumentsAsString.
 			Parameters promotedArgumentParameters = null;
-			// Mismo gate que el path sync (ExecuteCommandWithWriteLock): solo
-			// suprime journaling cuando estamos DENTRO de un .Do(...) Action
-			// de Reaction (InReactionAction == true). Otros PerformCmd directos
-			// del usuario journalizan normal aun con el flag encendido.
+			// Same gate as the sync path (ExecuteCommandWithWriteLock): it only
+			// suppresses journaling when we are INSIDE a Reaction's .Do(...) Action
+			// (InReactionAction == true). Other direct user PerformCmds
+			// journal normally even with the flag on.
 			bool writeNewEntry = dairy != null && !symbolTable.RecoveringState
 				&& !(SuppressReactionJournaling && InReactionAction);
 			long nextEntryId = -1;
@@ -2006,8 +2007,8 @@ namespace Puppeteer.EventSourcing
 			{
 				if (!actionCommands.TryGetValue(script, out cacheDeComandosEntry))
 				{
-					// CACHE MISS: parsear, compilar y (opcionalmente) cachear.
-					// Misma logica que PrepareCommandProgram pero con variables locales.
+					// CACHE MISS: parse, compile and (optionally) cache.
+					// Same logic as PrepareCommandProgram but with local variables.
 					Parser parser = ParsersPool.Rent();
 
 					parser.SetSource(script);
@@ -2017,7 +2018,7 @@ namespace Puppeteer.EventSourcing
 
 					program.SetContextInfo();
 
-					// HasAnyUserParameter excluye el Now de sistema (ver el path sync).
+					// HasAnyUserParameter excludes the system Now (see the sync path).
 					if (parameters == EMPTY_PARAMETERS || !parameters.HasAnyUserParameter())
 					{
 						// B.3.4: before classifying as IsScript, check whether
@@ -2071,8 +2072,8 @@ namespace Puppeteer.EventSourcing
 				}
 				else
 				{
-					// CACHE HIT: Program ya compilado, referencias ya resueltas.
-					// Solo rebindear parameters (SolveParameters) si es modo interpretado.
+					// CACHE HIT: Program already compiled, references already resolved.
+					// Only rebind parameters (SolveParameters) if interpreted mode.
 					entry = JournalEntry.IsExistingAction;
 					program = cacheDeComandosEntry.Program;
 					needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
@@ -2086,11 +2087,11 @@ namespace Puppeteer.EventSourcing
 
 				now = DateTime.Now;
 
-				// Now es un parametro de SISTEMA inyectado por el framework (V1 y V2),
-				// excluido de la firma/args del journal (Parameters.IsSystemNow). La
-				// decision IsScript/IsNewAction ya se tomo arriba sobre los parametros de
-				// usuario, asi que inyectar Now aqui no la altera.
-				// Lever 1: solo si el programa referencia @Now. Lever 3: SetNow tipado.
+				// Now is a SYSTEM parameter injected by the framework (V1 and V2),
+				// excluded from the journal signature/args (Parameters.IsSystemNow). The
+				// IsScript/IsNewAction decision was already made above over the user
+				// parameters, so injecting Now here does not alter it.
+				// Lever 1: only if the program references @Now. Lever 3: typed SetNow.
 				if (parameters != EMPTY_PARAMETERS && program.ReferencesNow)
 				{
 					parameters.SetNow(now);
@@ -2137,11 +2138,11 @@ namespace Puppeteer.EventSourcing
 
 					result = Perform(program, effectiveParameters);
 
-					// Eval determinism: re-render del snapshot del dairy post-Perform
-					// (mirror del path sync en ExecuteCommandWithWriteLock). El snapshot
-					// se tomo antes de Perform con EvalStatement.forDairy==null, por eso
-					// emitia el `Eval(<expr>);` literal no deterministico. Ya ejecutado,
-					// cada Eval ejecutado journaliza su forma EVALUADA.
+					// Eval determinism: re-render of the dairy snapshot post-Perform
+					// (mirror of the sync path in ExecuteCommandWithWriteLock). The snapshot
+					// was taken before Perform with EvalStatement.forDairy==null, that is why
+					// it emitted the non-deterministic literal `Eval(<expr>);`. Now executed,
+					// each executed Eval journals its EVALUATED form.
 					if (program.HasEval)
 					{
 						program.InvalidateDairyRenderCache();
@@ -2163,9 +2164,9 @@ namespace Puppeteer.EventSourcing
 				{
 					if (executionError)
 					{
-						// Script integro al journal; el error viaja por IPuppeteerLogger.Error
-						// con el contexto completo (entryId, occurredAt, script, exception).
-						// Ver bloque equivalente en ExecuteCommandWithWriteLock para rationale.
+						// The whole script goes to the journal; the error travels via IPuppeteerLogger.Error
+						// with the full context (entryId, occurredAt, script, exception).
+						// See the equivalent block in ExecuteCommandWithWriteLock for rationale.
 						Logger.Error(
 							$"Script execution failed at write-time (async path). EntryId={nextEntryId}, OccurredAt={now:O}, Script:\n{formatedScriptForDairy}",
 							executionException);
@@ -2249,7 +2250,7 @@ namespace Puppeteer.EventSourcing
 				// been committed — so transport latency does not block subsequent
 				// commands and the journal sentence is durable before delivery is
 				// attempted. Transport failures do not roll back the journal: the
-				// sentence "tell salió" is factual; delivery is the transport's problem.
+				// sentence "tell sent" is factual; delivery is the transport's problem.
 				if (!executionError && symbolTable.PendingTellCount > 0)
 				{
 					ITransport transportSnapshot = Transport;
@@ -2287,29 +2288,29 @@ namespace Puppeteer.EventSourcing
 				_block.Release();
 			}
 
-			// Now ya no se garantiza en parameters (puede ser EMPTY_PARAMETERS). El `now`
-			// capturado al inicio del comando es la fuente autoritativa del timestamp.
+			// Now is no longer guaranteed in parameters (it may be EMPTY_PARAMETERS). The `now`
+			// captured at the start of the command is the authoritative source of the timestamp.
 			timeStamp = now;
 
 			return result;
 		}
 
 
-		// PerformQry: ejecuta un query read-only contra el actor. No persiste al journal.
-		// Concurrencia: READ LOCK — multiples queries pueden ejecutarse en paralelo entre si
-		// y en paralelo con otros read locks (PerformChk, PerformEmit).
-		// SetReadOnlyMode(true) protege la SymbolTable contra escrituras accidentales.
+		// PerformQry: executes a read-only query against the actor. Does not persist to the journal.
+		// Concurrency: READ LOCK — multiple queries can run in parallel with each other
+		// and in parallel with other read locks (PerformChk, PerformEmit).
+		// SetReadOnlyMode(true) protects the SymbolTable against accidental writes.
 		//
-		// Cache: QuerysEnCache (ConcurrentDictionary) — compartido con PerformChk y PerformEmit.
-		// - Con parameters de user: modo compilado, SE cachea.
-		// - Sin parameters de user: modo interpretado, NO se cachea.
+		// Cache: QuerysEnCache (ConcurrentDictionary) — shared with PerformChk and PerformEmit.
+		// - With user parameters: compiled mode, IS cached.
+		// - Without user parameters: interpreted mode, NOT cached.
 		//
-		// Nota sobre needsToSolveReferences en cache hit:
-		// En produccion (CompiledModePolicy=Automatic) un Program cacheado siempre tiene
-		// IsCompiledMode=true, por lo que needsToSolveReferences evalua a false.
-		// El SolveReferences original (cache miss) ya resolvio la estructura completa del program;
-		// en cache hit solo se rebindean parameters via SolveParameters.
-		// needsToSolveReferences es true en cache hit SOLO con AlwaysInterpreted (unit tests).
+		// Note on needsToSolveReferences on cache hit:
+		// In production (CompiledModePolicy=Automatic) a cached Program always has
+		// IsCompiledMode=true, so needsToSolveReferences evaluates to false.
+		// The original SolveReferences (cache miss) already resolved the program's full structure;
+		// on cache hit only parameters are rebound via SolveParameters.
+		// needsToSolveReferences is true on cache hit ONLY with AlwaysInterpreted (unit tests).
 		internal string PerformQry(string script, Parameters parameters)
 		{
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
@@ -2321,7 +2322,7 @@ namespace Puppeteer.EventSourcing
 
 			if (!QuerysEnCache.TryGetValue(script, out Program program))
 			{
-				// CACHE MISS: parsear con isQuery:true (bloquea expose y declaracion de variables globales).
+				// CACHE MISS: parse with isQuery:true (blocks expose and global variable declaration).
 				Parser parser = ParsersPool.Rent();
 
 				parser.SetSource(script);
@@ -2340,24 +2341,24 @@ namespace Puppeteer.EventSourcing
 				{
 					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 				}
-				// Cache miss: resolver estructura completa (LValues, RValues, globales, parameters)
+				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
 				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
-				// CACHE HIT: Program ya compilado, referencias ya resueltas.
-				// En Automatic: IsCompiledMode=true -> ambos false -> no se hace nada (el lambda compilado se reutiliza directamente).
-				// En AlwaysInterpreted (tests): ambos true -> se re-resuelven referencias y parameters.
+				// CACHE HIT: Program already compiled, references already resolved.
+				// In Automatic: IsCompiledMode=true -> both false -> nothing is done (the compiled lambda is reused directly).
+				// In AlwaysInterpreted (tests): both true -> references and parameters are re-resolved.
 				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
-			// Now es un parametro de SISTEMA per-call (V1 y V2): cada query lleva su propio
-			// Now en su Parameters rentado, por lo que es thread-safe bajo el read lock
-			// (no es estado global compartido). Excluido de la firma/args del journal — las
-			// queries no se persisten, pero la simetria de Parameters lo mantiene coherente.
+			// Now is a per-call SYSTEM parameter (V1 and V2): each query carries its own
+			// Now in its rented Parameters, so it is thread-safe under the read lock
+			// (not shared global state). Excluded from the journal signature/args — queries
+			// are not persisted, but the Parameters symmetry keeps it coherent.
 			DateTime nowForQry = DateTime.Now;
-			// Lever 1: solo si la query referencia @Now. Lever 3: SetNow tipado.
+			// Lever 1: only if the query references @Now. Lever 3: typed SetNow.
 			if (parameters != EMPTY_PARAMETERS && program.ReferencesNow)
 			{
 				parameters.SetNow(nowForQry);
@@ -2389,21 +2390,21 @@ namespace Puppeteer.EventSourcing
 				rwLock.ExitReadLock();
 			}
 
-			// Playbill final refactor: timeStamp ya no se lee de parameters["Now"] (V2 puede no
-			// declararlo). El nowForQry local es la fuente autoritativa.
+			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
+			// declare it). The local nowForQry is the authoritative source.
 			timeStamp = nowForQry;
 
 			return result;
 		}
 
-		// PerformEmit: accion de un Cue Reaction. Ejecuta un script read-only contra el actor
-		// para producir side effects externos (ej: enviar datos por Kafka).
-		// NO persiste al journal — el checkpoint del Reaction rastrea la ejecucion.
-		// Concurrencia: READ LOCK — misma semantica que PerformQry.
-		// SetReadOnlyMode(true) protege la SymbolTable contra escrituras accidentales.
-		// Parser: isQuery:true — bloquea expose (que persistiria al journal) y declaracion de variables globales.
-		// Cache: QuerysEnCache — compilado y cacheado con las mismas reglas que PerformQry.
-		// Retorna void (no string) porque el resultado es un side effect externo, no un value de retorno.
+		// PerformEmit: action of a Cue Reaction. Executes a read-only script against the actor
+		// to produce external side effects (e.g. sending data over Kafka).
+		// Does NOT persist to the journal — the Reaction's checkpoint tracks the execution.
+		// Concurrency: READ LOCK — same semantics as PerformQry.
+		// SetReadOnlyMode(true) protects the SymbolTable against accidental writes.
+		// Parser: isQuery:true — blocks expose (which would persist to the journal) and global variable declaration.
+		// Cache: QuerysEnCache — compiled and cached with the same rules as PerformQry.
+		// Returns void (not string) because the result is an external side effect, not a return value.
 		internal void PerformEmit(string script, Parameters parameters)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
@@ -2415,7 +2416,7 @@ namespace Puppeteer.EventSourcing
 
 			if (!QuerysEnCache.TryGetValue(script, out Program program))
 			{
-				// CACHE MISS: parsear con isQuery:true (bloquea expose y declaracion de variables globales).
+				// CACHE MISS: parse with isQuery:true (blocks expose and global variable declaration).
 				Parser parser = ParsersPool.Rent();
 
 				parser.SetSource(script);
@@ -2434,21 +2435,21 @@ namespace Puppeteer.EventSourcing
 				{
 					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 				}
-				// Cache miss: resolver estructura completa (LValues, RValues, globales, parameters)
+				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
 				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
-				// CACHE HIT: ver documentacion en PerformQry sobre needsToSolveReferences en cache hit.
+				// CACHE HIT: see documentation in PerformQry about needsToSolveReferences on cache hit.
 				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
-			// Now es un parametro de SISTEMA per-call (V1 y V2), thread-safe bajo el read
-			// lock (vive en el Parameters de esta llamada, no en estado global). Excluido
-			// de la firma/args del journal via Parameters.IsSystemNow.
+			// Now is a per-call SYSTEM parameter (V1 and V2), thread-safe under the read
+			// lock (it lives in this call's Parameters, not in global state). Excluded
+			// from the journal signature/args via Parameters.IsSystemNow.
 			DateTime nowForEmit = DateTime.Now;
-			// Lever 1: solo si el emit referencia @Now. Lever 3: SetNow tipado.
+			// Lever 1: only if the emit references @Now. Lever 3: typed SetNow.
 			if (parameters != EMPTY_PARAMETERS && program.ReferencesNow)
 			{
 				parameters.SetNow(nowForEmit);
@@ -2480,24 +2481,24 @@ namespace Puppeteer.EventSourcing
 				rwLock.ExitReadLock();
 			}
 
-			// Playbill final refactor: timeStamp ya no se lee de parameters["Now"] (V2 puede no
-			// declararlo).
+			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
+			// declare it).
 			timeStamp = nowForEmit;
 		}
 
-		// PerformChk: ejecuta un check read-only contra el actor. No persiste al journal.
-		// Retorna null/empty si el check pasa, o un mensaje de error si falla.
-		// Concurrencia: READ LOCK — misma semantica que PerformQry.
-		// Parser: isCheck:true — produce un Program que ejecuta via ExecuteCheck() en lugar de Perform().
-		// Cache: QuerysEnCache — mismo cache que PerformQry y PerformEmit.
+		// PerformChk: executes a read-only check against the actor. Does not persist to the journal.
+		// Returns null/empty if the check passes, or an error message if it fails.
+		// Concurrency: READ LOCK — same semantics as PerformQry.
+		// Parser: isCheck:true — produces a Program that executes via ExecuteCheck() instead of Perform().
+		// Cache: QuerysEnCache — same cache as PerformQry and PerformEmit.
 		//
-		// Diferencia con PerformQry en cache hit:
-		// PerformChk solo asigna needsToSolveParameters (no needsToSolveReferences).
-		// En produccion (Automatic) esto es equivalente: ambos evaluan a false en cache hit
-		// porque IsCompiledMode=true. La diferencia solo es observable con AlwaysInterpreted (tests),
-		// donde PerformQry re-resuelve referencias en cada invocacion y PerformChk no.
-		// Esto no es un bug: PerformChk se invoca tipicamente una vez por PerformCheckThenCommand,
-		// y la estructura del Program ya esta resuelta desde el cache miss original.
+		// Difference from PerformQry on cache hit:
+		// PerformChk only assigns needsToSolveParameters (not needsToSolveReferences).
+		// In production (Automatic) this is equivalent: both evaluate to false on cache hit
+		// because IsCompiledMode=true. The difference is only observable with AlwaysInterpreted (tests),
+		// where PerformQry re-resolves references on each invocation and PerformChk does not.
+		// This is not a bug: PerformChk is typically invoked once per PerformCheckThenCommand,
+		// and the Program structure is already resolved from the original cache miss.
 		internal string PerformChk(string script, Parameters parameters)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
@@ -2510,7 +2511,7 @@ namespace Puppeteer.EventSourcing
 
 			if (!QuerysEnCache.TryGetValue(script, out Program program))
 			{
-				// CACHE MISS: parsear con isCheck:true (produce Program para ExecuteCheck).
+				// CACHE MISS: parse with isCheck:true (produces a Program for ExecuteCheck).
 				Parser parser = ParsersPool.Rent();
 				parser.SetSource(script);
 				program = parser.Parse(isQuery: false, isCheck: true);
@@ -2527,20 +2528,20 @@ namespace Puppeteer.EventSourcing
 				{
 					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 				}
-				// Cache miss: resolver estructura completa (LValues, RValues, globales, parameters)
+				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
 				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
-				// CACHE HIT: solo rebindear parameters. Ver comentario del method sobre la diferencia con PerformQry.
+				// CACHE HIT: only rebind parameters. See the method comment about the difference from PerformQry.
 				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
-			// Now es un parametro de SISTEMA per-call (V1 y V2), thread-safe bajo el read
-			// lock (vive en el Parameters de esta llamada, no en estado global). Excluido
-			// de la firma/args del journal via Parameters.IsSystemNow.
+			// Now is a per-call SYSTEM parameter (V1 and V2), thread-safe under the read
+			// lock (it lives in this call's Parameters, not in global state). Excluded
+			// from the journal signature/args via Parameters.IsSystemNow.
 			DateTime nowForChk = DateTime.Now;
-			// Lever 1: solo si el check referencia @Now. Lever 3: SetNow tipado.
+			// Lever 1: only if the check references @Now. Lever 3: typed SetNow.
 			if (parameters != EMPTY_PARAMETERS && program.ReferencesNow)
 			{
 				parameters.SetNow(nowForChk);
@@ -2573,28 +2574,28 @@ namespace Puppeteer.EventSourcing
 				rwLock.ExitReadLock();
 			}
 
-			// Playbill final refactor: timeStamp ya no se lee de parameters["Now"] (V2 puede no
-			// declararlo).
+			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
+			// declare it).
 			timeStamp = nowForChk;
 
 			return result;
 		}
 
-		// PerformCheckThenCmd: ejecuta un check sin bloqueo (via PerformChk con read lock),
-		// y si pasa, toma write lock y re-ejecuta el check + source atomicamente.
+		// PerformCheckThenCmd: executes a check without blocking (via PerformChk with a read lock),
+		// and if it passes, takes the write lock and re-executes the check + source atomically.
 		//
-		// Flujo de dos fases:
-		// 1. PerformChk(scriptForChk) — read lock, sin bloqueo. Si falla, retorna inmediatamente.
-		// 2. Bajo write lock: re-ejecuta el check (ExecuteCheck) para verificar que sigue valido
-		//    (otro writer pudo haber cambiado el estado entre fase 1 y fase 2).
-		//    Si el check pasa, ejecuta el source (ExecuteCommandWithWriteLock) que persiste al journal.
+		// Two-phase flow:
+		// 1. PerformChk(scriptForChk) — read lock, no blocking. If it fails, returns immediately.
+		// 2. Under the write lock: re-executes the check (ExecuteCheck) to verify it is still valid
+		//    (another writer may have changed the state between phase 1 and phase 2).
+		//    If the check passes, executes the source (ExecuteCommandWithWriteLock) which persists to the journal.
 		//
-		// Concurrencia: WRITE LOCK para la fase 2. Usa _reusableCommandPrepared.
-		// Cache: scriptForCmd en actionCommands (via PrepareCommandProgram), scriptForChk en QuerysEnCache.
+		// Concurrency: WRITE LOCK for phase 2. Uses _reusableCommandPrepared.
+		// Cache: scriptForCmd in actionCommands (via PrepareCommandProgram), scriptForChk in QuerysEnCache.
 		//
-		// Nota sobre cache hit del check (scriptForChk):
-		// Solo asigna needsToSolveParametersChk (no needsToSolveReferencesChk).
-		// Misma logica que PerformChk — ver documentacion en ese method.
+		// Note on the check cache hit (scriptForChk):
+		// It only assigns needsToSolveParametersChk (not needsToSolveReferencesChk).
+		// Same logic as PerformChk — see documentation in that method.
 		internal string PerformCheckThenCmd(string scriptForChk, string scriptForCmd, Parameters parameters)
 		{
 			return PerformCheckThenCmd(scriptForChk, scriptForCmd, parameters, DateTime.Now);
@@ -2609,14 +2610,14 @@ namespace Puppeteer.EventSourcing
 			if (scriptForCmd.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (scriptForChk.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Check script exceeds the maximun length");
 
-			// Fase 1: check sin bloqueo (read lock). Si falla, no se toma write lock.
+			// Phase 1: check without blocking (read lock). If it fails, the write lock is not taken.
 			var chkResult = PerformChk(scriptForChk, parameters);
 			if (!String.IsNullOrEmpty(chkResult))
 			{
 				return chkResult;
 			}
 
-			// Fase 2: re-check + command bajo write lock.
+			// Phase 2: re-check + command under the write lock.
 			string result = null;
 			Program programChk;
 			bool needsToSolveParametersChk = false;
@@ -2627,7 +2628,7 @@ namespace Puppeteer.EventSourcing
 				commandLineError = "";
 				scriptEnEjecucion = scriptForCmd;
 
-				// Fase 4.5 refactor Playbill: ip/user dejaron de viajar como parametros del script.
+				// Phase 4.5 Playbill refactor: ip/user no longer travel as script parameters.
 				string Ip = "";
 				string User = "";
 
@@ -2635,7 +2636,7 @@ namespace Puppeteer.EventSourcing
 
 				if (!QuerysEnCache.TryGetValue(scriptForChk, out programChk))
 				{
-					// CACHE MISS del check script: parsear con isCheck:true.
+					// CACHE MISS of the check script: parse with isCheck:true.
 					Parser parserChk = ParsersPool.Rent();
 					parserChk.SetSource(scriptForChk);
 					programChk = parserChk.Parse(isQuery: false, isCheck: true);
@@ -2652,23 +2653,23 @@ namespace Puppeteer.EventSourcing
 					{
 						programChk.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 					}
-					// Cache miss: resolver estructura completa
+					// Cache miss: resolve the full structure
 					needsToSolveReferencesChk = !programChk.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
 				else
 				{
-					// CACHE HIT: solo rebindear parameters. Ver documentacion en PerformChk.
+					// CACHE HIT: only rebind parameters. See documentation in PerformChk.
 					needsToSolveParametersChk = !programChk.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
 
-				// Now es un parametro de SISTEMA inyectado por el framework (V1 y V2),
-				// excluido de la firma/args del journal (Parameters.IsSystemNow). Se inyecta
-				// DESPUES de PrepareCommandProgram para no alterar la decision IsScript/
-				// IsNewAction (que debe observar solo los parametros de usuario).
-				// Lever 1: solo si el command O el check referencian @Now (la inyeccion se
-				// movio aqui, tras resolver programChk, para poder consultar ambos programas);
-				// el mismo Parameters alimenta el re-check (ExecuteCheck) y el command, asi que
-				// basta un set. Lever 3: SetNow tipado.
+				// Now is a SYSTEM parameter injected by the framework (V1 and V2),
+				// excluded from the journal signature/args (Parameters.IsSystemNow). It is injected
+				// AFTER PrepareCommandProgram so as not to alter the IsScript/
+				// IsNewAction decision (which must observe only the user parameters).
+				// Lever 1: only if the command OR the check reference @Now (the injection was
+				// moved here, after resolving programChk, to be able to consult both programs);
+				// the same Parameters feeds the re-check (ExecuteCheck) and the command, so
+				// a single set suffices. Lever 3: typed SetNow.
 				if (parameters != EMPTY_PARAMETERS &&
 					(_reusableCommandPrepared.Program.ReferencesNow || programChk.ReferencesNow))
 				{
@@ -2687,7 +2688,7 @@ namespace Puppeteer.EventSourcing
 
 					try
 					{
-						// Re-check bajo write lock: verificar que el estado no cambio desde fase 1
+						// Re-check under the write lock: verify the state has not changed since phase 1
 						chkResult = programChk.ExecuteCheck();
 						if (!String.IsNullOrEmpty(chkResult))
 						{
@@ -2712,8 +2713,8 @@ namespace Puppeteer.EventSourcing
 				throw;
 			}
 
-			// Playbill final refactor: timeStamp ya no se lee de parameters["Now"] (V2 puede no
-			// declararlo). El `now` que llega como argumento es la fuente autoritativa.
+			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
+			// declare it). The `now` arriving as an argument is the authoritative source.
 			timeStamp = now;
 
 			return result;
@@ -2804,7 +2805,7 @@ namespace Puppeteer.EventSourcing
 		internal bool IsAlive => currentTransition == ActorTransitions.Alive
 								|| currentTransition == ActorTransitions.Recovered;
 
-		//TOME EL CONTROL Y EJECUTAR LOS ULTIMOS COMANDOS SI HAY
+		// Take control and run the last commands if there are any
 		internal string LockWhileNotSyncronized()
 		{
 			if (RecoveringStatusIsRunning) return $"The follower it's already in {currentTransition} status";
@@ -2826,7 +2827,7 @@ namespace Puppeteer.EventSourcing
 
 					bool salir = false;
 					int reintentos = 0;
-					//while (itsFollowerRunning) && lastIdAfterRecoveredState == al lastIdAfterRecoveredState anterior
+					//while (itsFollowerRunning) && lastIdAfterRecoveredState == the previous lastIdAfterRecoveredState
 					while (!salir)
 					{
 						previousLastIdAfterRecoveredState = lastIdAfterRecoveredState;
@@ -2898,9 +2899,9 @@ namespace Puppeteer.EventSourcing
 							throw new LanguageException($"Unsupported event data type: {eventData.GetType().Name}");
 					}
 
-					// Now es un parametro de SISTEMA excluido del journal; se re-inyecta desde
-					// el OccurredAt journaleado para Script (V1) y Action (V2), antes de
-					// SolveReferences/Perform (loop sincrono del replay red-black).
+					// Now is a SYSTEM parameter excluded from the journal; it is re-injected from
+					// the journaled OccurredAt for Script (V1) and Action (V2), before
+					// SolveReferences/Perform (synchronous loop of the red-black replay).
 					program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
 
 					if (!actionCommands.ContainsAction(program.Script))
@@ -3010,26 +3011,26 @@ namespace Puppeteer.EventSourcing
 			return result;
 		}
 
-		// Etapa 4: Single-flight fail-fast. Politica "1 y solo 1 Distill a la vez";
-		// el segundo concurrente recibe LanguageException, no se encola ni coalesce.
+		// Stage 4: Single-flight fail-fast. Policy "1 and only 1 Distill at a time";
+		// the second concurrent caller gets a LanguageException, it is neither queued nor coalesced.
 		//
-		// Razon: el coalescing tenia sentido solo si reactions podian disparar Distill
-		// automaticamente (la planeada metadata.Distill, descartada en Etapa 4 — un
-		// developer podria ponerla en un patron frecuente sin entender el costo). Sin
-		// auto-trigger, la unica fuente de Distill es operacional/humana (cron, admin,
-		// comando manual). En ese contexto, fail-fast es honesto: dos operadores
-		// invocando simultaneo entienden inmediatamente que hay uno en curso, no que
-		// "tarda mucho silenciosamente".
+		// Reason: coalescing only made sense if reactions could trigger Distill
+		// automatically (the planned metadata.Distill, discarded in Stage 4 — a
+		// developer could put it on a frequent pattern without understanding the cost). Without
+		// an auto-trigger, the only source of Distill is operational/human (cron, admin,
+		// manual command). In that context, fail-fast is honest: two operators
+		// invoking it simultaneously immediately understand one is in progress, not that
+		// "it takes a long time silently".
 		private readonly SemaphoreSlim distillRunSem = new SemaphoreSlim(1, 1);
 
-		// Counter expuesto para tests: incrementa por cada ejecucion real de
-		// dairy.Distill. Util para verificar que llamadas que tiran LanguageException
-		// no incrementan.
+		// Counter exposed for tests: increments on each real execution of
+		// dairy.Distill. Useful to verify that calls throwing LanguageException
+		// do not increment.
 		internal long DistillRunCount;
 
-		// Test seam: hook que corre dentro del runner, despues de tomar rwLock pero
-		// antes de llamar dairy.Distill. Tests lo usan para frenar al runner y probar
-		// el comportamiento concurrente. Produccion jamas lo setea.
+		// Test seam: hook that runs inside the runner, after taking rwLock but
+		// before calling dairy.Distill. Tests use it to stall the runner and exercise
+		// the concurrent behaviour. Production never sets it.
 		internal Action TestHookBeforeRunDistill;
 
 		internal void Distill()
@@ -3517,7 +3518,7 @@ namespace Puppeteer.EventSourcing
 		{
 			ArgumentNullException.ThrowIfNull(shutdownCallback);
 
-			// Registrar handlers para SIGTERM y SIGINT (Ctrl+C) para graceful shutdown
+			// Register handlers for SIGTERM and SIGINT (Ctrl+C) for graceful shutdown.
 			// Kubernetes sends SIGTERM to the pod before forcing a kill.
 			Console.CancelKeyPress += (sender, e) =>
 			{
@@ -3536,11 +3537,11 @@ namespace Puppeteer.EventSourcing
 		}
 
 		// ================================================================
-		// IActorIntrospection — superficie read-only de inspeccion (CLI / IA / MCP).
-		// Separada del DSL del dominio por construccion: estos verbos los tiene
-		// CUALQUIER actor por ser Puppeteer, no por ser Banco / Tetris / etc.
-		// Hoy un solo verbo: ShowEntry. Range / Find / Describe llegan en pasos
-		// siguientes del CLI IA-native (handoff 2026-05-31).
+		// IActorIntrospection — read-only inspection surface (CLI / AI / MCP).
+		// Separated from the domain DSL by construction: ANY actor has these
+		// verbs by virtue of being Puppeteer, not by virtue of its domain.
+		// Today a single verb: ShowEntry. Range / Find / Describe arrive in
+		// later steps of the AI-native CLI (handoff 2026-05-31).
 		// ================================================================
 
 		public string ShowEntry(long entryId)
@@ -3550,11 +3551,11 @@ namespace Puppeteer.EventSourcing
 			if (dairy == null)
 				throw new LanguageException($"Actor '{Name}' has no EventSourcingStorage configured; nothing to introspect.");
 
-			// afterEntryId es exclusivo en ReadRecordsAfter — pedimos desde
-			// entryId-1 para incluir entryId. Para journals grandes, paso siguiente
-			// (Range / Find) requiere un ReadRecord(entryId) directo en DiaryStorage;
-			// hoy alcanza con el path existente porque hola-mundo trabaja sobre
-			// journals pequenos.
+			// afterEntryId is exclusive in ReadRecordsAfter — we request from
+			// entryId-1 to include entryId. For large journals, the next step
+			// (Range / Find) requires a direct ReadRecord(entryId) in DiaryStorage;
+			// today the existing path suffices because the hello-world case works on
+			// small journals.
 			var records = new List<MaterializationRecord>();
 			dairy.Storage.ReadRecordsAfter(entryId - 1, records);
 
@@ -3563,7 +3564,7 @@ namespace Puppeteer.EventSourcing
 				if (record.EntryId == entryId)
 					return FormatEntryAsToon(record);
 				if (record.EntryId > entryId)
-					break; // records vienen sorted ascending
+					break; // records come sorted ascending
 			}
 
 			throw new LanguageException($"Entry {entryId} not found in actor '{Name}'.");
@@ -3576,11 +3577,11 @@ namespace Puppeteer.EventSourcing
 			if (dairy == null)
 				throw new LanguageException($"Actor '{Name}' has no EventSourcingStorage configured; nothing to introspect.");
 
-			// Scan completo: filtramos Define entries con ActionId match. En caso
-			// de redefiniciones, el mayor EntryId gana (politica firmada). Esto
-			// es O(n) sobre el journal — aceptable para hola-mundo. Una capa
-			// siguiente puede indexar Define-by-actionId en DiaryStorage si la
-			// performance lo amerita.
+			// Full scan: we filter Define entries with an ActionId match. In case
+			// of redefinitions, the highest EntryId wins (signed policy). This
+			// is O(n) over the journal — acceptable for the hello-world case. A
+			// later layer can index Define-by-actionId in DiaryStorage if
+			// performance warrants it.
 			var records = new List<MaterializationRecord>();
 			dairy.Storage.ReadRecordsAfter(0, records);
 
@@ -3623,7 +3624,7 @@ namespace Puppeteer.EventSourcing
 		public string ShowParameterPools()
 		{
 			var shapes = ParametersPool.SnapshotShapes();
-			shapes.Sort((a, b) => b.HighWater.CompareTo(a.HighWater)); // mas concurridas primero
+			shapes.Sort((a, b) => b.HighWater.CompareTo(a.HighWater)); // busiest first
 
 			var sb = new StringBuilder();
 			var formatter = new ToonFormatter();
@@ -3716,9 +3717,9 @@ namespace Puppeteer.EventSourcing
 			}
 			formatter.EndCollection("constructors");
 
-			// Interfaces implementadas (incluye transitivas heredadas de la cadena de
-			// bases). El DSL las observa via casting + assignability checks; la IA las
-			// usa para saber que abstracciones la clase satisface.
+			// Implemented interfaces (includes transitive ones inherited from the base
+			// chain). The DSL observes them via casting + assignability checks; the AI
+			// uses them to know which abstractions the class satisfies.
 			formatter.BeginCollection();
 			foreach (var iface in found.GetInterfaces())
 			{
@@ -3728,8 +3729,8 @@ namespace Puppeteer.EventSourcing
 			}
 			formatter.EndCollection("interfaces");
 
-			// Fields: misma regla de visibilidad (public + internal + protected-internal).
-			// Excluye compiler-generated backing fields de auto-properties.
+			// Fields: same visibility rule (public + internal + protected-internal).
+			// Excludes compiler-generated backing fields of auto-properties.
 			formatter.BeginCollection();
 			foreach (var field in found.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
 			{
@@ -3742,9 +3743,9 @@ namespace Puppeteer.EventSourcing
 			}
 			formatter.EndCollection("fields");
 
-			// Properties: include si AL MENOS UN accessor (get o set) es callable
-			// desde DSL. El signature emite solo los accessors callable —
-			// 'Name : String { get; }' para una con setter privado.
+			// Properties: include if AT LEAST ONE accessor (get or set) is callable
+			// from the DSL. The signature emits only the callable accessors —
+			// 'Name : String { get; }' for one with a private setter.
 			formatter.BeginCollection();
 			foreach (var prop in found.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
 			{
@@ -3760,16 +3761,16 @@ namespace Puppeteer.EventSourcing
 			}
 			formatter.EndCollection("properties");
 
-			// Metodos: incluye PUBLIC e INTERNAL (Assembly) + protected-internal,
-			// alineado con ParserValidation.cs del interprete. Excluye private y
-			// protected (el DSL no es subclase del dominio, no accede a esos).
-			// Inherited entran via reflection sin DeclaredOnly. El campo declaredOn
-			// hace explicito de donde viene cada metodo — la IA distingue herencia.
+			// Methods: includes PUBLIC and INTERNAL (Assembly) + protected-internal,
+			// aligned with the interpreter's ParserValidation.cs. Excludes private and
+			// protected (the DSL is not a subclass of the domain, it does not access those).
+			// Inherited ones come in via reflection without DeclaredOnly. The declaredOn field
+			// makes explicit where each method comes from — the AI distinguishes inheritance.
 			formatter.BeginCollection();
 			foreach (var method in found.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
 			{
 				if (method.IsSpecialName) continue;                       // Drop get_/set_ + operator overloads
-				if (method.DeclaringType == typeof(object)) continue;     // Drop ToString/Equals/GetHashCode/GetType de object
+				if (method.DeclaringType == typeof(object)) continue;     // Drop ToString/Equals/GetHashCode/GetType from object
 				if (!IsCallableFromDsl(method)) continue;
 				formatter.BeginCollectionItem();
 				formatter.Field("signature", FormatMethodSignature(method));
@@ -3782,10 +3783,10 @@ namespace Puppeteer.EventSourcing
 			return sb.ToString();
 		}
 
-		// Accesibilidad alineada con el DSL: public e internal son siempre callable;
-		// protected-internal tambien (mezcla; en la practica funciona como internal
-		// porque la DSL hospeda en el mismo assembly que la clase). private y pure
-		// protected no — el DSL no es subclase ni codigo dentro de la clase.
+		// Accessibility aligned with the DSL: public and internal are always callable;
+		// protected-internal too (a mix; in practice it behaves as internal
+		// because the DSL is hosted in the same assembly as the class). private and pure
+		// protected are not — the DSL is neither a subclass nor code inside the class.
 		private static bool IsCallableFromDsl(MethodBase m)
 		{
 			if (m.IsPublic) return true;
@@ -3794,8 +3795,8 @@ namespace Puppeteer.EventSourcing
 			return false;                               // private, protected (Family), private protected
 		}
 
-		// Misma regla para fields. FieldInfo no hereda de MethodBase asi que necesita
-		// su propio chequeo, pero los flags significan lo mismo.
+		// Same rule for fields. FieldInfo does not inherit from MethodBase, so it needs
+		// its own check, but the flags mean the same thing.
 		private static bool IsCallableFromDsl(System.Reflection.FieldInfo f)
 		{
 			if (f.IsPublic) return true;
@@ -3804,10 +3805,10 @@ namespace Puppeteer.EventSourcing
 			return false;
 		}
 
-		// Auto-properties get-only generan backing fields con nombres tipo
-		// '<PropertyName>k__BackingField' marcados con [CompilerGenerated]. Filtrarlos
-		// de la lista 'fields' — el shape del usuario solo declara properties; los
-		// backing fields son detalle del compilador.
+		// Get-only auto-properties generate backing fields with names like
+		// '<PropertyName>k__BackingField' marked with [CompilerGenerated]. Filter them
+		// out of the 'fields' list — the user's shape only declares properties; the
+		// backing fields are a compiler detail.
 		private static bool IsCompilerGenerated(System.Reflection.MemberInfo m)
 		{
 			return m.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), inherit: false);
@@ -3832,9 +3833,9 @@ namespace Puppeteer.EventSourcing
 			return sb.ToString();
 		}
 
-		// Formato legible de tipo. Maneja generics: List`1[T] -> "List<T>".
-		// Anidados se resuelven recursivos: Dictionary`2[K, IEnumerable`1[V]] ->
-		// "Dictionary<K, IEnumerable<V>>". El sufijo "`N" del CLR queda invisible.
+		// Human-readable type format. Handles generics: List`1[T] -> "List<T>".
+		// Nested ones resolve recursively: Dictionary`2[K, IEnumerable`1[V]] ->
+		// "Dictionary<K, IEnumerable<V>>". The CLR "`N" suffix stays invisible.
 		private static string FormatTypeName(Type type)
 		{
 			if (type == null) return "<null>";
@@ -3921,9 +3922,9 @@ namespace Puppeteer.EventSourcing
 
 		// ================================================================
 		// IActorIntrospection — Reactions surface (handoff 2026-06-01).
-		// Read-only view sobre la maquinaria de Follower/Reactions: listing,
-		// detalle, dry-match. Construido sobre los accessors existentes:
-		// counters Phase A (MatchCount, SeekEntered, SeekMatched), checkpoint
+		// Read-only view over the Follower/Reactions machinery: listing,
+		// detail, dry-match. Built on the existing accessors:
+		// Phase A counters (MatchCount, SeekEntered, SeekMatched), checkpoint
 		// vector (DiaryStorage.GetReactionCheckpoint), MatchSnapshot ring.
 		// ================================================================
 
@@ -3974,8 +3975,8 @@ namespace Puppeteer.EventSourcing
 			formatter.Field("action", FormatActionTerminator(found));
 			formatter.Field("matchCount", found.MatchCount);
 
-			// Seeks con onMatch literal por nivel — ShowReactions ya escupe los
-			// counters; aqui anadimos el OnMatch text que define la correlacion.
+			// Seeks with literal onMatch per level — ShowReactions already spits out the
+			// counters; here we add the OnMatch text that defines the correlation.
 			formatter.BeginCollection();
 			int seekLevel = 0;
 			foreach (var engine in found.ReactionEnginesOrEmpty)
@@ -3984,9 +3985,9 @@ namespace Puppeteer.EventSourcing
 				formatter.Field("name", engine.PatternDescription);
 				formatter.Field("isFinal", engine.IsFinalSeek);
 
-				// OnMatch patterns — uno o mas por Seek. Patron texto literal
-				// como lo escribio el desarrollador, asi la IA puede copy/paste
-				// para iterar sobre el patron sin re-deducirlo.
+				// OnMatch patterns — one or more per Seek. Literal pattern text
+				// as the developer wrote it, so the AI can copy/paste
+				// to iterate on the pattern without re-deducing it.
 				formatter.BeginCollection();
 				for (int i = 0; i < engine.Patterns.Count; i++)
 				{
@@ -4008,9 +4009,9 @@ namespace Puppeteer.EventSourcing
 			}
 			formatter.EndCollection("seeks");
 
-			// LastMatches ring (hasta 32). Vacio si la reaction nunca matcheo o
-			// si ResetCounters fue llamado. Bindings se filtran por construccion
-			// (RecordCompleteMatch excluye Now/User/Ip).
+			// LastMatches ring (up to 32). Empty if the reaction never matched or
+			// if ResetCounters was called. Bindings are filtered by construction
+			// (RecordCompleteMatch excludes Now/User/Ip).
 			formatter.BeginCollection();
 			foreach (var snapshot in found.LastMatches)
 			{
@@ -4039,36 +4040,36 @@ namespace Puppeteer.EventSourcing
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDsl);
 			if (dairy == null)
 				throw new LanguageException($"Actor '{Name}' has no EventSourcingStorage configured; nothing to match against.");
-			// reactions.DiaryStorage es property que lanza si no esta seteado —
-			// la wireamos por las dudas (el path EventSourcingStorage normal ya lo
-			// hace, pero ConfigureStorageForIntrospection no). Idempotente: si ya
-			// estaba seteado, SetDairyStorage lo sobreescribe con el mismo storage
-			// (mismo Diary.Storage que el path normal arma).
+			// reactions.DiaryStorage is a property that throws if not set —
+			// we wire it just in case (the normal EventSourcingStorage path already
+			// does, but ConfigureStorageForIntrospection does not). Idempotent: if it was
+			// already set, SetDairyStorage overwrites it with the same storage
+			// (the same Diary.Storage the normal path builds).
 			reactions.SetDairyStorage(dairy.Storage);
 
-			// Reaction temporal: NO se anade al registry de Reactions (se construye
-			// directo via constructor internal). Side effect minimo: la primera
-			// invocacion con este patron crea (formattedReaction -> reactionId) en
-			// DiaryStorage.ReactionRegistry; re-invocaciones del mismo patron reusan
-			// el id. Nombre interno deterministico (hash del patron) para que el
-			// registry rebote la misma fila en lugar de crecer.
+			// Temporary Reaction: it is NOT added to the Reactions registry (it is built
+			// directly via the internal constructor). Minimal side effect: the first
+			// invocation with this pattern creates (formattedReaction -> reactionId) in
+			// DiaryStorage.ReactionRegistry; re-invocations of the same pattern reuse
+			// the id. Deterministic internal name (hash of the pattern) so the
+			// registry bounces the same row instead of growing.
 			string ephemeralName = "__find_pattern_" + StableHash(patternDsl);
 			var ephemeral = new Follower.Reaction(reactions, ephemeralName, Follower.ReactionMode.Job, Follower.ReactionActivation.Company);
 			ephemeral.WithSharedHydration().Seek("FindMatch").OnMatch(patternDsl);
-			// Sin Action plane — ExecuteAction trata ReactionActionType.None como
-			// no-op (case explicito en el switch), pero MatchTree todavia llama
-			// RecordCompleteMatch antes de invocar la accion, asi que el ring
-			// LastMatches se llena tal cual.
+			// No Action plane — ExecuteAction treats ReactionActionType.None as a
+			// no-op (explicit case in the switch), but MatchTree still calls
+			// RecordCompleteMatch before invoking the action, so the
+			// LastMatches ring fills as-is.
 			ephemeral.Execute();
 
-			// Idempotencia: FindPattern es una query, no una reaction persistente. El
-			// motor de Reactions guarda checkpoints per-seek tras matchear (necesario
-			// para batches incrementales en reactions reales); para FindPattern eso
-			// rompe la propiedad "mismo patron + mismo journal -> mismo resultado":
-			// la segunda invocacion arrancaria DESPUES del ultimo match y devolveria
-			// vacio. Reset al checkpoint del reactionId/seek a (0, 0) para que la
-			// proxima query re-arranque desde genesis. Single-seek por construccion
-			// del FindPattern (.Seek("FindMatch")), asi que solo nivel 0.
+			// Idempotency: FindPattern is a query, not a persistent reaction. The
+			// Reactions engine saves per-seek checkpoints after matching (necessary
+			// for incremental batches in real reactions); for FindPattern that
+			// breaks the "same pattern + same journal -> same result" property:
+			// the second invocation would start AFTER the last match and return
+			// empty. Reset the reactionId/seek checkpoint to (0, 0) so the
+			// next query re-starts from genesis. Single-seek by construction
+			// of FindPattern (.Seek("FindMatch")), so only level 0.
 			if (ephemeral.ReactionId > 0)
 			{
 				dairy.Storage.SaveReactionLastProcessedEntryId(ephemeral.ReactionId, 0, 0);
@@ -4104,10 +4105,10 @@ namespace Puppeteer.EventSourcing
 			return sb.ToString();
 		}
 
-		// Helper compartido entre ShowReactions y ShowReaction: emite la coleccion
-		// seeks: con name + entered + matched + detected + confirmed por nivel.
-		// ShowReaction sobreescribe esto con una version mas detallada (incluye
-		// onMatch y isFinal); ShowReactions usa este shape compacto.
+		// Helper shared between ShowReactions and ShowReaction: emits the seeks
+		// collection with name + entered + matched + detected + confirmed per level.
+		// ShowReaction overrides this with a more detailed version (includes
+		// onMatch and isFinal); ShowReactions uses this compact shape.
 		private void WriteSeeksCollection(ToonFormatter formatter, Follower.Reaction reaction)
 		{
 			formatter.BeginCollection();
@@ -4127,17 +4128,17 @@ namespace Puppeteer.EventSourcing
 			formatter.EndCollection("seeks");
 		}
 
-		// Reaction nunca ejecutada -> reactionId == long.MinValue -> no hay checkpoint
-		// row. GetReactionCheckpoint rechaza ids <= 0, asi que cortamos en seco aqui
-		// y devolvemos (0, 0) — semantica equivalente al "checkpoint vacio" que el
-		// storage retornaria si supiera del id.
+		// Reaction never executed -> reactionId == long.MinValue -> there is no checkpoint
+		// row. GetReactionCheckpoint rejects ids <= 0, so we short-circuit here
+		// and return (0, 0) — semantics equivalent to the "empty checkpoint" the
+		// storage would return if it knew about the id.
 		//
-		// Eleccion de storage: la Reaction usa el storage configurado en
-		// reactions.SetDairyStorage(...) — que puede divergir de actor.Handler.dairy
-		// en tests que inyectan un storage independiente. Preferimos consultar a
-		// reactions.DiaryStorage si esta wired; fallback a dairy.Storage cuando
-		// solo el path EventSourcingStorage(...) corrio (que ata ambos al mismo
-		// Diary). Si ninguno esta disponible devolvemos zeros.
+		// Storage choice: the Reaction uses the storage configured in
+		// reactions.SetDairyStorage(...) — which may diverge from actor.Handler.dairy
+		// in tests that inject an independent storage. We prefer to query
+		// reactions.DiaryStorage if wired; fallback to dairy.Storage when
+		// only the EventSourcingStorage(...) path ran (which ties both to the same
+		// Diary). If neither is available we return zeros.
 		private (long detected, long confirmed) GetCheckpointSafe(long reactionId, int seekLevel)
 		{
 			if (reactionId <= 0) return (0L, 0L);
@@ -4149,10 +4150,10 @@ namespace Puppeteer.EventSourcing
 			return storage.GetReactionCheckpoint(reactionId, seekLevel);
 		}
 
-		// hydration: formato compacto en una sola linea — el modo + opcionalmente
-		// el untilSeek entre parentesis. Sin untilSeek queda solo "Shared" /
-		// "Independent"; sirve a la IA para reconocer la estrategia BFS/DFS de un
-		// vistazo sin tener que decodificar dos campos separados.
+		// hydration: compact single-line format — the mode + optionally
+		// the untilSeek in parentheses. Without untilSeek it is just "Shared" /
+		// "Independent"; it helps the AI recognize the BFS/DFS strategy at a
+		// glance without having to decode two separate fields.
 		private static string FormatHydration(Follower.Reaction reaction)
 		{
 			string mode = reaction.HydrationMode == Follower.HydrationMode.Shared ? "Shared" : "Independent";
@@ -4160,11 +4161,11 @@ namespace Puppeteer.EventSourcing
 			return $"{mode}(untilSeek: '{reaction.HydrationUntilSeek}')";
 		}
 
-		// action terminator: plane + verbo. Metadata.Materialize agrega el destination
-		// entre comillas para que la IA vea el target sin pedir otro show. None es
-		// legal en tiempo de ejecucion (case explicito en ExecuteAction) — lo
-		// reportamos tal cual para reactions a medio construir o de uso solo-
-		// observacional.
+		// action terminator: plane + verb. Metadata.Materialize adds the destination
+		// in quotes so the AI sees the target without requesting another show. None is
+		// legal at runtime (explicit case in ExecuteAction) — we
+		// report it as-is for half-built or observation-only
+		// reactions.
 		private static string FormatActionTerminator(Follower.Reaction reaction)
 		{
 			switch (reaction.ActionType)
@@ -4182,16 +4183,20 @@ namespace Puppeteer.EventSourcing
 							: $"Metadata.Materialize '{reaction.MaterializeDestination}'";
 					}
 					return "Metadata";
+				case Follower.ReactionActionType.Outbox:
+					return string.IsNullOrWhiteSpace(reaction.OutboxDestination)
+						? "Outbox.Emit"
+						: $"Outbox.Emit '{reaction.OutboxDestination}'";
 				default:
 					return "None";
 			}
 		}
 
-		// Hash estable del patron DSL para nombrar la reaction efimera de FindPattern.
-		// El proposito NO es seguridad sino determinismo: el MISMO patron debe colapsar
-		// al MISMO reactionId en el registry del DiaryStorage, asi re-invocaciones no
-		// inflan el registry. SHA-256 truncado a 8 bytes hex (16 chars) — colisiones
-		// son astronomicamente improbables para el rango de patrones que un actor ve.
+		// Stable hash of the DSL pattern to name FindPattern's ephemeral reaction.
+		// The purpose is NOT security but determinism: the SAME pattern must collapse
+		// to the SAME reactionId in the DiaryStorage registry, so re-invocations do not
+		// inflate the registry. SHA-256 truncated to 8 hex bytes (16 chars) — collisions
+		// are astronomically improbable for the range of patterns an actor sees.
 		private static string StableHash(string text)
 		{
 			using var sha = System.Security.Cryptography.SHA256.Create();
@@ -4207,25 +4212,25 @@ namespace Puppeteer.EventSourcing
 			private readonly int _maxPoolSize;
 			private int _count = 0;
 
-			// Pooling POR FORMA (shape-keyed). Cada clave de forma (el script de la
-			// operacion V2 cacheada) tiene su propia pila. La forma de parametros es
-			// invariante por Query/Command (mismo script => mismo tipo/orden/cantidad),
-			// asi que el instance rentado conserva sus slots (Parameter + VariableSymbol)
-			// y el configure del caller solo sobreescribe valores via SetParameter, sin
-			// re-asignar. A diferencia del pool keyless, NO se purga en Rent.
+			// Pooling BY SHAPE (shape-keyed). Each shape key (the script of the
+			// cached V2 operation) has its own stack. The parameter shape is
+			// invariant per Query/Command (same script => same type/order/count),
+			// so the rented instance keeps its slots (Parameter + VariableSymbol)
+			// and the caller's configure only overwrites values via SetParameter, without
+			// re-assigning. Unlike the keyless pool, it is NOT purged on Rent.
 			//
-			// Politica de sizing (firmada): crecimiento LIBRE hasta el pico de
-			// concurrencia de la firma (sin cap). El high-water = pico real de
-			// concurrencia simultanea de esa firma. Capar a ciegas convertiria el
-			// warm-up unico en churn recurrente bajo pico, justo en el hot path (las
-			// lecturas escalan N*K sin writeLock).
+			// Sizing policy (signed): FREE growth up to the signature's
+			// concurrency peak (no cap). The high-water = the real peak of
+			// simultaneous concurrency of that signature. Capping blindly would turn the
+			// single warm-up into recurring churn under peak, right on the hot path (the
+			// reads scale N*K without a writeLock).
 			private readonly ConcurrentDictionary<string, ShapePool> _byShape
 				= new ConcurrentDictionary<string, ShapePool>(StringComparer.Ordinal);
 
-			// Estado por forma. Idle = instancias ociosas reutilizables. Live = cuantas
-			// estan rentadas (fuera) ahora. PeakLiveSinceTrim = pico de Live en la ventana
-			// de decaimiento actual (se resetea en cada Trim). HighWaterEver = pico de Live
-			// historico (observabilidad: pico de concurrencia que vivio la firma).
+			// Per-shape state. Idle = reusable idle instances. Live = how many
+			// are rented (out) now. PeakLiveSinceTrim = peak of Live in the current
+			// decay window (reset on each Trim). HighWaterEver = historical peak of Live
+			// (observability: concurrency peak the signature experienced).
 			private sealed class ShapePool
 			{
 				internal readonly ConcurrentStack<Parameters> Idle = new ConcurrentStack<Parameters>();
@@ -4247,9 +4252,9 @@ namespace Puppeteer.EventSourcing
 			{
 				if (maxPoolSize <= 0) throw new LanguageException($"{nameof(ConcurrentParametersPool)} maxPoolSize {maxPoolSize} must be greater than 0.");
 				_maxPoolSize = maxPoolSize;
-				// Decaimiento (politica #2) auto-dirigido por presion de memoria: cada GC
-				// Gen2 invoca Trim(). Referencia debil => no impide la recoleccion del pool
-				// junto con su ActorHandler.
+				// Decay (policy #2) self-driven by memory pressure: each Gen2 GC
+				// invokes Trim(). Weak reference => it does not prevent the pool from being collected
+				// together with its ActorHandler.
 				Gen2GcCallback.Register(static state => { ((ConcurrentParametersPool)state).Trim(); return true; }, this);
 			}
 
@@ -4264,10 +4269,10 @@ namespace Puppeteer.EventSourcing
 					item.PurgeUserParameters();
 					return item;
 				}
-				// Playbill final refactor: el pool ya no pre-seedea Now.
+				// Playbill final refactor: the pool no longer pre-seeds Now.
 				// V1 (PerformCmd(string,string,string), PerformCmdAsync(string,string,string))
-				// inyecta Now via indexer en su entry path antes de bajar a la maquinaria
-				// interna. V2 fluent (.WithParameters(...)) declara Now explicito.
+				// injects Now via the indexer in its entry path before descending to the
+				// internal machinery. V2 fluent (.WithParameters(...)) declares Now explicitly.
 				return new Parameters();
 			}
 
@@ -4297,12 +4302,12 @@ namespace Puppeteer.EventSourcing
 				UpdateMax(ref sp.HighWaterEver, live);
 				if (sp.Idle.TryPop(out var item))
 				{
-					// Reuso de slots: NO se purga. El configure del caller sobreescribe
-					// los valores sobre los Parameter/VariableSymbol ya formados.
+					// Slot reuse: NOT purged. The caller's configure overwrites
+					// the values on the already-formed Parameter/VariableSymbol.
 					return item;
 				}
-				// Primer Rent de esta forma (o pila vacia por concurrencia): instancia
-				// nueva vacia; el configure la forma y el Return la archiva bajo la clave.
+				// First Rent of this shape (or empty stack due to concurrency): a new
+				// empty instance; configure shapes it and Return files it under the key.
 				return new Parameters();
 			}
 
@@ -4316,18 +4321,18 @@ namespace Puppeteer.EventSourcing
 				item.Clear();
 				var sp = _byShape.GetOrAdd(shapeKey, static _ => new ShapePool());
 				Interlocked.Decrement(ref sp.Live);
-				sp.Idle.Push(item); // crecimiento libre: sin cap por forma (politica #1)
+				sp.Idle.Push(item); // free growth: no cap per shape (policy #1)
 			}
 
-			// Decaimiento (politica #2): un paso de trim sobre todas las formas. Mantiene
-			// idle hasta cubrir el pico de concurrencia de la ventana anterior
-			// (keep = peakAnterior - live); descarta el sobrante de un burst pasado. Tras
-			// ~2 ventanas sin carga, idle decae a 0 y la forma se saca del pool (gate de
-			// la eviccion: pool->0 => fuera del diccionario). El GATILLO real de la
-			// eviccion de la OPERACION (recencia del cache de Query/Command, horizonte mas
-			// largo) es pieza aparte que vive en ese cache; aqui solo el pool retira su
-			// propia entrada cuando llega a 0. Sin reloj de pared: se invoca desde un tick
-			// de mantenimiento (p.ej. callback de GC Gen2) o explicitamente.
+			// Decay (policy #2): one trim step over all shapes. Keeps
+			// idle up to covering the concurrency peak of the previous window
+			// (keep = previousPeak - live); discards the surplus of a past burst. After
+			// ~2 windows without load, idle decays to 0 and the shape is removed from the pool (eviction
+			// gate: pool->0 => out of the dictionary). The real TRIGGER of the
+			// OPERATION eviction (recency of the Query/Command cache, longer
+			// horizon) is a separate piece living in that cache; here only the pool removes its
+			// own entry when it reaches 0. No wall clock: it is invoked from a
+			// maintenance tick (e.g. Gen2 GC callback) or explicitly.
 			internal void Trim()
 			{
 				foreach (var kv in _byShape)
@@ -4338,7 +4343,7 @@ namespace Puppeteer.EventSourcing
 					int keep = peak - live;
 					if (keep < 0) keep = 0;
 					while (sp.Idle.Count > keep && sp.Idle.TryPop(out _)) { }
-					// Gate: forma totalmente fria (nadie fuera, sin ociosas) => sale del pool.
+					// Gate: fully cold shape (none out, no idle) => leaves the pool.
 					if (Volatile.Read(ref sp.Live) == 0 && sp.Idle.IsEmpty)
 					{
 						_byShape.TryRemove(new KeyValuePair<string, ShapePool>(kv.Key, sp));
@@ -4346,29 +4351,29 @@ namespace Puppeteer.EventSourcing
 				}
 			}
 
-			// Observabilidad (diseño firmado): instancias actualmente ociosas para una
-			// forma. Tambien permite a los tests verificar el reuso por forma.
+			// Observability (signed design): instances currently idle for a
+			// shape. It also lets tests verify per-shape reuse.
 			internal int IdleCount(string shapeKey)
 			{
 				ArgumentNullException.ThrowIfNull(shapeKey);
 				return _byShape.TryGetValue(shapeKey, out var sp) ? sp.Idle.Count : 0;
 			}
 
-			// Observabilidad: pico de concurrencia historico de la firma. NO es una cota
-			// de memoria; es la señal que apunta al tuning de la logica de negocio cuando
-			// un endpoint acumula concurrencia no acotada.
+			// Observability: historical concurrency peak of the signature. It is NOT a memory
+			// bound; it is the signal that points to tuning the business logic when
+			// an endpoint accumulates unbounded concurrency.
 			internal int HighWaterMark(string shapeKey)
 			{
 				ArgumentNullException.ThrowIfNull(shapeKey);
 				return _byShape.TryGetValue(shapeKey, out var sp) ? Volatile.Read(ref sp.HighWaterEver) : 0;
 			}
 
-			// Observabilidad: numero de formas distintas con pool vivo ahora.
+			// Observability: number of distinct shapes with a live pool right now.
 			internal int ShapeCount => _byShape.Count;
 
-			// Snapshot de todas las formas vivas con sus contadores, para la superficie
-			// de introspeccion. HighWater (pico de concurrencia historico) es la señal de
-			// diagnostico que apunta al tuning de la logica de negocio.
+			// Snapshot of all live shapes with their counters, for the introspection
+			// surface. HighWater (historical concurrency peak) is the diagnostic
+			// signal that points to tuning the business logic.
 			internal List<(string Shape, int Live, int Idle, int HighWater)> SnapshotShapes()
 			{
 				var list = new List<(string, int, int, int)>(_byShape.Count);

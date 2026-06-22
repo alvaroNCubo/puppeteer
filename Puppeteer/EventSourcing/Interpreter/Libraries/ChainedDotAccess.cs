@@ -61,16 +61,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			// Una cadena a.B().C() es ChainedDotAccess (C) envolviendo el prefijo
-			// (a.B(), un DotAccess/NewInstance). Para que TODAS las llamadas de la
-			// cadena sean matcheables como obligaciones:
-			//   1. recursar en el prefijo (instance) — se evalua antes, position menor.
-			//   2. recursar en los argumentos (llamadas anidadas como argumento), args-first.
-			//   3. registrar esta llamada/acceso de la cadena.
-			// El receiver de un eslabon encadenado es una expresion sin nombre simple, asi
-			// que target/targetName van nulos; el matcher casa por tipo declarante + metodo +
-			// args (suficiente para patrones [_:Tipo].Metodo(...)). Un instance name explicito
-			// sobre un eslabon encadenado no se correlaciona (caso de borde fuera de uso).
+			// A chain a.B().C() is a ChainedDotAccess (C) wrapping the prefix
+			// (a.B(), a DotAccess/NewInstance). So that ALL calls in the
+			// chain are matchable as obligations:
+			//   1. recurse into the prefix (instance) — it evaluates first, lower position.
+			//   2. recurse into the arguments (nested calls as arguments), args-first.
+			//   3. register this call/access of the chain.
+			// The receiver of a chained link is an expression without a simple name, so
+			// target/targetName are null; the matcher matches by declaring type + method +
+			// args (enough for patterns [_:Type].Method(...)). An explicit instance name
+			// on a chained link is not correlated (edge case, not in use).
 			instance.PreparePatternMatching(patternAst, ref position);
 
 			AstExpression[] nestedArgs = this.Arguments();

@@ -165,10 +165,10 @@ namespace Puppeteer.EventSourcing.DB
 							sql.Clear();
 						}
 
-						// Commit logico bajo la misma transaccion DB:
-						// (a) MERGE buffer → EventElision (registry completo).
-						// (b) UPDATE journal SET Skip = 1 — column autoritativa para rehidratacion
-						//     (sin LEFT JOIN). Materialize v2 / Fase 0.5.
+						// Logical commit under the same DB transaction:
+						// (a) MERGE buffer into EventElision (full registry).
+						// (b) UPDATE journal SET Skip = 1 — authoritative column for rehydration
+						//     (no LEFT JOIN). Materialize v2 / Phase 0.5.
 						string commitSql = $@"
 							MERGE INTO EventElision AS target
 							USING EventElisionBuffer AS source
@@ -431,8 +431,8 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		// Materialize v2 / Fase 3 — wire verb (d) DameElidedRange. Ordenado por
-		// (Timestamp, DiaryId) desde EventElision.Timestamp.
+		// Materialize v2 / Phase 3 — wire verb (d) DameElidedRange. Ordered by
+		// (Timestamp, DiaryId) from EventElision.Timestamp.
 		protected internal override void ReadElisionMarkersInRange(long fromDairyId, long toDairyId, List<MaterializationElisionMarker> result)
 		{
 			ArgumentNullException.ThrowIfNull(result);

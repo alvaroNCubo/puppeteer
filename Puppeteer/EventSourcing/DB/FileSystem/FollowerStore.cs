@@ -29,9 +29,9 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			atomicOp.RecoverFromIncompleteOperation(filePath);
 			followers.Clear();
 
-			// Mismo contrato: file-missing es valido (sin followers registrados),
-			// pero corrupcion debe lanzar para no resetear silenciosamente los
-			// checkpoints (esto desincronizaria a los followers en runtime).
+			// Same contract: a missing file is valid (no followers registered),
+			// but corruption must throw so the checkpoints are not silently reset
+			// (which would desynchronize the followers at runtime).
 			if (!File.Exists(filePath)) return;
 
 			byte[] data = File.ReadAllBytes(filePath);

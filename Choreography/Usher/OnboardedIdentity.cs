@@ -4,16 +4,16 @@ using Choreography.Transport;
 
 namespace Choreography.Usher
 {
-    // Lo que el StageOnboardingClient produce tras un handshake exitoso. La app Stage
-    // toma estos campos para:
-    //   1. Construir el Stage con AssignedStageId
-    //   2. Configurar el storage con JournalSecret como clave de encripcion (HKDF
-    //      contra contact.enc en la implementacion real)
-    //   3. Configurar el transporte con TrustedSmpServers como anclas TOFU
-    //   4. Arrancar el catch-up desde JournalEpochAtJoin
-    //   5. Conservar StageKeyPair en secure storage (Keychain/Keystore) para firmar
-    //      futuros eventos y para desellar los PeerInvitationRecord que peers
-    //      existentes publicaran en el journal (Fase 6).
+    // What the StageOnboardingClient produces after a successful handshake. The Stage app
+    // takes these fields to:
+    //   1. Build the Stage with AssignedStageId
+    //   2. Configure storage with JournalSecret as the encryption key (HKDF
+    //      against contact.enc in the real implementation)
+    //   3. Configure the transport with TrustedSmpServers as TOFU anchors
+    //   4. Start the catch-up from JournalEpochAtJoin
+    //   5. Keep StageKeyPair in secure storage (Keychain/Keystore) to sign
+    //      future events and to unseal the PeerInvitationRecord that existing
+    //      peers will publish in the journal (Phase 6).
     public sealed class OnboardedIdentity
     {
         public PerformerId AssignedStageId { get; }

@@ -3,12 +3,12 @@ using System.Threading;
 
 namespace Puppeteer.EventSourcing
 {
-	// ConsoleLogger es el default per-actor: ActorHandler lo construye en el
-	// field initializer de su `logger`. Util en desarrollo (Error -> stderr,
-	// Debug -> stdout via ThreadPool para no bloquear). El host inyecta su
-	// impl con actor.UseLogger(...) cuando necesita Serilog, MEL, NLog, etc.
-	// El singleton process-wide (la vieja class Loggers) fue retirado en F5
-	// del refactor de logger.
+	// ConsoleLogger is the per-actor default: ActorHandler constructs it in the
+	// field initializer of its `logger`. Useful in development (Error -> stderr,
+	// Debug -> stdout via ThreadPool so it does not block). The host injects its
+	// own impl with actor.UseLogger(...) when it needs Serilog, MEL, NLog, etc.
+	// The process-wide singleton (the old Loggers class) was removed in F5 of
+	// the logger refactor.
 	public sealed class ConsoleLogger : IPuppeteerLogger
 	{
 		public void Error(string message, Exception exception)

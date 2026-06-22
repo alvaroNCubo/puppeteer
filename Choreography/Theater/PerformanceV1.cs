@@ -9,16 +9,16 @@ namespace Choreography.Theater
 {
     public class PerformanceV1 : Performance
     {
-        // Fase 4.5 backward compat: V1 tambien soporta Playbill para preservar
-        // la capacidad de auditar ip/user (que historicamente vivian como
-        // columnas Ip/[User] del journal y ahora viven en el sidecar Playbill).
-        // Mismo patron que V2 — auto-provision, schema registry, second-write.
+        // Phase 4.5 backward compat: V1 also supports Playbill to preserve
+        // the ability to audit ip/user (which historically lived as
+        // the journal's Ip/[User] columns and now live in the Playbill sidecar).
+        // Same pattern as V2 — auto-provision, schema registry, second-write.
         private Playbill playbill;
         private string currentPlaybillSchemaName;
-        // Conveniencia: si el caller no provee libraries, se asume el assembly desde
-        // donde se invoco el ctor. Util cuando dominio e interfaz viven en el mismo
-        // proyecto. El path idiomatico es pasar las DLLs de dominio explicitamente
-        // (ver el ctor con params Assembly[]).
+        // Convenience: if the caller does not provide libraries, the assembly from
+        // which the ctor was invoked is assumed. Useful when domain and interface live in
+        // the same project. The idiomatic path is to pass the domain DLLs explicitly
+        // (see the ctor with params Assembly[]).
         [MethodImpl(MethodImplOptions.NoInlining)]
         public PerformanceV1(string actorName)
             : this(actorName, new[] { Assembly.GetCallingAssembly() })
@@ -39,7 +39,7 @@ namespace Choreography.Theater
 
         internal ActorV1 GetActorV1() => (ActorV1)ActorInstance;
 
-        // Shadow del Logger base para preservar PerformanceV1 en la cadena fluent.
+        // Shadow of the base Logger to preserve PerformanceV1 in the fluent chain.
         public new PerformanceV1 Logger(IPuppeteerLogger logger)
         {
             base.Logger(logger);
@@ -91,7 +91,7 @@ namespace Choreography.Theater
             if (script == null) throw new ArgumentNullException(nameof(script));
 
             LastActivity = DateTime.Now;
-            // Fase 4.5 refactor Playbill: ip/user dejaron de inyectarse como parametros del script.
+            // Phase 4.5 Playbill refactor: ip/user are no longer injected as script parameters.
             var p = new Parameters();
             using (FormatterContext.Push(null))
             {
@@ -120,10 +120,10 @@ namespace Choreography.Theater
             return this;
         }
 
-        // Playbill-aware fluent invocation entry para V1. Como V1 necesita
-        // ip/user para concatenarlos al script (domain values), se pasan
-        // explicitos en Using. WithPlaybill agrega audit values en paralelo;
-        // el dev puede usar los mismos valores que ip/user o distintos.
+        // Playbill-aware fluent invocation entry for V1. Since V1 needs
+        // ip/user to concatenate them into the script (domain values), they are passed
+        // explicitly in Using. WithPlaybill adds audit values in parallel;
+        // the dev can use the same values as ip/user or different ones.
         public PerformanceV1Invocation Using(string script, string ip, string user)
         {
             if (script == null) throw new ArgumentNullException(nameof(script));

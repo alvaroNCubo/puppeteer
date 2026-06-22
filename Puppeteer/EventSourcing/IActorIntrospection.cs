@@ -2,208 +2,208 @@ using System;
 
 namespace Puppeteer.EventSourcing
 {
-	// Surface read-only de inspeccion para uso CLI / IA / MCP / test-harness.
-	// Separada del DSL del dominio por construccion: los verbos viven en una
-	// interfaz que TODO actor expone por ser Puppeteer, no por ser Banco /
-	// Tetris / etc. El DSL del dominio queda intacto.
+	// Read-only introspection surface for CLI / AI / MCP / test-harness use.
+	// Separated from the domain DSL by construction: the verbs live in an
+	// interface that EVERY actor exposes by virtue of being Puppeteer, not by
+	// virtue of any concrete domain. The domain DSL stays intact.
 	//
-	// Implementada por ActorHandler (internal). Expuesta como
-	// actor.Introspection (public) en Actor.cs — mismo patron que
+	// Implemented by ActorHandler (internal). Exposed as
+	// actor.Introspection (public) in Actor.cs — same pattern as
 	// Materialization / Reactions / Distill.
 	//
-	// Read-only por contrato: escribir al journal va por la superficie de
-	// invocacion (Perform / Tell), nunca por aqui. Esa asimetria habilita el
-	// modo shadow del CLI IA-native — la introspeccion sobre un shadow nunca
-	// puede mutar el journal del primary aunque la IA lo intente.
+	// Read-only by contract: writing to the journal goes through the
+	// invocation surface (Perform / Tell), never through here. That asymmetry
+	// enables the shadow mode of the AI-native CLI — introspection over a
+	// shadow can never mutate the primary's journal even if the AI tries.
 	//
-	// Etapa 1 (firmada 2026-05-31): un solo verbo ShowEntry. Range / Find /
-	// Describe llegan en pasos siguientes del CLI IA-native.
+	// Stage 1 (signed 2026-05-31): a single verb ShowEntry. Range / Find /
+	// Describe arrive in later steps of the AI-native CLI.
 	public interface IActorIntrospection
 	{
-		// Devuelve el record del journal con EntryId == entryId, formateado
-		// como Toon (Token-Oriented Object Notation). Si no existe, lanza
-		// LanguageException con un mensaje diagnostico.
+		// Returns the journal record with EntryId == entryId, formatted
+		// as Toon (Token-Oriented Object Notation). If it does not exist, throws
+		// LanguageException with a diagnostic message.
 		//
-		// Forma del Toon (tentativa, sujeta a refinamiento por feedback):
+		// Toon shape (tentative, subject to refinement from feedback):
 		//
 		//   id: <long>
 		//   kind: "script" | "invocation" | "define"
 		//   at: <DateTime>
-		//   <campos especificos del kind>
+		//   <kind-specific fields>
 		//
 		// Script:     script
 		// Invocation: actionId, arguments
 		// Define:     actionId, define
 		//
-		// exposeData aparece solo cuando esta presente en el record.
+		// exposeData appears only when present in the record.
 		string ShowEntry(long entryId);
 
-		// Devuelve la Define entry vigente para un actionId, formateada como
-		// Toon. La invocation entry solo registra actionId — para saber QUE es
-		// esa accion (su firma DSL) la IA consulta esta superficie.
+		// Returns the current Define entry for an actionId, formatted as
+		// Toon. The invocation entry only records actionId — to know WHAT that
+		// action is (its DSL signature) the AI queries this surface.
 		//
-		// Politica de redefiniciones: si el journal contiene multiples Define
-		// entries para el mismo actionId (caso atipico — re-declaracion durante
-		// desarrollo), gana el de mayor EntryId. La asimetria es deliberada:
-		// la version vigente es la observada por el codigo en ejecucion ahora.
+		// Redefinition policy: if the journal contains multiple Define
+		// entries for the same actionId (atypical case — re-declaration during
+		// development), the one with the greatest EntryId wins. The asymmetry is
+		// deliberate: the current version is the one observed by the code running now.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
 		//   actionId: <int>
-		//   defineEntryId: <long>     # donde se declaro (apto para show entry)
+		//   defineEntryId: <long>     # where it was declared (suitable for show entry)
 		//   at: <DateTime>
-		//   define: "<DSL canonico de la accion>"
+		//   define: "<canonical DSL of the action>"
 		//
-		// Si no existe ningun Define para ese actionId, lanza LanguageException.
+		// If no Define exists for that actionId, throws LanguageException.
 		string ShowAction(int actionId);
 
-		// Devuelve el set de globales actualmente vivos en la tabla de simbolos del
-		// actor, formateado como Toon. Resuelve el problema de "como sabe la IA que
-		// 'cia' ya existe en este actor": antes de definir cualquier singleton la
-		// IA consulta este verbo y se entera de lo que el dominio ya puso.
+		// Returns the set of globals currently live in the actor's symbol table,
+		// formatted as Toon. Solves the problem of "how does the AI know that
+		// 'obj' already exists in this actor": before defining any singleton the
+		// AI queries this verb and learns what the domain has already put there.
 		//
-		// El symbol table contiene SOLO globales por construccion del interprete —
-		// locales de bloque { ... } y parametros de actions no llegan a la tabla,
-		// viven en un cache transitorio aparte (SymbolTable.cacheVariables).
+		// The symbol table contains ONLY globals by construction of the interpreter —
+		// block locals { ... } and action parameters never reach the table,
+		// they live in a separate transient cache (SymbolTable.cacheVariables).
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
 		//   symbols:
-		//     - name: "cia"
-		//       staticType: "Compania"
-		//       runtimeType: "Compania"
-		//     - name: "pago"
-		//       staticType: "Pago"
-		//       runtimeType: "PagoEfectivo"
+		//     - name: "obj"
+		//       staticType: "Base"
+		//       runtimeType: "Base"
+		//     - name: "other"
+		//       staticType: "Base"
+		//       runtimeType: "Derived"
 		//
-		// staticType: el tipo registrado en la tabla — la upper-bound polimorfica
-		//   elegida en la primera asignacion. Util para validar llamadas estaticamente.
-		// runtimeType: value?.GetType() — el tipo real del valor en este momento.
-		//   Puede ser una subclase del staticType cuando hay polimorfismo activo.
-		// Si la tabla esta vacia: 'symbols: []'.
+		// staticType: the type registered in the table — the polymorphic upper-bound
+		//   chosen on the first assignment. Useful to validate calls statically.
+		// runtimeType: value?.GetType() — the actual type of the value at this moment.
+		//   May be a subclass of staticType when polymorphism is active.
+		// If the table is empty: 'symbols: []'.
 		string ShowSymbols();
 
-		// Devuelve detalle de un solo simbolo por nombre (case-insensitive). Si no
-		// existe, lanza LanguageException.
+		// Returns detail for a single symbol by name (case-insensitive). If it does
+		// not exist, throws LanguageException.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
-		//   name: "cia"
-		//   staticType: "Compania"
-		//   runtimeType: "Compania"
-		//   value: "Compania('Pruebas')"     # solo si la clase tiene ToString sobreescrito
+		//   name: "obj"
+		//   staticType: "Base"
+		//   runtimeType: "Base"
+		//   value: "Base('sample')"     # only if the class overrides ToString
 		//
-		// El campo `value` aparece SOLO cuando la clase del runtimeType sobreescribe
-		// ToString(); el default object.ToString() = FullName del tipo seria redundante
-		// con runtimeType y se omite. El path legacy print(StringBuilder) NO se respeta
-		// aqui — esa salida es JSON-shaped y rompe el contrato del Toon; el dominio
-		// que quiera representacion inspectionable debe sobreescribir ToString.
+		// The `value` field appears ONLY when the runtimeType class overrides
+		// ToString(); the default object.ToString() = type FullName would be redundant
+		// with runtimeType and is omitted. The legacy print(StringBuilder) path is NOT honored
+		// here — that output is JSON-shaped and breaks the Toon contract; a domain
+		// that wants an inspectable representation must override ToString.
 		string ShowSymbol(string name);
 
-		// Devuelve constructores, interfaces y metodos accesibles desde DSL de una
-		// clase loaded en las LibraryAssemblies del actor. Resuelve "que puedo hacer
-		// con un tipo X" — la IA encadena: show symbols -> ve cia: Compania ->
-		// show class Compania -> ve los metodos invocables.
+		// Returns constructors, interfaces and DSL-accessible methods of a
+		// class loaded in the actor's LibraryAssemblies. Solves "what can I do
+		// with a type X" — the AI chains: show symbols -> sees obj: Base ->
+		// show class Base -> sees the invocable methods.
 		//
-		// Match case-insensitive contra Type.Name (consistente con la resolucion de
-		// clases en el resto del parser de Puppeteer). Si la clase no esta en
-		// ninguna library cargada, lanza LanguageException.
+		// Case-insensitive match against Type.Name (consistent with class
+		// resolution in the rest of the Puppeteer parser). If the class is not in
+		// any loaded library, throws LanguageException.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
-		//   class: "Perro"
+		//   class: "Derived"
 		//   constructors:
-		//     - signature: "Perro(String)"
+		//     - signature: "Derived(String)"
 		//   interfaces:
-		//     - name: "IAnimable"
+		//     - name: "IBehavior"
 		//   fields:
-		//     - signature: "VecesLadrado : Int32"
-		//       declaredOn: "Perro"
-		//     - signature: "ColorOjos : String"
-		//       declaredOn: "Animal"
+		//     - signature: "Count : Int32"
+		//       declaredOn: "Derived"
+		//     - signature: "Tag : String"
+		//       declaredOn: "Base"
 		//   properties:
-		//     - signature: "Nombre : String { get; }"
-		//       declaredOn: "Perro"
-		//     - signature: "Adulto : Boolean { get; set; }"
-		//       declaredOn: "Perro"
+		//     - signature: "Name : String { get; }"
+		//       declaredOn: "Derived"
+		//     - signature: "Ready : Boolean { get; set; }"
+		//       declaredOn: "Derived"
 		//   methods:
-		//     - signature: "Ladrar() -> Void"
-		//       declaredOn: "Perro"
-		//     - signature: "GetEspecie() -> String"
-		//       declaredOn: "Animal"
+		//     - signature: "Act() -> Void"
+		//       declaredOn: "Derived"
+		//     - signature: "GetKind() -> String"
+		//       declaredOn: "Base"
 		//
-		// Filtros aplicados (uniformes para metodos, fields y properties):
-		//   - Visibility: public + internal + protected-internal (alineado con
-		//     ParserValidation del interprete). Excluye private y pure protected.
-		//   - IsSpecialName en metodos: excluye get_/set_ de properties + operator
-		//     overloads (las properties ya tienen su propia coleccion).
-		//   - DeclaringType == typeof(object): excluye los 4 metodos heredados base.
-		//   - CompilerGenerated en fields: excluye backing fields de auto-properties
-		//     (esos detalles del compilador no son parte de la API del dominio).
+		// Applied filters (uniform for methods, fields and properties):
+		//   - Visibility: public + internal + protected-internal (aligned with
+		//     the interpreter's ParserValidation). Excludes private and pure protected.
+		//   - IsSpecialName on methods: excludes get_/set_ of properties + operator
+		//     overloads (properties already have their own collection).
+		//   - DeclaringType == typeof(object): excludes the 4 inherited base methods.
+		//   - CompilerGenerated on fields: excludes backing fields of auto-properties
+		//     (those compiler details are not part of the domain API).
 		//
-		// Inheritance: GetFields/GetProperties/GetMethods sin DeclaredOnly incluyen
-		// heredados. El campo declaredOn hace explicito de donde viene cada uno.
+		// Inheritance: GetFields/GetProperties/GetMethods without DeclaredOnly include
+		// inherited members. The declaredOn field makes explicit where each comes from.
 		//
-		// Properties: incluida si AL MENOS UN accessor (get o set) es callable. El
-		// signature emite solo los accessors callable — una property con setter
-		// privado se muestra como '{ get; }'. Una con ambos como '{ get; set; }'.
+		// Properties: included if AT LEAST ONE accessor (get or set) is callable. The
+		// signature emits only the callable accessors — a property with a private
+		// setter is shown as '{ get; }'. One with both as '{ get; set; }'.
 		//
-		// Fields readonly: prefijo 'readonly' en el signature
-		// ('readonly NombreOriginal : String').
+		// Readonly fields: 'readonly' prefix in the signature
+		// ('readonly Tag : String').
 		//
-		// Generics: types como IEnumerable&lt;CarritoItem&gt; se formatean legible
-		// ('IEnumerable&lt;CarritoItem&gt;'), no con el sufijo CLR (`1[CarritoItem]).
+		// Generics: types like IEnumerable&lt;Item&gt; are formatted legibly
+		// ('IEnumerable&lt;Item&gt;'), not with the CLR suffix (`1[Item]).
 		//
-		// Interfaces: incluye transitivas — todas las interfaces que el tipo
-		// satisface, no solo las declaradas directamente en la clase.
+		// Interfaces: includes transitive ones — all interfaces the type
+		// satisfies, not only those declared directly on the class.
 		string ShowClass(string className);
 
-		// Devuelve TODAS las reactions registradas en el actor, con su MatchCount
-		// agregado y los contadores per-Seek (entered/matched + checkpoint
-		// detected/confirmed). Resuelve "que reactions tiene este actor y como van"
-		// sin obligar a la IA a paginar los counters uno por uno.
+		// Returns ALL reactions registered in the actor, with their aggregate
+		// MatchCount and the per-Seek counters (entered/matched + checkpoint
+		// detected/confirmed). Solves "what reactions does this actor have and how
+		// are they doing" without forcing the AI to page the counters one by one.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
 		//   reactions:
-		//     - name: "ReplicaDeMoneda"
+		//     - name: "FirstReaction"
 		//       matchCount: 17
 		//       seeks:
-		//         - name: "CreacionMoneda"
+		//         - name: "FirstSeek"
 		//           entered: 17
 		//           matched: 17
 		//           detected: 142
 		//           confirmed: 142
 		//
-		// Detected/confirmed vienen de DiaryStorage.GetReactionCheckpoint(reactionId,
-		// level). Si la reaction nunca se ejecuto (reactionId == long.MinValue), no
-		// hay checkpoint todavia y se reportan ambos en 0 — consistente con lo que
-		// GetReactionCheckpoint retorna para reactionIds desconocidos.
-		// Si no hay reactions: 'reactions: []'.
+		// Detected/confirmed come from DiaryStorage.GetReactionCheckpoint(reactionId,
+		// level). If the reaction never ran (reactionId == long.MinValue), there
+		// is no checkpoint yet and both are reported as 0 — consistent with what
+		// GetReactionCheckpoint returns for unknown reactionIds.
+		// If there are no reactions: 'reactions: []'.
 		string ShowReactions();
 
-		// Devuelve detalle de UNA reaction, mas extensa que el item correspondiente
-		// en ShowReactions. Incluye: direccion (Forward/Backward), modo de hidratacion
-		// (Shared/Independent + opcional untilSeek), terminator del Action plane
+		// Returns detail for ONE reaction, more extensive than the corresponding item
+		// in ShowReactions. Includes: direction (Forward/Backward), hydration mode
+		// (Shared/Independent + optional untilSeek), Action plane terminator
 		// (Program.Emit / Causation.Continue / Metadata.Elide / Metadata.Materialize /
-		// None), patrones OnMatch literales por Seek, contadores per-Seek, y el ring
-		// buffer LastMatches (hasta 32 capturas recientes con bindings).
+		// None), literal OnMatch patterns per Seek, per-Seek counters, and the ring
+		// buffer LastMatches (up to 32 recent captures with bindings).
 		//
-		// Match case-insensitive contra Name. Si la reaction no existe en el actor,
-		// lanza LanguageException.
+		// Case-insensitive match against Name. If the reaction does not exist in the
+		// actor, throws LanguageException.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
-		//   name: "ReplicaDeMoneda"
+		//   name: "FirstReaction"
 		//   direction: "Forward"
-		//   hydration: "Shared(untilSeek: 'Propagacion')"
+		//   hydration: "Shared(untilSeek: 'SecondSeek')"
 		//   action: "Metadata.Elide"
 		//   matchCount: 17
 		//   seeks:
-		//     - name: "CreacionMoneda"
+		//     - name: "FirstSeek"
 		//       isFinal: false
 		//       onMatch:
-		//         - "moneda = NuevaMoneda();"
+		//         - "obj = Base();"
 		//       entered: 17
 		//       matched: 17
 		//       detected: 142
@@ -212,70 +212,70 @@ namespace Puppeteer.EventSourcing
 		//     - entryId: 142
 		//       occurredAt: 06/01/2026 14:22:08
 		//       bindings:
-		//         - name: "moneda"
+		//         - name: "obj"
 		//           value: "..."
 		//
-		// hydration es un string compactado para mantener la salida lineal: cuando hay
-		// untilSeek se inscribe entre parentesis; sin untilSeek queda solo el modo
-		// ("Shared" / "Independent"). action concatena plane + verbo; Materialize
-		// agrega el destination entre comillas ("Metadata.Materialize 'dest'").
+		// hydration is a compacted string to keep the output linear: when there is
+		// an untilSeek it is written in parentheses; without untilSeek only the mode
+		// remains ("Shared" / "Independent"). action concatenates plane + verb; Materialize
+		// adds the destination in quotes ("Metadata.Materialize 'dest'").
 		string ShowReaction(string name);
 
-		// Dry-match de un patron DSL contra el journal actual del actor, SIN crear una
-		// reaction permanente y SIN side effects observables al dominio (no journal
-		// entry, no Action plane, no efectos cross-actor). Util para "ver donde pegaria"
-		// una reaction antes de declararla, o para usar el motor de Reactions como una
-		// consulta de correlacion sobre eventos pasados.
+		// Dry-match of a DSL pattern against the actor's current journal, WITHOUT
+		// creating a permanent reaction and WITHOUT side effects observable to the
+		// domain (no journal entry, no Action plane, no cross-actor effects). Useful to
+		// "see where it would match" a reaction before declaring it, or to use the
+		// Reactions engine as a correlation query over past events.
 		//
-		// Consolidacion firmada 2026-06-01: TryPattern y FindPattern producen output
-		// identico y comparten implementacion — la diferencia era solo de framing
-		// ("probar como pegaria" vs "encontrar eventos correlacionados"). Un solo verbo.
+		// Consolidation signed 2026-06-01: TryPattern and FindPattern produce identical
+		// output and share implementation — the difference was only framing
+		// ("test how it would match" vs "find correlated events"). A single verb.
 		//
-		// El patron es la misma DSL que .Seek().OnMatch(...): bindings sin '$' son
-		// nombres libres que matchean el identificador del script; bindings con '$'
-		// son parametros que aparecen en los resultados ([$variable:tipo]). Las
-		// clases ([_:Clase], Clase(...)) deben existir en LibraryAssemblies del actor.
+		// The pattern is the same DSL as .Seek().OnMatch(...): bindings without '$' are
+		// free names that match the script's identifier; bindings with '$'
+		// are parameters that appear in the results ([$variable:type]). The
+		// classes ([_:Class], Class(...)) must exist in the actor's LibraryAssemblies.
 		//
-		// Side effect minimo: la primera invocacion con un patron dado crea una entrada
-		// (formattedReaction -> reactionId) en el registro persistente de reactions del
-		// DiaryStorage. Re-invocaciones del MISMO patron reusan ese id (idempotencia
-		// por nombre). El nombre interno usa hash del patron — no contamina enumeracion
-		// de ShowReactions porque la reaction temp NO se agrega al registry C# del
-		// actor.
+		// Minimal side effect: the first invocation with a given pattern creates an entry
+		// (formattedReaction -> reactionId) in the DiaryStorage persistent reactions
+		// registry. Re-invocations of the SAME pattern reuse that id (idempotency
+		// by name). The internal name uses a hash of the pattern — it does not pollute
+		// the ShowReactions enumeration because the temp reaction is NOT added to the
+		// actor's C# registry.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
-		//   pattern: "<patron DSL tal cual>"
+		//   pattern: "<DSL pattern as-is>"
 		//   matchesFound: 3
 		//   matches:
 		//     - entryId: 42
 		//       occurredAt: 06/01/2026 14:22:08
 		//       bindings:
-		//         - name: "unaInstancia"
+		//         - name: "anInstance"
 		//           value: "..."
-		//         - name: "cantidad"
+		//         - name: "quantity"
 		//           value: 5
 		//
-		// Si el patron no parsea, lanza LanguageException con el error del PatternParser.
-		// Si no hay matches: 'matches: []' con matchesFound: 0.
+		// If the pattern does not parse, throws LanguageException with the PatternParser error.
+		// If there are no matches: 'matches: []' with matchesFound: 0.
 		string FindPattern(string patternDsl);
 
-		// Devuelve el estado del pool de parametros POR FORMA (shape-keyed). Cada forma
-		// es el script de una operacion V2; el pool reutiliza slots (Parameter +
-		// VariableSymbol) entre invocaciones de la misma forma. highWater es el pico de
-		// concurrencia historico de esa forma — la señal que apunta al tuning de la
-		// logica de negocio cuando un endpoint acumula concurrencia no acotada (NO es una
-		// cota de memoria; el pool crece libre y decae solo). Ordenado por highWater desc.
+		// Returns the state of the parameter pool BY SHAPE (shape-keyed). Each shape
+		// is the script of a V2 operation; the pool reuses slots (Parameter +
+		// VariableSymbol) across invocations of the same shape. highWater is the
+		// historical concurrency peak of that shape — the signal that points to tuning
+		// the business logic when an endpoint accumulates unbounded concurrency (it is NOT a
+		// memory bound; the pool grows freely and decays on its own). Ordered by highWater desc.
 		//
-		// Forma del Toon:
+		// Toon shape:
 		//
 		//   parameterPools:
-		//     - shape: "{ box = Clase(); print box.Goo(id) v; }"
-		//       live: 0          # rentadas (fuera) ahora
-		//       idle: 2          # ociosas reutilizables ahora
-		//       highWater: 50    # pico de concurrencia simultanea historico
+		//     - shape: "{ box = Class(); print box.Goo(id) v; }"
+		//       live: 0          # rented (out) now
+		//       idle: 2          # idle and reusable now
+		//       highWater: 50    # historical simultaneous concurrency peak
 		//
-		// Si no hay formas vivas: 'parameterPools: []'.
+		// If there are no live shapes: 'parameterPools: []'.
 		string ShowParameterPools();
 	}
 }

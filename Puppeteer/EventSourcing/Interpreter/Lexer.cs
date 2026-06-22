@@ -702,13 +702,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 				input.ConsumeChar();
 
 			}
-			// Verificar sufijo decimal 'm' o 'M'
+			// Check decimal suffix 'm' or 'M'
 			if (IsDecimalSuffix())
 			{
 				input.SkipChar();
 				result = new Token(TokenType.@decimal, input.LexemeStart, input.LexemeEnd);
 			}
-			// Verificar sufijo double 'd' o 'D'
+			// Check double suffix 'd' or 'D'
 			else if (IsDoubleSuffix())
 			{
 				input.SkipChar();
@@ -1065,11 +1065,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 					var length = ultimoIndiceNoBlanco - LexemeStart + 1;
 					if (length > 0 && LexemeStart + length <= script.Length)
 					{
-						// AsSpan sobre el script en vez de Substring: CurrentString() se invoca
-						// para cada token identificador (matcheo de keywords en Advance), asi que
-						// el Substring alocaba un string transitorio por identificador. Sobre un
-						// journal de millones de tokens eso es presion de GC que golpea todas las
-						// etapas del pipeline de rehidratacion. El span apunta directo al script.
+						// AsSpan over the script instead of Substring: CurrentString() is invoked
+						// for every identifier token (keyword matching in Advance), so the
+						// Substring allocated a transient string per identifier. Over a
+						// journal of millions of tokens that is GC pressure that hits every
+						// stage of the rehydration pipeline. The span points directly at the script.
 						return script.AsSpan(LexemeStart, length);
 					}
 				}

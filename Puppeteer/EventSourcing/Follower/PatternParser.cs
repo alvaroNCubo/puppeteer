@@ -668,10 +668,10 @@ namespace Puppeteer.EventSourcing.Follower
 		// <typed-parameter> ::= <identifier> ':' <type-name> | <literal> ':' <type-name>
 		private ParameterNode ParseParameter()
 		{
-			// Argumento que es una llamada-con-receiver anidada: foo([_:Clase2].goo($x)).
-			// Reusa ParsePatternElement para la forma con corchetes ([instance:Type].m(...)
-			// o [Type].m(...)) y la envuelve. El receiver lleva su tipo, que es lo que el
-			// matcher necesita para resolver el metodo interno.
+			// Argument that is a nested call-with-receiver: foo([_:Derived].goo($x)).
+			// Reuses ParsePatternElement for the bracketed form ([instance:Type].m(...)
+			// or [Type].m(...)) and wraps it. The receiver carries its type, which is what
+			// the matcher needs to resolve the inner method.
 			if (lexer.CurrentToken.Type == TokenType.lBracket)
 			{
 				ExpressionNode nestedCall = ParsePatternElement();
@@ -921,7 +921,7 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						string value = lexer.CurrentLexeme().ToString();
 						lexer.Accept(TokenType.time);
-						// Parsear como TimeSpan y convertir a DateTime
+						// Parse as a TimeSpan and convert to DateTime.
 						TimeSpan timeValue = TimeSpan.Parse(value, CultureInfo.InvariantCulture);
 						DateTime dateTimeValue = DateTime.Today.Add(timeValue);
 						return new LiteralParameterNode(dateTimeValue, typeof(DateTime));
@@ -929,7 +929,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 				case TokenType.begin:
 					{
-						// Array literal: {1,2,3} o {'a','b','c'}
+						// Array literal: {1,2,3} or {'a','b','c'}.
 						return ParseArrayLiteral();
 					}
 

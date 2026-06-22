@@ -2,14 +2,14 @@ using System;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Snapshot inmutable de una entrada del playbill. Public porque el forensic
-	// query path (Performance.Playbill consultas a futuro, replicacion via wire)
-	// lo expone al consumidor. Sin embargo el SerializedParameters es opaco —
-	// solo el schema correspondiente (lookup via SchemaName en PlaybillStore)
-	// permite deserializarlo a tipos.
+	// Immutable snapshot of a playbill entry. Public because the forensic
+	// query path (future Performance.Playbill queries, replication via wire)
+	// exposes it to the consumer. However, SerializedParameters is opaque —
+	// only the corresponding schema (lookup via SchemaName in PlaybillStore)
+	// allows deserializing it to types.
 	//
-	// Lineamiento Fase 1 Playbill: ip/user del journal ya no existen; la evidencia
-	// contextual de la presentation vive aqui, schema-named, referenciada por EntryId.
+	// Playbill Phase 1 guideline: ip/user from the journal no longer exist; the
+	// contextual evidence of the presentation lives here, schema-named, referenced by EntryId.
 	public readonly struct PlaybillRecord
 	{
 		public long EntryId { get; }

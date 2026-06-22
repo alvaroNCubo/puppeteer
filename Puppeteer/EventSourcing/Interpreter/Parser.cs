@@ -23,9 +23,9 @@ namespace Puppeteer.EventSourcing.Interpreter
         // Reset at the start of ParseProgram. Detects static duplicates in the same script.
         private readonly HashSet<string> upgradeNamesEnPrograma = new HashSet<string>(StringComparer.Ordinal);
 
-        // Se pone en true si el parse del Program actual crea un OpEval o EvalStatement.
-        // Reset al inicio de ParseProgram; viaja a Program.HasEval para que
-        // ValidateStatically no tenga que recorrer el AST buscando evals.
+        // Set to true if the parse of the current Program creates an OpEval or EvalStatement.
+        // Reset at the start of ParseProgram; carried into Program.HasEval so that
+        // ValidateStatically does not have to walk the AST looking for evals.
         private bool hasEvalEnPrograma;
 
 		static Parser()
@@ -106,9 +106,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 			lexer.Accept(TokenType.eof);
 			Program programaResultante = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
 			programaResultante.HasEval = hasEvalEnPrograma;
-			// Lever 1 de la optimizacion de Now: precomputar (una sola vez por parse, fuera del
-			// hot path) si el programa referencia el parametro de SISTEMA Now. Conservador con
-			// HasEval: un Eval puede sintetizar la referencia y no es visible al escaneo estatico.
+			// Lever 1 of the Now optimization: precompute (once per parse, outside the
+			// hot path) whether the program references the SYSTEM Now parameter. Conservative with
+			// HasEval: an Eval may synthesize the reference and it is not visible to the static scan.
 			programaResultante.ReferencesNow = hasEvalEnPrograma || programaResultante.ScriptReferencesSystemNow();
 			return programaResultante;
 		}
@@ -204,12 +204,12 @@ namespace Puppeteer.EventSourcing.Interpreter
 			else if (typeName.Equals("decimal".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(decimal);
 
-			// Un @parametro tipado como un enum del dominio se journaliza por NOMBRE del
-			// tipo (Parameters.CanonicalTypeName emite type.Name); el replay re-parsea esa
-			// cabecera `define action (estado:StateEnum) as ...` y resuelve el nombre via
-			// las DomainLibraries del actor (que ya indexan enums por nombre). El valor
-			// viaja por nombre de miembro en el blob de argumentos (Parameters.ArgumentsValue
-			// usa Enum.Parse), legible y simbolico ('FL', no su ordinal).
+			// An @parameter typed as a domain enum is journaled by the type NAME
+			// (Parameters.CanonicalTypeName emits type.Name); replay re-parses that
+			// header `define action (state:StateEnum) as ...` and resolves the name via
+			// the actor's DomainLibraries (which already index enums by name). The value
+			// travels by member name in the arguments blob (Parameters.ArgumentsValue
+			// uses Enum.Parse), readable and symbolic ('FL', not its ordinal).
 			if (type == null && libraries.TryGetType(typeName.ToString(), out Type domainType) && domainType.IsEnum)
 			{
 				type = domainType;
@@ -532,11 +532,11 @@ namespace Puppeteer.EventSourcing.Interpreter
         // (by design: "@ at the beginning of Id's name is just an alias of
         // the same Id without @. It is for Parameter's legibility"). The canonical text
         // produced here therefore never contains '@' regardless of the input form, and
-        // round-trip through the parser is a fixed point. Decision (A) firmada al cierre
-        // de Fase 1 (2026-05-09) — option (B), modifying the Lexer to preserve '@', was
+        // round-trip through the parser is a fixed point. Decision (A) signed at the close
+        // of Phase 1 (2026-05-09) — option (B), modifying the Lexer to preserve '@', was
         // ruled out as out-of-scope for Phase 1.
         //
-        // NO parameter-order normalization (firmado al iniciar Fase 1: order is semantically
+        // NO parameter-order normalization (signed at the start of Phase 1: order is semantically
         // significant because callsite arguments are positionally bound). Modifiers
         // (In/Out/InOut/Eval) are out of scope for Phase 1.
         private string ParseDefineActionParameterList()
@@ -587,8 +587,8 @@ namespace Puppeteer.EventSourcing.Interpreter
             if (type == typeof(double)) return "double";
             if (type == typeof(DateTime)) return "datetime";
             if (type == typeof(decimal)) return "decimal";
-            // Enum del dominio: se rinde por su nombre de tipo (resuelto al re-parsear via
-            // DomainLibraries). Round-trip punto fijo con Parameters.CanonicalTypeName.
+            // Domain enum: rendered by its type name (resolved when re-parsing via
+            // DomainLibraries). Fixed-point round-trip with Parameters.CanonicalTypeName.
             if (type.IsEnum) return type.Name;
             throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
         }
@@ -1084,11 +1084,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 							if (resultado is Id id)
 							{
-								// Clausula 'in' opcional para desambiguar la homonimia de namespace de una
-								// llamada a metodo static 'Clase.Metodo(args) in Namespace.Sub'. Mismo parser
-								// que la construccion Clase(args) in Namespace. Solo se admite cuando el
-								// receptor es un Id (potencial clase); DottedId valida que efectivamente
-								// resuelva a una clase y no a una variable.
+								// Optional 'in' clause to disambiguate the namespace homonymy of a
+								// static method call 'Clase.Metodo(args) in Namespace.Sub'. Same parser
+								// as the Clase(args) in Namespace construction. Only allowed when the
+								// receiver is an Id (a potential class); DottedId validates that it
+								// actually resolves to a class and not to a variable.
 								string staticNamespace = ParseOptionalInNamespace();
 								resultado = new DottedId(libraries, symbolTable, id, method, args, staticNamespace);
 							}
@@ -1129,10 +1129,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		// Parsea la clausula opcional 'in Namespace.Sub' que sigue a una construccion
-		// 'Clase(args) in Ns' o a una llamada static 'Clase.Metodo(args) in Ns'. Retorna el
-		// namespace completo, o null si no hay clausula 'in'. Centralizado para que ambos usos
-		// compartan exactamente la misma gramatica del namespace.
+		// Parses the optional 'in Namespace.Sub' clause that follows a 'Clase(args) in Ns'
+		// construction or a static call 'Clase.Metodo(args) in Ns'. Returns the
+		// full namespace, or null if there is no 'in' clause. Centralized so both uses
+		// share exactly the same namespace grammar.
 		private string ParseOptionalInNamespace()
 		{
 			if (lexer.CurrentToken.Type != TokenType.IN)

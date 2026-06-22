@@ -293,17 +293,17 @@ namespace Puppeteer.EventSourcing.Follower
 					break;
 
 				case InstanceAccessNode instanceAccess:
-					// [instance:Type].Member - el tipo de la instancia NO aparece
-					// literalmente en el script: el script usa el nombre de la
-					// variable enlazada (counter.Bump(5)), no el nombre del tipo
-					// (DemoCounter). El binding de tipo se resuelve via SymbolTable
-					// en el PatternMatcher; aqui solo se requiere que la cadena
-					// de miembros aparezca como prefiltro rapido. Antes se exigia
-					// el TypeName como substring y dejaba pasar solo aquellos
-					// scripts donde el nombre de la variable contenia el nombre del
-					// tipo como substring (case-insensitive) — un falso negativo
-					// que silenciaba el push loop de las Cued reactions cuando la
-					// variable se llamaba distinto al tipo.
+					// [instance:Type].Member - the instance type does NOT appear
+					// literally in the script: the script uses the name of the
+					// bound variable (counter.Bump(5)), not the type name
+					// (DemoCounter). The type binding is resolved via SymbolTable
+					// in the PatternMatcher; here only the member chain is
+					// required to appear as a fast prefilter. Previously the
+					// TypeName was required as a substring and let through only
+					// those scripts whose variable name contained the type name
+					// as a substring (case-insensitive) — a false negative
+					// that silenced the push loop of Cued reactions when the
+					// variable had a different name from the type.
 					if (instanceAccess.MemberAccess != null)
 					{
 						ExtractMemberSubstrings(instanceAccess.MemberAccess, substrings);
@@ -348,10 +348,10 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(memberAccess);
 
-			// Agregar el nombre del miembro
+			// Add the member name.
 			substrings.Add(memberAccess.MemberName);
 
-			// Si hay chaining, continuar recursivamente
+			// If there is chaining, continue recursively.
 			if (memberAccess.NextAccess != null)
 			{
 				ExtractMemberSubstrings(memberAccess.NextAccess, substrings);
@@ -408,7 +408,7 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					break;
 				case ExposeNode exposeNode:
-					// Validar el type en la expression del expose (si es TypedParameterNode)
+					// Validate the type in the expose expression (if it's a TypedParameterNode).
 					ValidateTypesInParameter(exposeNode.Expression);
 					break;
 

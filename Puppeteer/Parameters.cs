@@ -19,13 +19,13 @@ namespace Puppeteer
 		private readonly List<Parameter> parameters = new List<Parameter>();
 		internal static readonly Parameters EMPTY = new Parameters();
 
-		// Lever 3 de la optimizacion de Now: referencia directa al slot del parametro de
-		// SISTEMA Now, cacheada en el primer SetNow. La forma de parametros es invariante
-		// por operacion (mismo script => mismos slots) y el pool por forma reusa la
-		// instancia sin purgar, asi que tras el primer SetNow la inyeccion de Now es O(1):
-		// sin la busqueda lineal por nombre ni el ImplicitCast del indexador object. El pool
-		// keyless (que SI purga toda la lista en Rent) resetea esta referencia en
-		// PurgeUserParameters para no dejarla colgando hacia un slot ya removido.
+		// Lever 3 of the Now optimization: direct reference to the slot of the SYSTEM
+		// parameter Now, cached on the first SetNow. The parameter shape is invariant
+		// per operation (same script => same slots) and the pool-by-shape reuses the
+		// instance without purging, so after the first SetNow the Now injection is O(1):
+		// without the linear search by name nor the ImplicitCast of the object indexer. The
+		// keyless pool (which DOES purge the whole list on Rent) resets this reference in
+		// PurgeUserParameters so it is not left dangling toward an already-removed slot.
 		private Parameter nowSlot;
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -33,10 +33,10 @@ namespace Puppeteer
 #endif
 		public Parameters() { }
 
-		// Resolver opcional de tipos no-primitivos (enums del dominio) al re-parsear la
-		// declaracion de parametros desde texto en el replay. Lo aporta ActorHandler
-		// (AddKnownActionFromDefine) que tiene las DomainLibraries del actor; cuando es
-		// null, ParameterType solo acepta primitivos (sin cambio de comportamiento).
+		// Optional resolver for non-primitive types (domain enums) when re-parsing the
+		// parameter declaration from text during replay. It is supplied by ActorHandler
+		// (AddKnownActionFromDefine) which holds the actor's DomainLibraries; when it is
+		// null, ParameterType only accepts primitives (no change in behavior).
 		private readonly EventSourcing.DomainLibraries typeResolver;
 
 		internal Parameters(string parameters) : this(parameters, null) { }
@@ -219,12 +219,12 @@ namespace Puppeteer
 			}
 			else
 			{
-				// El slot ya existe (p.ej. una instancia Parameters reusada del pool por forma).
-				// parameter.ParameterType esta NORMALIZADO (array -> IEnumerable<elem>, Nullable<T> -> T)
-				// por el ctor de Parameter, pero el tipo entrante por el indexador es crudo. Hay que
-				// normalizarlo con el MISMO helper antes de comparar; de lo contrario un re-set de un
-				// @parametro de array (DateTime[], string[], ...) sobre el slot reusado dispararia el
-				// guard porque IEnumerable<DateTime> != DateTime[].
+				// The slot already exists (e.g. a Parameters instance reused from the pool-by-shape).
+				// parameter.ParameterType is NORMALIZED (array -> IEnumerable<elem>, Nullable<T> -> T)
+				// by the Parameter ctor, but the type incoming through the indexer is raw. It must be
+				// normalized with the SAME helper before comparing; otherwise a re-set of an
+				// array @parameter (DateTime[], string[], ...) over the reused slot would trip the
+				// guard because IEnumerable<DateTime> != DateTime[].
 				Type normalizedIncoming = Parameter.NormalizeParameterType(parameterType);
 				if (parameter.ParameterType != normalizedIncoming)
 				{
@@ -256,24 +256,24 @@ namespace Puppeteer
 			}
 		}
 
-		// Playbill final refactor: tras eliminar la nocion de SystemParameter (Now/Ip/User),
-		// todo parametro es de usuario. Purga TODOS los parametros — el nombre se conserva
-		// para no romper los callsites en MatchTree / Pattern / Reaction / pool.Return.
+		// Playbill final refactor: after removing the SystemParameter notion (Now/Ip/User),
+		// every parameter is a user parameter. Purges ALL parameters — the name is kept
+		// so as not to break the callsites in MatchTree / Pattern / Reaction / pool.Return.
 		internal void PurgeUserParameters()
 		{
 			parameters.Clear();
 			nowSlot = null;
 		}
 
-		// Lever 3 de la optimizacion de Now: setter tipado para el parametro de SISTEMA Now.
-		// Now siempre es DateTime, por lo que se evita la ruta del indexador object
-		// (this[string,Type]) que hace busqueda lineal por nombre y luego ImplicitCast. El
-		// slot se localiza o crea una sola vez y se cachea en nowSlot; en operaciones que
-		// reusan la instancia del pool por forma, los SetNow siguientes son O(1). El unico
-		// box inevitable (DateTime -> el campo object de VariableSymbol, que tanto el
-		// interprete como el codegen leen) ocurre dentro de SetParsedScalar, igual que en el
-		// path del indexador original. Semanticamente equivale a `this["Now", typeof(DateTime)]
-		// = now` pero sin el overhead de busqueda + conversion.
+		// Lever 3 of the Now optimization: typed setter for the SYSTEM parameter Now.
+		// Now is always DateTime, so the object indexer route is avoided
+		// (this[string,Type]) which does a linear search by name and then ImplicitCast. The
+		// slot is located or created only once and cached in nowSlot; in operations that
+		// reuse the instance from the pool-by-shape, the following SetNow calls are O(1). The only
+		// unavoidable box (DateTime -> the object field of VariableSymbol, which both the
+		// interpreter and the codegen read) happens inside SetParsedScalar, just as in the
+		// original indexer path. Semantically it is equivalent to `this["Now", typeof(DateTime)]
+		// = now` but without the search + conversion overhead.
 		internal void SetNow(DateTime now)
 		{
 			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
@@ -337,16 +337,16 @@ namespace Puppeteer
 		// Define statement and are not emitted here. Type names are lowercase to match
 		// CanonicalTypeName in Parser.ParseDefineActionParameterList. Empty parameter
 		// set (no user parameters) returns the empty string.
-		// Now es un parametro de SISTEMA: el framework lo inyecta en cada Perform con el
-		// valor de OccurredAt (DateTime.Now en vivo, OccurredAt en replay). Se mantiene
-		// como parametro per-call — thread-safe y visible al pattern matching estatico como
-		// id.IsParameter == true — pero se EXCLUYE de la firma canonica del `define action`
-		// y del blob de argumentos del journal; en replay se re-inyecta desde OccurredAt. Es
-		// una distincion SystemParameter acotada a Now (Ip/User siguen fuera del journal via
-		// Playbill). Exclusion por nombre: el codebase ya reserva 'Now'/'User'/'Ip' por
-		// nombre (ReservedSeekNames, filtros de bindings en Reaction). La exclusion es
-		// SIMETRICA en ArgumentsAsString y LoadArguments para preservar la alineacion
-		// posicional de la serializacion.
+		// Now is a SYSTEM parameter: the framework injects it on every Perform with the
+		// OccurredAt value (DateTime.Now live, OccurredAt on replay). It is kept
+		// as a per-call parameter — thread-safe and visible to static pattern matching as
+		// id.IsParameter == true — but it is EXCLUDED from the canonical `define action`
+		// signature and from the journal's arguments blob; on replay it is re-injected from OccurredAt. It is
+		// a SystemParameter distinction scoped to Now (Ip/User remain out of the journal via
+		// Playbill). Exclusion by name: the codebase already reserves 'Now'/'User'/'Ip' by
+		// name (ReservedSeekNames, bindings filters in Reaction). The exclusion is
+		// SYMMETRIC in ArgumentsAsString and LoadArguments to preserve the positional
+		// alignment of the serialization.
 		internal const string SystemNowName = "Now";
 		internal static bool IsSystemNow(Parameter parameter)
 		{
@@ -387,9 +387,9 @@ namespace Puppeteer
 			{
 				return CanonicalTypeName(type.GenericTypeArguments[0]) + "[]";
 			}
-			// Enum del dominio: se journaliza por NOMBRE del tipo (el replay lo resuelve via
-			// DomainLibraries en Parser.ParseTypeName / Parameters.ParameterType). El valor
-			// del miembro viaja por nombre en el blob de argumentos (legible, no ordinal).
+			// Domain enum: journaled by type NAME (replay resolves it via
+			// DomainLibraries in Parser.ParseTypeName / Parameters.ParameterType). The
+			// member value travels by name in the arguments blob (readable, not ordinal).
 			if (type.IsEnum) return type.Name;
 			throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
 		}
@@ -486,8 +486,8 @@ namespace Puppeteer
 			}
 			else if (type.IsEnum)
 			{
-				// Enum del dominio: por nombre de tipo (resuelto via DomainLibraries al
-				// re-parsear). Simetrico con CanonicalTypeName.
+				// Domain enum: by type name (resolved via DomainLibraries when
+				// re-parsing). Symmetric with CanonicalTypeName.
 				sb.Append(type.Name);
 			}
 			else
@@ -584,11 +584,11 @@ namespace Puppeteer
 
 		private Type ParameterType(string parameters, ref int position)
 		{
-			// Un identificador de tipo que coincide exactamente (case-insensitive) con un
-			// primitivo se procesa por la ruta primitiva (sin cambios). Si NO es primitivo,
-			// se intenta resolver como un enum del dominio via el typeResolver (DomainLibraries).
-			// Esto reconstruye un @parametro enum journalizado por nombre de tipo en el replay;
-			// si el resolver no esta disponible o el nombre no es un enum conocido, falla fuerte.
+			// A type identifier that matches exactly (case-insensitive) a
+			// primitive is processed by the primitive route (no changes). If it is NOT primitive,
+			// it is attempted to be resolved as a domain enum via the typeResolver (DomainLibraries).
+			// This reconstructs an enum @parameter journaled by type name during replay;
+			// if the resolver is not available or the name is not a known enum, it fails hard.
 			if (IsPrimitiveTypeKeyword(parameters, position))
 			{
 				switch (parameters[position])
@@ -623,10 +623,10 @@ namespace Puppeteer
 			return EnumParameterType(parameters, ref position);
 		}
 
-		// True si el token de tipo en `position` es exactamente uno de los 6 primitivos
-		// (int/string/bool/datetime/decimal/double), case-insensitive. El token se delimita
-		// por el primer caracter no alfanumerico (':' separa nombre:tipo; '[' inicia el sufijo
-		// de arreglo; ',' separa parametros). Solo en ese caso se usa la ruta primitiva.
+		// True if the type token at `position` is exactly one of the 6 primitives
+		// (int/string/bool/datetime/decimal/double), case-insensitive. The token is delimited
+		// by the first non-alphanumeric character (':' separates name:type; '[' starts the array
+		// suffix; ',' separates parameters). Only in that case is the primitive route used.
 		private static bool IsPrimitiveTypeKeyword(string parameters, int position)
 		{
 			int end = position;
@@ -645,9 +645,9 @@ namespace Puppeteer
 				|| token.Equals("double".AsSpan(), StringComparison.OrdinalIgnoreCase);
 		}
 
-		// Resuelve un enum del dominio a partir de su nombre de tipo (lo journaliza
-		// CanonicalTypeName / WriteSingleParameterType). El valor del miembro se reconstruye
-		// en ArgumentsValue via Enum.Parse. Soporta el sufijo de arreglo `[]` por simetria.
+		// Resolves a domain enum from its type name (journaled by
+		// CanonicalTypeName / WriteSingleParameterType). The member value is reconstructed
+		// in ArgumentsValue via Enum.Parse. Supports the array suffix `[]` for symmetry.
 		private Type EnumParameterType(string parameters, ref int position)
 		{
 			int start = position;
@@ -867,8 +867,8 @@ namespace Puppeteer
 			bool esElprimero = true;
 			foreach (var parameter in parameters)
 			{
-				// System Now: excluido del blob de argumentos del journal (simetrico con
-				// LoadArguments). En replay Now se re-inyecta desde OccurredAt.
+				// System Now: excluded from the journal's arguments blob (symmetric with
+				// LoadArguments). On replay Now is re-injected from OccurredAt.
 				if (IsSystemNow(parameter)) continue;
 
 				if (!esElprimero) sb.Append(',');
@@ -899,8 +899,8 @@ namespace Puppeteer
 			for (int p = 0; p < parameters.Count; p++)
 			{
 				var parameter = parameters[p];
-				// System Now: excluido del blob (simetrico con ArgumentsAsString). No
-				// consume del string; su valor se re-inyecta desde OccurredAt en replay.
+				// System Now: excluded from the blob (symmetric with ArgumentsAsString). It does
+				// not consume from the string; its value is re-injected from OccurredAt on replay.
 				if (IsSystemNow(parameter)) continue;
 				Blanks(agumentsAsString, ref position);
 				if (parameter.ParameterModifier == Parameter.Out)
@@ -936,8 +936,8 @@ namespace Puppeteer
 
 		private static object DefaultValueForType(Type type)
 		{
-			// Mejora A: defaults de parametros Out servidos desde BoxCache (singletons),
-			// en vez de boxear un default(T) nuevo en cada LoadArguments.
+			// Improvement A: Out parameter defaults served from BoxCache (singletons),
+			// instead of boxing a new default(T) on each LoadArguments.
 			if (type == typeof(int)) return BoxCache.IntZero;
 			if (type == typeof(bool)) return BoxCache.False;
 			if (type == typeof(DateTime)) return BoxCache.DateTimeDefault;
@@ -1202,8 +1202,8 @@ namespace Puppeteer
 
 			int startPosition = position;
 
-			// Mejora B: SetParsedScalar evita ImplicitCast (el valor ya viene con el tipo
-			// exacto). Mejora A: int/bool toman el box de BoxCache cuando es cacheable.
+			// Improvement B: SetParsedScalar avoids ImplicitCast (the value already arrives with the
+			// exact type). Improvement A: int/bool take the box from BoxCache when cacheable.
 			if (parameterType == typeof(string))
 			{
 				parameter.SetParsedScalar(ValueString(agumentsAsString, ref position).ToString());
@@ -1230,9 +1230,9 @@ namespace Puppeteer
 			}
 			else if (parameterType.IsEnum)
 			{
-				// El valor del enum se journaliza por NOMBRE de miembro (WriteSingleValuePrimitive);
-				// se reconstruye con Enum.Parse. ignoreCase para ser tolerante igual que el binding
-				// de enums en el resto del motor.
+				// The enum value is journaled by member NAME (WriteSingleValuePrimitive);
+				// it is reconstructed with Enum.Parse. ignoreCase to be tolerant like the enum
+				// binding in the rest of the engine.
 				parameter.SetParsedScalar(Enum.Parse(parameterType, Value(agumentsAsString, ref position).ToString(), ignoreCase: true));
 			}
 			else
@@ -1405,10 +1405,10 @@ namespace Puppeteer
 			}
 		}
 
-		// Journaliza un valor de enum por su NOMBRE de miembro (simbolico y legible: 'FL', no
-		// su ordinal), comma-free para no romper el blob separado por comas. Un valor sin
-		// miembro nombrado (combinacion no definida) cae al ordinal en formato "D", que sigue
-		// siendo comma-free y round-trip via Enum.Parse.
+		// Journals an enum value by its member NAME (symbolic and readable: 'FL', not
+		// its ordinal), comma-free so as not to break the comma-separated blob. A value without
+		// a named member (undefined combination) falls back to the ordinal in "D" format, which is still
+		// comma-free and round-trips via Enum.Parse.
 		private void AppendEnum(Type enumType, object value, StringBuilder sb)
 		{
 			sb.Append(Enum.GetName(enumType, value) ?? Enum.Format(enumType, value, "D"));
@@ -1702,26 +1702,26 @@ namespace Puppeteer
 			if (value != null && !(value is T))
 				throw new ArgumentException($"Value is not of type {typeof(T).FullName}");
 
-			// Mejora (d): de-box int/bool via BoxCache antes de cruzar a object, evitando
-			// un box nuevo por llamada en el path de preparacion. Otros T boxean normal.
+			// Improvement (d): de-box int/bool via BoxCache before crossing to object, avoiding
+			// a new box per call on the preparation path. Other T box normally.
 			SetParameter(BoxCache.Box(value), Parameter.In, parameterName, typeof(T));
 		}
 
-		// Playbill final refactor: tras eliminar SystemParameter (Ip/User fuera del
-		// journal en Fase 1; Now convertido en parametro de usuario explicito en
-		// Fase 4.5+), todo parametro presente cuenta como "usuario". Antes se
-		// excluia "Now" de este conteo via _hasUserParameter; ya no aplica.
+		// Playbill final refactor: after removing SystemParameter (Ip/User out of the
+		// journal in Phase 1; Now converted into an explicit user parameter in
+		// Phase 4.5+), every present parameter counts as "user". Previously "Now"
+		// was excluded from this count via _hasUserParameter; that no longer applies.
 		internal bool HasAnyParameter()
 		{
 			return parameters.Count > 0;
 		}
 
-		// Cuenta solo parametros de USUARIO (excluye el Now de sistema). La clasificacion
-		// IsScript/IsNewAction debe basarse en esto: el framework inyecta Now en cada
-		// Perform, y en el flujo check-then-command la Fase 1 (PerformChk) ya pudo haberlo
-		// inyectado en el mismo Parameters antes de que la Fase 2 decida; sin esta
-		// exclusion un comando sin parametros de usuario se clasificaria erroneamente como
-		// Action por la sola presencia de Now.
+		// Counts only USER parameters (excludes the system Now). The
+		// IsScript/IsNewAction classification must be based on this: the framework injects Now on every
+		// Perform, and in the check-then-command flow Phase 1 (PerformChk) may already have
+		// injected it into the same Parameters before Phase 2 decides; without this
+		// exclusion a command without user parameters would be wrongly classified as
+		// Action by the mere presence of Now.
 		internal bool HasAnyUserParameter()
 		{
 			foreach (var parameter in parameters)

@@ -3,24 +3,23 @@ using System.Collections.Generic;
 
 namespace Puppeteer
 {
-	// Paper 5 / Materialize v2 — Fase 4 (firmado D1 2026-05-13). Interfaz del
-	// destination side al primary side. Abstrae los 4 wire verbs (a)/(b)/(c)/(d):
+	// Paper 5 / Materialize v2 — Phase 4 (signed D1 2026-05-13). Interface from the
+	// destination side to the primary side. Abstracts the 4 wire verbs (a)/(b)/(c)/(d):
 	//
-	//   (a) ReadRecordsAfter — Capa 1 (records raw).
-	//   (b) ConfirmUntil      — ack Max-monotonic al primary.
-	//   (c) ReadReactions     — Capa 2a (registry + checkpoints snapshot).
-	//   (d) ReadElidedRange   — Capa 2b (elision markers).
+	//   (a) ReadRecordsAfter — Layer 1 (raw records).
+	//   (b) ConfirmUntil      — Max-monotonic ack to the primary.
+	//   (c) ReadReactions     — Layer 2a (registry + checkpoints snapshot).
+	//   (d) ReadElidedRange   — Layer 2b (elision markers).
 	//
-	// El destination process en produccion implementa esto como HTTP client al
-	// primary (fuera de scope I1). Tests in-process usan LocalMaterializeSource
-	// para envolver un primary actor.Materialization sin transport real.
+	// The destination process in production implements this as an HTTP client to the
+	// primary (out of I1 scope). In-process tests use LocalMaterializeSource
+	// to wrap a primary actor.Materialization without a real transport.
 	//
-	// MaterializeMirror orquesta los 4 verbs via esta interface — agnostico de
-	// transport.
+	// MaterializeMirror orchestrates the 4 verbs via this interface — transport-agnostic.
 	public interface IMaterializeSource
 	{
-		// El destination symbolic name que este source representa (usado para
-		// log/debug; el primary recibe este string en todas las llamadas).
+		// The destination symbolic name that this source represents (used for
+		// log/debug; the primary receives this string in all calls).
 		string DestinationName { get; }
 
 		IReadOnlyList<MaterializationRecord> ReadRecordsAfter(long fromEntryId);

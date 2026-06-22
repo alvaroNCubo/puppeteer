@@ -9,8 +9,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 {
 	internal sealed class EventMaterializationStorageFileSystem : EventMaterializationStorage
 	{
-		// "PPMT" = Puppeteer Materialization. Distinto del marker "PPEL" del
-		// EventElision para que un mismatch de archivo sea detectable.
+		// "PPMT" = Puppeteer Materialization. Distinct from the EventElision "PPEL"
+		// marker so that a file mismatch is detectable.
 		private static readonly byte[] MAGIC = new byte[] { (byte)'P', (byte)'P', (byte)'M', (byte)'T' };
 		private const ushort FORMAT_VERSION = 1;
 		private const int HEADER_SIZE = 10;
@@ -22,7 +22,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 		// destination -> set of entryIds materialized to that destination.
 		private readonly Dictionary<string, HashSet<long>> eventsByDestination = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
-		// Indice paralelo por reactionId para auditoria / debugging futuros.
+		// Parallel index by reactionId for future auditing / debugging.
 		// reactionId -> (destination -> set of entryIds).
 		private readonly Dictionary<int, Dictionary<string, HashSet<long>>> eventsByReaction = new Dictionary<int, Dictionary<string, HashSet<long>>>();
 

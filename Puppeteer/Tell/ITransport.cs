@@ -4,12 +4,12 @@ using System.Threading.Tasks;
 
 namespace Puppeteer.Tell
 {
-	// Abstracción que separa la causación del transporte. Puppeteer journala la
-	// oración del tell y le entrega el envelope al transporte; el transporte
-	// decide cómo entregarlo (Kafka, REST, gRPC, etc.) y reporta de vuelta los
-	// acks que recibe del lado receptor.
+	// Abstraction that separates causation from transport. Puppeteer journals the
+	// sentence of the tell and hands the envelope to the transport; the transport
+	// decides how to deliver it (Kafka, REST, gRPC, etc.) and reports back the
+	// acks it receives from the receiver side.
 	//
-	// Frase canónica firmada (project_puppeteer_tell_primitive_design.md):
+	// Canonical statement:
 	//   "Delivery is the transport's problem. Correlation is the journal's
 	//    problem. The journal collects tells without bound; the transport
 	//    collects regrets and decides what to do with them."
@@ -19,12 +19,12 @@ namespace Puppeteer.Tell
 	// respectively.
 	public interface ITransport
 	{
-		// Entrega el envelope al receptor. La política de retry / timeout / dead
-		// letter / backoff vive en la implementación, NO en Puppeteer.
+		// Delivers the envelope to the receiver. The retry / timeout / dead
+		// letter / backoff policy lives in the implementation, NOT in Puppeteer.
 		Task SendAsync(TellEnvelope envelope, CancellationToken cancellationToken = default);
 
-		// Registra el handler que el transporte invocará cuando reciba un ack del
-		// receptor (B). Plan 6 conectará este handler al journaling del actor A.
+		// Registers the handler that the transport will invoke when it receives an ack from the
+		// receiver (B). Plan 6 will connect this handler to the journaling of actor A.
 		void RegisterAckHandler(Action<AckEnvelope> handler);
 	}
 }

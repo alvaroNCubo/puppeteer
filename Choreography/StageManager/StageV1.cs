@@ -21,14 +21,14 @@ namespace Choreography.StageManager
 
         protected override Actor CreateActor(string actorName)
         {
-            // ActorFactory.Create<ActorV1> usa Activator.CreateInstance con un solo arg (name).
-            // Para multi-assembly se va directo al ctor de ActorV1.
+            // ActorFactory.Create<ActorV1> uses Activator.CreateInstance with a single arg (name).
+            // For multi-assembly go directly to the ActorV1 ctor.
             return LibraryAssemblies != null && LibraryAssemblies.Length > 0
                 ? new ActorV1(actorName, LibraryAssemblies)
                 : ActorFactory.Create<ActorV1>(actorName);
         }
 
-        // Shadow del Logger base para preservar StageV1 en la cadena fluent.
+        // Shadow of the base Logger to preserve StageV1 in the fluent chain.
         public new StageV1 Logger(IPuppeteerLogger logger)
         {
             base.Logger(logger);
@@ -54,7 +54,7 @@ namespace Choreography.StageManager
 
         public string PerformQry(string script)
         {
-            // Fase 4.5 refactor Playbill: ip/user dejaron de inyectarse como parametros del script.
+            // Phase 4.5 Playbill refactor: ip/user are no longer injected as script parameters.
             var p = new Parameters();
             return hook.PerformQry(script, p);
         }

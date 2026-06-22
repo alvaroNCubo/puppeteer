@@ -5,14 +5,14 @@ using Puppeteer.EventSourcing.DB;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// Facade publico del Playbill. Choreography lo construye con la storage
-	// config del actor (DatabaseType + connectionString + actorName + logger);
-	// el facade selecciona el backend correcto y delega el resto de operaciones.
+	// Public facade of the Playbill. Choreography constructs it with the actor's
+	// storage config (DatabaseType + connectionString + actorName + logger);
+	// the facade selects the correct backend and delegates the rest of the operations.
 	//
-	// Auto-provision: cada backend crea sus artefactos en el constructor si no
-	// existen. Para actores nuevos en un sistema fresh, no hay accion manual de
-	// DevOps; para actores legacy con journal preexistente, se corre una vez el
-	// script de migracion (separado).
+	// Auto-provision: each backend creates its artifacts in the constructor if they
+	// do not exist. For new actors on a fresh system, there is no manual DevOps
+	// action; for legacy actors with a pre-existing journal, the migration
+	// script (separate) is run once.
 	public sealed class Playbill
 	{
 		private readonly PlaybillStore store;
@@ -45,11 +45,11 @@ namespace Puppeteer.EventSourcing.Playbill
 			}
 		}
 
-		// === Replication hooks (Fase 5) — proxy de los callbacks del store ===
+		// === Replication hooks (Phase 5) — proxy of the store's callbacks ===
 		//
-		// Choreography (Stage) se suscribe a estos eventos para broadcastear los
-		// schemas y records nuevos como PlaybillSchemaCue / PlaybillCue. Internal:
-		// solo el codigo dentro del solucion (Choreography + UnitTests) suscribe.
+		// Choreography (Stage) subscribes to these events to broadcast the new
+		// schemas and records as PlaybillSchemaCue / PlaybillCue. Internal:
+		// only code within the solution (Choreography + UnitTests) subscribes.
 		internal event Action<string, string> OnSchemaRegistered
 		{
 			add { store.OnSchemaRegistered += value; }
@@ -62,11 +62,11 @@ namespace Puppeteer.EventSourcing.Playbill
 			remove { store.OnRecordWritten -= value; }
 		}
 
-		// === Internal direct-write path (Fase 5) ===
+		// === Internal direct-write path (Phase 5) ===
 		//
-		// Permite a Cast aplicar PlaybillCue/PlaybillSchemaCue recibidos via wire
-		// sin tener que re-construir un Parameters. La invariante de unicidad de
-		// EntryId queda en el store (lanza LanguageException si ya existe).
+		// Lets the Cast apply PlaybillCue/PlaybillSchemaCue received via wire
+		// without having to rebuild a Parameters. The EntryId uniqueness invariant
+		// stays in the store (throws LanguageException if it already exists).
 		internal void RegisterSchemaRaw(string schemaName, string declarations)
 		{
 			store.RegisterSchema(schemaName, declarations);
@@ -92,10 +92,10 @@ namespace Puppeteer.EventSourcing.Playbill
 			return store.ListSchemas();
 		}
 
-		// Write entry point. Acepta una Parameters instance (configurada con
-		// values via su indexer); la serializa con el wire format de V2 y la
-		// persiste atomicamente. EntryId debe ser el del journal que se acaba
-		// de escribir (Performance.PerformCommand lo obtiene del actor).
+		// Write entry point. Accepts a Parameters instance (configured with
+		// values via its indexer); serializes it with the V2 wire format and
+		// persists it atomically. EntryId must be that of the journal entry just
+		// written (Performance.PerformCommand obtains it from the actor).
 		public void WriteRecord(long entryId, string schemaName, Parameters values)
 		{
 			if (entryId <= 0) throw new LanguageException($"EntryId {entryId} must be greater than zero.");
@@ -110,9 +110,9 @@ namespace Puppeteer.EventSourcing.Playbill
 			// as "not provided" by convention.
 			CoerceNullValuesToDefaults(values);
 
-			// IN_MEMORY chosen as the wire-neutral serialization (Playbill no
-			// hace SQL-quote escapes — el blob persiste via parametrized binding
-			// o via UTF-8 en archivo, no via concat directa de string).
+			// IN_MEMORY chosen as the wire-neutral serialization (Playbill does
+			// not do SQL-quote escapes — the blob persists via parametrized binding
+			// or via UTF-8 in a file, not via direct string concat).
 			string serialized = values.SerializeForTransport(DatabaseType.IN_MEMORY);
 			store.WriteRecord(entryId, schemaName, serialized);
 		}
@@ -121,7 +121,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		{
 			foreach (var p in values)
 			{
-				// Playbill final refactor: ya no hay SystemParameter (incluido Now) — todo es user.
+				// Playbill final refactor: there is no longer a SystemParameter (including Now) — everything is user.
 				if (!p.IsEmpty) continue;
 
 				var t = p.ParameterType;
@@ -145,14 +145,14 @@ namespace Puppeteer.EventSourcing.Playbill
 			return store.ReadRecordsForSchema(schemaName);
 		}
 
-		// Replication source — usado por PlaybillReplication (Fase 5).
+		// Replication source — used by PlaybillReplication (Phase 5).
 		public void ReadRecordsAfter(long afterEntryId, List<PlaybillRecord> result)
 		{
 			store.ReadRecordsAfter(afterEntryId, result);
 		}
 
-		// Distill autonomo — remueve huerfanos referenciales. Llamado por
-		// Performance.Distill() despues de actor.Distill().
+		// Autonomous Distill — removes referential orphans. Called by
+		// Performance.Distill() after actor.Distill().
 		public void Distill()
 		{
 			store.Distill();

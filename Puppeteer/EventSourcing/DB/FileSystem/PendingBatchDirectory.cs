@@ -7,24 +7,24 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 {
 	// Cross-process safe staging area for elision/skip writes.
 	//
-	// Cada proceso escribe sus batches a archivos UNICOS (guid en el nombre)
-	// dentro de pendingDir; nunca dos workers tocan el mismo archivo. El
-	// consolidador toma un lock OS-level sobre witnessPath (FileShare.None
-	// sobre un FileStream abierto) que se libera automaticamente si el
-	// proceso muere — sin TTL ni heartbeats que mantener. Mientras un
-	// consolidador esta activo, otros workers pueden seguir produciendo
-	// batches: la coordinacion solo gatea la fase de merge a los archivos
-	// canonicos consolidados.
+	// Each process writes its batches to UNIQUE files (guid in the name)
+	// inside pendingDir; no two workers ever touch the same file. The
+	// consolidator takes an OS-level lock over witnessPath (FileShare.None
+	// over an open FileStream) that is released automatically if the
+	// process dies — without TTL or heartbeats to maintain. While a
+	// consolidator is active, other workers can keep producing
+	// batches: coordination only gates the merge phase into the
+	// canonical consolidated files.
 	//
-	// Primitivas usadas: FileStream open/close (lock), File.WriteAllBytes,
-	// File.Move (rename atomico sobre el mismo volumen), Directory.GetFiles,
-	// File.Delete. Todas son operaciones del SO que ya provee el FileSystem.
+	// Primitives used: FileStream open/close (lock), File.WriteAllBytes,
+	// File.Move (atomic rename on the same volume), Directory.GetFiles,
+	// File.Delete. All are OS operations the FileSystem already provides.
 	//
-	// El "commit" de un batch es el rename .tmp -> .batch. Hasta ese momento
-	// el archivo es invisible para readers/consolidators (solo se enumeran
-	// archivos con extension .batch). Despues del rename el batch es durable
-	// y idempotente: si el proceso crashea, el batch sigue ahi para que el
-	// proximo consolidador lo recoja.
+	// The "commit" of a batch is the rename .tmp -> .batch. Until that moment
+	// the file is invisible to readers/consolidators (only files with the
+	// .batch extension are enumerated). After the rename the batch is durable
+	// and idempotent: if the process crashes, the batch is still there for the
+	// next consolidator to pick up.
 	internal sealed class PendingBatchDirectory
 	{
 		private readonly string pendingDir;
@@ -44,14 +44,14 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 		internal string PendingDir => pendingDir;
 
-		// Escribe un batch atomico: WriteAllBytes a un .tmp con guid unico,
-		// fsync, luego rename a un nombre final .batch. El rename es el
-		// commit point — antes de eso el archivo no es visible a readers
-		// porque ListBatches() filtra por extension .batch.
+		// Writes an atomic batch: WriteAllBytes to a .tmp with a unique guid,
+		// fsync, then rename to a final .batch name. The rename is the
+		// commit point — before that the file is not visible to readers
+		// because ListBatches() filters by the .batch extension.
 		//
-		// El nombre final embebe el guid + ticks UTC para ordenar los
-		// batches por tiempo de creacion (no se requiere para correctitud
-		// pero facilita la depuracion).
+		// The final name embeds the guid + UTC ticks to order the
+		// batches by creation time (not required for correctness
+		// but eases debugging).
 		internal void WriteBatch(byte[] payload)
 		{
 			if (payload == null) throw new ArgumentNullException(nameof(payload));
@@ -67,15 +67,15 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				fs.Flush(true);
 			}
 
-			// File.Move sin overwrite: si por algun milagro existe ya un archivo
-			// con el mismo nombre final, fallamos antes de pisarlo. Como el
-			// nombre embebe un guid, esto solo pasaria por un bug.
+			// File.Move without overwrite: if by some miracle a file already exists
+			// with the same final name, we fail before clobbering it. Since the
+			// name embeds a guid, this would only happen due to a bug.
 			File.Move(tmpPath, finalPath);
 		}
 
-		// Snapshot de los .batch actuales, ordenados por nombre (que codifica
-		// ticks UTC). El consolidador procesa este snapshot — batches que
-		// aparezcan despues del snapshot quedan para la siguiente ronda.
+		// Snapshot of the current .batch files, ordered by name (which encodes
+		// UTC ticks). The consolidator processes this snapshot — batches that
+		// appear after the snapshot are left for the next round.
 		internal List<string> ListBatches()
 		{
 			if (!Directory.Exists(pendingDir)) return new List<string>();
@@ -85,15 +85,15 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			return new List<string>(files);
 		}
 
-		// Intenta tomar el lock de consolidacion. Retorna null si otro
-		// proceso ya lo tiene. El handle DEBE Dispose-arse al terminar
-		// — la liberacion ocurre al cerrar el FileStream, no al borrar
-		// el archivo witness (que se deja como sentinel inocuo).
+		// Attempts to take the consolidation lock. Returns null if another
+		// process already holds it. The handle MUST be Disposed when done
+		// — the release happens when the FileStream is closed, not when the
+		// witness file is deleted (which is left as a harmless sentinel).
 		//
-		// FileShare.None hace que el lock sea OS-level: si el proceso
-		// dueño muere, el OS cierra el FD y libera el lock automaticamente,
-		// sin TTL ni heartbeats. En Windows es un lock mandatorio nativo;
-		// en Linux .NET 5+ lo implementa via OFD locks / flock.
+		// FileShare.None makes the lock OS-level: if the owning process
+		// dies, the OS closes the FD and releases the lock automatically,
+		// without TTL or heartbeats. On Windows it is a native mandatory lock;
+		// on Linux .NET 5+ implements it via OFD locks / flock.
 		internal WitnessLease TryAcquireWitness()
 		{
 			try
@@ -106,11 +106,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 
 				try
 				{
-					// En Windows FileShare.None ya bloquea; en Linux .NET
-					// emula via flock. Si el archivo ya esta abierto por
-					// otro proceso con FileShare.None, este open lanza
-					// IOException. Si no, escribimos nuestra identidad
-					// para diagnostico (lo unico que se ve en disco).
+					// On Windows FileShare.None already blocks; on Linux .NET
+					// emulates it via flock. If the file is already open by
+					// another process with FileShare.None, this open throws
+					// IOException. Otherwise, we write our identity
+					// for diagnostics (the only thing visible on disk).
 					fs.SetLength(0);
 					byte[] identity = Encoding.UTF8.GetBytes(
 						$"pid={Environment.ProcessId} host={Environment.MachineName} time={DateTime.UtcNow:O}");
@@ -128,11 +128,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			catch (UnauthorizedAccessException) { return null; }
 		}
 
-		// Borra los batches consumidos por una consolidacion exitosa.
-		// Idempotente: si un archivo ya no existe (otro consolidador lo
-		// borro), se ignora silenciosamente. Falla silenciosa tambien si
-		// el archivo esta temporalmente bloqueado — el proximo Distill /
-		// consolidacion lo intentara de nuevo.
+		// Deletes the batches consumed by a successful consolidation.
+		// Idempotent: if a file no longer exists (another consolidator
+		// deleted it), it is silently ignored. Silent failure too if
+		// the file is temporarily locked — the next Distill /
+		// consolidation will try again.
 		internal void DeleteBatches(IEnumerable<string> paths)
 		{
 			if (paths == null) throw new ArgumentNullException(nameof(paths));
@@ -143,11 +143,11 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Recovery de .tmp huerfanos. Un .tmp aparece cuando un worker
-		// crasheo entre WriteAllBytes y el rename — el batch no se
-		// committeo, asi que el reaction tampoco avanzo su checkpoint y
-		// reintentara en el proximo ciclo generando un .tmp nuevo. Los
-		// viejos son basura.
+		// Recovery of orphan .tmp files. A .tmp appears when a worker
+		// crashed between WriteAllBytes and the rename — the batch was not
+		// committed, so the reaction did not advance its checkpoint either and
+		// will retry on the next cycle generating a new .tmp. The
+		// old ones are garbage.
 		internal void RecoverOrphans()
 		{
 			if (!Directory.Exists(pendingDir)) return;
@@ -158,8 +158,8 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 		}
 
-		// Test seam: cuenta de batches vivos. Usado por tests para verificar
-		// que la consolidacion limpia el directorio.
+		// Test seam: count of live batches. Used by tests to verify
+		// that consolidation cleans the directory.
 		internal int CountBatches()
 		{
 			if (!Directory.Exists(pendingDir)) return 0;

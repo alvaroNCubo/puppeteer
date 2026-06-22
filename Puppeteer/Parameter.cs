@@ -43,12 +43,12 @@ namespace Puppeteer
 			if (parameterModifier < 1) throw new LanguageException($"Modify '{parameterModifier}' is not valid");
 
 			this.name = name;
-			// El tipo declarado se normaliza ANTES de almacenarse: array -> IEnumerable<elem>
-			// y Nullable<T> -> T. NormalizeParameterType es la unica fuente de esta regla; el
-			// guard de re-set de Parameters.SetParameter usa el mismo helper para que ambos
-			// caminos no puedan divergir (un slot creado desde DateTime[] queda como
-			// IEnumerable<DateTime>, y un re-set con DateTime[] debe normalizar igual antes de
-			// comparar el tipo).
+			// The declared type is normalized BEFORE being stored: array -> IEnumerable<elem>
+			// and Nullable<T> -> T. NormalizeParameterType is the single source of this rule; the
+			// re-set guard in Parameters.SetParameter uses the same helper so that both
+			// paths cannot diverge (a slot created from DateTime[] is stored as
+			// IEnumerable<DateTime>, and a re-set with DateTime[] must normalize the same way before
+			// comparing the type).
 			this.isNullableParameter = !type.IsValueType || Nullable.GetUnderlyingType(type) != null;
 			this.parameterType = NormalizeParameterType(type);
 			this.parameterModifier = parameterModifier;
@@ -338,13 +338,13 @@ namespace Puppeteer
 			}
 		}
 
-		// Mejora B de perf: fast path para LoadArguments. El valor ya viene boxeado
-		// EXACTAMENTE con ParameterType (el parser del journal produce el tipo exacto:
-		// int.Parse->int, etc.), por lo que ImplicitCast (un value.GetType() + cadena de
-		// comparaciones) y la deteccion de array del setter In son overhead puro en la
-		// ruta de replay mas caliente. Solo aplica a escalares In/InOut; Eval/Out caen al
-		// setter normal para preservar su validacion. Las colecciones NO usan este camino:
-		// el setter In tiene logica de conversion array<->IEnumerable que se conserva.
+		// Perf improvement B: fast path for LoadArguments. The value already arrives boxed
+		// EXACTLY as ParameterType (the journal parser produces the exact type:
+		// int.Parse->int, etc.), so ImplicitCast (a value.GetType() + chain of
+		// comparisons) and the In setter's array detection are pure overhead on the
+		// hottest replay path. Only applies to In/InOut scalars; Eval/Out fall back to the
+		// normal setter to preserve their validation. Collections do NOT use this path:
+		// the In setter has array<->IEnumerable conversion logic that is preserved.
 		internal void SetParsedScalar(object value)
 		{
 			if (parameterModifier == In)

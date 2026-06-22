@@ -14,16 +14,16 @@ namespace Choreography.Transport.SimpleX
     //   bytes 5+sl. cert chain X.509 + signed server key (formato v8+, ignorado en v6)
     //
     // Client hello format v6 (per simplexmq Transport.hs `instance Encoding SMPClientHandshake`):
-    //   bytes 0-1   smpVersion (Word16 BE, version negociada)
-    //   byte  2     keyHashLen (1 byte = 32; spec: ByteString usa 1-byte length prefix)
-    //   bytes 3-34  keyHash (SHA-256 del cert CA del server, anclaje TOFU)
-    // Para v6, encodeAuthEncryptCmds y los flags proxy/service NO se emiten (v < v7/v12).
-    // Total: 35 bytes. Versiones >= v7 agregan campos optional despues.
+    //   bytes 0-1   smpVersion (Word16 BE, negotiated version)
+    //   byte  2     keyHashLen (1 byte = 32; spec: ByteString uses a 1-byte length prefix)
+    //   bytes 3-34  keyHash (SHA-256 of the server CA cert, TOFU anchor)
+    // For v6, encodeAuthEncryptCmds and the proxy/service flags are NOT emitted (v < v7/v12).
+    // Total: 35 bytes. Versions >= v7 append optional fields afterward.
     internal static class SmpHandshake
     {
         public const int MinVersion = 6;
-        // Target v6 (formato simple, bug report). Server con ALPN ofrece v[6-18];
-        // [6-6] negocia v6. Subir cuando Choreography use features modernas
+        // Target v6 (simple format, bug report). A server with ALPN offers v[6-18];
+        // [6-6] negotiates v6. Raise this when Choreography uses modern features
         // (queueReqData, ntfCreds, shortLinks).
         public const int MaxVersion = 6;
 
