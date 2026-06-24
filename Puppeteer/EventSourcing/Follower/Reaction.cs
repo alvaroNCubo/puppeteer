@@ -982,12 +982,11 @@ namespace Puppeteer.EventSourcing.Follower
 		public CausationPlane Causation => new CausationPlane(this);
 		public MetadataPlane Metadata => new MetadataPlane(this);
 
-		// Outbox plane (OutboxPlane / SetOutboxAction / ReactionActionType.Outbox) is
-		// retained as infrastructure but intentionally NOT exposed here as a Reaction
-		// action plane: a Reaction's Action touches exactly the three planes above
-		// (Program, Causation, Metadata). The journal-outbox emit path stays wired
-		// (OutboxPlane, the diary outbox table, the at-least-once relay) for future
-		// re-exposure. See notes/reactions-outbox-emit.md.
+		// Outbox — `.Outbox.Emit(destination, payload)` — journal-outbox emit. A
+		// write-mode emit: records the outgoing message atomically with the cursor
+		// (see OutboxPlane / notes/reactions-outbox-emit.md). New plane, not a
+		// MetadataKind: it carries an outgoing payload, not journal bookkeeping.
+		public OutboxPlane Outbox => new OutboxPlane(this);
 
 		// Sub-distinction inside the Metadata plane: which journal-level
 		// bookkeeping verb the developer chose. Set together with

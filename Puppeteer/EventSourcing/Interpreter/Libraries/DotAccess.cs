@@ -570,15 +570,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		}
 
 		// Support for polymorphic resolution in the DSL.
-		// A variable whose declared type is abstract or an interface ALWAYS
-		// references a concrete instance at runtime; the static validator must be
-		// able to find members that only live on that concrete subclass. We
-		// restrict the search to the assembly where the abstract type is declared:
-		// this covers the domain-catalog pattern (same assembly) without
-		// triggering a global scan.
+		// A variable whose declared type can be subclassed may reference a more
+		// derived instance at runtime; the static validator must be able to find
+		// members that only live on that concrete subclass. This holds not only for
+		// abstract types and interfaces but also for a non-sealed concrete base:
+		// classic polymorphism lets a base-typed variable point at a subclass that
+		// owns the member. Only a sealed type (and object, whose subclass set is the
+		// whole runtime) is excluded. We restrict the search to the assembly where
+		// the declared type lives: this covers the domain-catalog pattern (same
+		// assembly) without triggering a global scan.
 		internal static bool CanHaveConcreteSubclasses(Type instanceClass)
 		{
-			return instanceClass != null && (instanceClass.IsAbstract || instanceClass.IsInterface);
+			return instanceClass != null
+				&& !instanceClass.IsSealed
+				&& instanceClass != typeof(object);
 		}
 
 		internal static IEnumerable<Type> EnumerateAssignableConcreteSubclasses(Type instanceClass)

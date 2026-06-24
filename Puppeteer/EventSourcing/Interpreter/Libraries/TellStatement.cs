@@ -116,6 +116,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// Plan 10 of the Tell primitive roadmap: capture the minimal facts a
+		// pending tell needs for post-rehydration fate recovery. Called ONLY on the
+		// replay branch (RecoveringState) — the live path keeps the full envelope
+		// in PendingTells, so it needs no recovery record. The witness for a
+		// non-delivery verdict is the developer's `through` literal when present;
+		// when absent the recovery pass falls back to the transport's WitnessName.
+		private protected void RegisterTellRecoveryInfo(string envelopeId, string targetClass, object targetIdValue)
+		{
+			SymbolTable.RegisterTellRecoveryInfo(
+				envelopeId,
+				new TellRecoveryInfo(targetClass, targetIdValue?.ToString(), ThroughLiteral));
+		}
+
 		// Render the command-call text for the journal sentence + envelope.CommandText.
 		// This IS allocating (StringBuilder + string). It is unavoidable: the receiving
 		// side parses command-call text, and the journal sentence has to be a string
@@ -319,13 +332,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					SymbolTable.MarkExplicitTellApplied(IdLiteral);
 					RegisterTellEntryForElision(IdLiteral);
+					RegisterTellRecoveryInfo(IdLiteral, TargetClass, EvaluateTargetId(TargetId));
 				}
 				else
 				{
 					object targetIdValueRecovery = EvaluateTargetId(TargetId);
 					long hashRecovery = ComputeImplicitTellHash(TargetClass, targetIdValueRecovery, CommandName, CommandArgs);
+					string implicitEnvelopeIdRecovery = FormatImplicitEnvelopeId(hashRecovery);
 					SymbolTable.MarkImplicitTellApplied(hashRecovery);
-					RegisterTellEntryForElision(FormatImplicitEnvelopeId(hashRecovery));
+					RegisterTellEntryForElision(implicitEnvelopeIdRecovery);
+					RegisterTellRecoveryInfo(implicitEnvelopeIdRecovery, TargetClass, targetIdValueRecovery);
 				}
 				return;
 			}
@@ -385,7 +401,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 			resultado.Append("tell ");
 			resultado.Append(TargetClass);
 			if (TargetId != null)
@@ -474,12 +490,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					SymbolTable.MarkExplicitTellApplied(IdLiteral);
 					RegisterTellEntryForElision(IdLiteral);
+					RegisterTellRecoveryInfo(IdLiteral, SagaActor, sagaIdValue);
 				}
 				else
 				{
 					long hashRecovery = ComputeImplicitSagaHash(SagaActor, sagaIdValue, Verb, CommandName, CommandArgs);
+					string implicitEnvelopeIdRecovery = FormatImplicitEnvelopeId(hashRecovery);
 					SymbolTable.MarkImplicitTellApplied(hashRecovery);
-					RegisterTellEntryForElision(FormatImplicitEnvelopeId(hashRecovery));
+					RegisterTellEntryForElision(implicitEnvelopeIdRecovery);
+					RegisterTellRecoveryInfo(implicitEnvelopeIdRecovery, SagaActor, sagaIdValue);
 				}
 
 				if (sagaIdString != null)
@@ -621,7 +640,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 			resultado.Append("tell ");
 			resultado.Append(SagaActor);
 			resultado.Append("(");
@@ -714,7 +733,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 			resultado.Append("tell ack '");
 			resultado.Append(AckId);
 			resultado.Append("' from ");
@@ -722,6 +741,68 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			resultado.Append("(");
 			FromTargetId.write(resultado, databaseType);
 			resultado.Append(")");
+			// Plan 9: trailing semicolon so journal replay re-parses cleanly.
+			resultado.Append(";");
+		}
+	}
+
+	// Form 4: `tell '<envelopeId>' not delivered, per '<witness>';`.
+	// Recorded in the journal of the origin actor (A) when the transport testifies
+	// — by declaration (failure callback) or by citation (recovery GetFateAsync) —
+	// that an issued tell will NOT be delivered (dead-letter / exhausted retries).
+	// It is the terminal NON-delivery verdict, the failure-side counterpart of
+	// `tell ack`: together they make the journal self-sufficient about the FATE of
+	// every issued tell (issued -> acked OR not-delivered-with-witness), not merely
+	// its issuance. Without it, a send lost to the crash window between journal
+	// commit and post-commit dispatch is journaled as issued yet silently never
+	// delivered, never acked, and unrecoverable.
+	//
+	// Like `tell ack`, it is journaled by the framework (the transport's failure
+	// handler / the recovery pass), never authored by user code. Plan 10 of the
+	// Tell primitive roadmap.
+	internal sealed class TellNotDeliveredStatement : TellStatement
+	{
+		internal string EnvelopeIdLiteral { get; }
+		internal string WitnessLiteral { get; }
+
+		internal TellNotDeliveredStatement(SymbolTable symbolTable, string envelopeId, string witness)
+			: base(symbolTable, idLiteral: null, throughLiteral: null)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
+			ArgumentException.ThrowIfNullOrWhiteSpace(witness);
+
+			EnvelopeIdLiteral = envelopeId;
+			WitnessLiteral = witness;
+		}
+
+		internal override void Execute(ExecutionOutput output)
+		{
+			// Replay path: rebuild the TERMINAL not-delivered dedup state so a
+			// later recovery pass does not re-query the transport for an envelope
+			// whose fate the journal already records. Idempotent.
+			if (SymbolTable.RecoveringState)
+			{
+				SymbolTable.MarkTellEnvelopeIdNotDelivered(EnvelopeIdLiteral);
+				return;
+			}
+
+			// Live path: `tell ... not delivered` is never authored by user code.
+			// Non-delivery verdicts enter the journal exclusively through the
+			// transport's failure handler (ActorHandler.HandleTellFailure) or the
+			// post-rehydration recovery pass. A live execution here means a script
+			// wrote it directly — a contract violation, same discipline as `tell ack`.
+			throw new LanguageException("'tell ... not delivered' is journaled by the transport's failure handler / recovery pass, not by user code. It cannot be issued from a script (PerformCommand, PerformQuery, or a Reaction's .Causation.Continue(...) body). Remove the statement from the script.");
+		}
+
+		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		{
+			if (FueFiltrado) return;
+			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
+			resultado.Append("tell '");
+			resultado.Append(EnvelopeIdLiteral);
+			resultado.Append("' not delivered, per '");
+			resultado.Append(WitnessLiteral);
+			resultado.Append("'");
 			// Plan 9: trailing semicolon so journal replay re-parses cleanly.
 			resultado.Append(";");
 		}

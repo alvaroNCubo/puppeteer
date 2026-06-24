@@ -120,7 +120,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
 		{
 			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 			resultado.Append("upgrade('");
 			resultado.Append(upgradeName);
 			resultado.Append("')\r");

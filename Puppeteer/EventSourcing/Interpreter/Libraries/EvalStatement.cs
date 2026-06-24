@@ -84,7 +84,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (FueFiltrado) return;
 			if (!String.IsNullOrWhiteSpace(forDairy))
 			{
-				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 				resultado.Append(forDairy);
 			}
 			else
@@ -100,7 +100,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// EvalStatement, hasEvals==true in Program.ValidateStatically, and
 				// static validation is skipped — replay re-executes the Eval and
 				// rebuilds the globals deterministically (same call order, etc.).
-				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 				resultado.Append("Eval(");
 				expression.write(resultado, databaseType);
 				resultado.Append(");\r");

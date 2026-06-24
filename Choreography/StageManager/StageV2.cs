@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using Choreography.Theater;
 using Choreography.Transport;
 using Puppeteer;
 using Puppeteer.EventSourcing.Interpreter.Formatters;
@@ -11,6 +12,11 @@ namespace Choreography.StageManager
     public class StageV2 : Stage
     {
         private IOutputFormatter formatterPrototype;  // null = default JsonFormatter
+        // Authoring transpiler (input-side mirror of formatterPrototype).
+        // Default = Identity so every Stage always carries one. Runs locally at
+        // author-time BEFORE the Director/Cast branch, so only the transpiled
+        // body crosses the wire and enters the journal — never the notation.
+        private INotationTranspiler transpilerPrototype = IdentityTranspiler.Instance;
 
         public StageV2(PerformerId id, string actorName)
             : base(id, actorName)
@@ -45,6 +51,16 @@ namespace Choreography.StageManager
         public StageV2 Formatter(IOutputFormatter prototype)
         {
             this.formatterPrototype = prototype;
+            return this;
+        }
+
+        // Install the authoring transpiler for this Stage (input-side mirror of
+        // Formatter). Lowers a domain notation into a Puppeteer DSL command body
+        // at author-time; only the transpiled body is journaled / forwarded,
+        // never the transpiler. Default = Identity.
+        public StageV2 Transpiler(INotationTranspiler prototype)
+        {
+            this.transpilerPrototype = prototype ?? throw new ArgumentNullException(nameof(prototype));
             return this;
         }
 
@@ -171,6 +187,36 @@ namespace Choreography.StageManager
             {
                 return hook.PerformQry(script, parameters);
             }
+        }
+
+        // ── Enact (capture a transpiled construction as the Action) ────────
+        // The transpile runs locally at author-time; the transpiled body then
+        // flows through the normal Director-executes / Cast-forwards path, so
+        // the wire and the journal only ever see the lowered DSL. Identity
+        // transpiler => the notation is already Puppeteer DSL, enacted verbatim.
+
+        public Task<string> PerformEnact(string notation, CancellationToken ct = default)
+        {
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            string body = transpilerPrototype.Transpile(notation);
+            return PerformCmd(body, ct);
+        }
+
+        public Task<string> PerformEnact(string notation, DateTime now, string ip, string user,
+            CancellationToken ct = default)
+        {
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            string body = transpilerPrototype.Transpile(notation);
+            return PerformCmd(body, now, ip, user, ct);
+        }
+
+        public Task<string> PerformCheckThenEnact(string check, string notation,
+            DateTime now, string ip, string user, CancellationToken ct = default)
+        {
+            if (check == null) throw new ArgumentNullException(nameof(check));
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            string body = transpilerPrototype.Transpile(notation);
+            return PerformCheckThenCommand(check, body, now, ip, user, ct);
         }
     }
 }

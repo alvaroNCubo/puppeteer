@@ -226,7 +226,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					string memberName = Property() ?? Method();
 
-					patternAst.RegisterMemberAccess(id.Name, memberName, memberInfo, position);
+					patternAst.RegisterMemberAccess(id.Name, memberName, memberInfo, position, idType);
 					System.Diagnostics.Debug.WriteLine($"[DottedId.PreparePatternMatching]   RegisterMemberAccess called: {id.Name}.{memberName}");
 
 					if (memberInfo is MethodInfo methodInfo)
@@ -238,7 +238,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 						}
 
 						List<object> argumentValues = base.GetArgumentValues();
-						patternAst.RegisterMethodCall(methodInfo, target, argumentValues, position, id.Name);
+						patternAst.RegisterMethodCall(methodInfo, target, argumentValues, position, id.Name, idType);
 						System.Diagnostics.Debug.WriteLine($"[DottedId.PreparePatternMatching]   RegisterMethodCall called: {methodInfo.DeclaringType?.Name}.{methodInfo.Name}");
 					}
 

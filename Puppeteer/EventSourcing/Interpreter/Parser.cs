@@ -596,18 +596,22 @@ namespace Puppeteer.EventSourcing.Interpreter
         // ============================================================
         // Tell statement — Plan 2 of the Tell primitive roadmap.
         // Grammar:
-        //   tellStatement := TELL ( ackForm | targetForm ) SEMICOLON
-        //   ackForm       := "ack" stringLit "from" id LPAREN exprList RPAREN
-        //   targetForm    := id [LPAREN exprList RPAREN] action trailers
-        //   action        := commandCall | sagaVerb commandCall
-        //   sagaVerb      := "start" | "step" | "compensate" | "close"
-        //   commandCall   := id LPAREN exprList RPAREN
-        //   trailers      := (idTrailer | throughTrailer)*
-        //   idTrailer     := "id" stringLit
-        //   throughTrailer:= "through" stringLit
+        //   tellStatement := TELL ( ackForm | notDeliveredForm | targetForm ) SEMICOLON
+        //   ackForm          := "ack" stringLit "from" id LPAREN exprList RPAREN
+        //   notDeliveredForm := stringLit "not" "delivered" COMMA "per" stringLit
+        //   targetForm       := id [LPAREN exprList RPAREN] action trailers
+        //   action           := commandCall | sagaVerb commandCall
+        //   sagaVerb         := "start" | "step" | "compensate" | "close"
+        //   commandCall      := id LPAREN exprList RPAREN
+        //   trailers         := (idTrailer | throughTrailer)*
+        //   idTrailer        := "id" stringLit
+        //   throughTrailer   := "through" stringLit
         //
         // Saga verbs require a target with id in parens (`tell <SagaActor>(<sagaId>)`).
-        // 'ack', 'from', 'id', 'through' and the saga verbs are contextual keywords
+        // The non-delivery form (Plan 10) starts with a stringLit (the envelope
+        // id), which disambiguates it from the ack form ("ack" lexeme) and the
+        // target form (target class id). 'ack', 'from', 'id', 'through', 'not',
+        // 'delivered', 'per' and the saga verbs are contextual keywords
         // (TokenType.id with matching lexeme), the same pattern as 'where' and 'list'.
         // ============================================================
         private Statement ParseTellStatement(int[] currLevel, bool isQuery, bool isCheck)
@@ -625,6 +629,14 @@ namespace Puppeteer.EventSourcing.Interpreter
                 Statement ackResult = ParseTellAckBody();
                 lexer.Accept(TokenType.semicolon);
                 return ackResult;
+            }
+
+            // Form: tell 'envelope-id' not delivered, per 'witness'  (Plan 10)
+            if (lexer.CurrentToken.Type == TokenType.stringLit)
+            {
+                Statement notDeliveredResult = ParseTellNotDeliveredBody();
+                lexer.Accept(TokenType.semicolon);
+                return notDeliveredResult;
             }
 
             // Form: tell <Target>[(<id>)] [sagaVerb] <Command>(<args>) [trailers]
@@ -730,6 +742,46 @@ namespace Puppeteer.EventSourcing.Interpreter
             lexer.Accept(TokenType.rParen);
 
             return new TellAckStatement(symbolTable, ackId, fromTargetClass, fromIdArgs[0]);
+        }
+
+        // Plan 10: parse `'<envelopeId>' not delivered, per '<witness>'`. Entered
+        // with the current token positioned at the envelope-id string literal. The
+        // contextual keywords 'not', 'delivered' and 'per' lex as TokenType.id; the
+        // separator is a comma token.
+        private Statement ParseTellNotDeliveredBody()
+        {
+            // Already at the envelope id string literal.
+            string envelopeId = lexer.CurrentLexeme().ToString();
+            lexer.Accept(TokenType.stringLit);
+
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("not")))
+            {
+                throw new LanguageException($"'tell '<id>'' must be followed by 'not delivered', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            lexer.Accept(TokenType.id); // consume 'not'
+
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("delivered")))
+            {
+                throw new LanguageException($"'tell '<id>' not' must be followed by 'delivered', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            lexer.Accept(TokenType.id); // consume 'delivered'
+
+            lexer.Accept(TokenType.comma);
+
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("per")))
+            {
+                throw new LanguageException($"'tell '<id>' not delivered,' must be followed by 'per', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            lexer.Accept(TokenType.id); // consume 'per'
+
+            if (lexer.CurrentToken.Type != TokenType.stringLit)
+            {
+                throw new LanguageException($"'tell ... not delivered, per' requires a string literal witness, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            string witness = lexer.CurrentLexeme().ToString();
+            lexer.Accept(TokenType.stringLit);
+
+            return new TellNotDeliveredStatement(symbolTable, envelopeId, witness);
         }
 
         private SagaVerb? TryReadSagaVerb()

@@ -46,7 +46,7 @@ namespace Choreography.Transport.SimpleX
     // to encrypt the first message (you would need the pubkey you are precisely about to transport).
     // The envelopes only contain public pubkeys + public queue URIs, so a
     // passive observer learns no secrets. Post-handshake, all SENDs use crypto_box.
-    internal sealed class SimplexTransport : IStageTransport
+    internal sealed class SimplexTransport : IStageTransport, IResumableTransport, IAsyncDisposable
     {
         private readonly PerformerId _localId;
         private readonly string _smpServer;
@@ -59,17 +59,23 @@ namespace Choreography.Transport.SimpleX
         private SmpClient _client;
         private readonly ConcurrentDictionary<string, PendingInvitation> _pending = new();
         private readonly SemaphoreSlim _connectLock = new(1, 1);
+        // Bug 19 (SMP resume): null si no se configuro un directorio de persistencia (los canales
+        // siguen funcionando, solo que no son resumibles tras process-death).
+        private readonly SimplexChannelStore _channelStore;
 
         internal IPuppeteerLogger Logger => _logger;
 
         public SimplexTransport(PerformerId localId, string smpServerUrl, byte[] serverFingerprint = null,
-            IPuppeteerLogger logger = null)
+            IPuppeteerLogger logger = null, string persistenceDirectory = null)
         {
             if (string.IsNullOrWhiteSpace(smpServerUrl)) throw new ArgumentNullException(nameof(smpServerUrl));
             _localId = localId;
             ParseServerUrl(smpServerUrl, out _smpServer, out _smpPort);
             _configuredFingerprint = serverFingerprint;
             _logger = logger ?? new ConsoleLogger();
+            _channelStore = string.IsNullOrWhiteSpace(persistenceDirectory)
+                ? null
+                : new SimplexChannelStore(persistenceDirectory);
         }
 
         private static void ParseServerUrl(string url, out string host, out int port)
@@ -112,8 +118,8 @@ namespace Choreography.Transport.SimpleX
         {
             if (_configuredFingerprint == null)
                 throw new InvalidOperationException(
-                    "serverFingerprint requerido para crear invitaciones. " +
-                    "Configurar via Stage.ConfigureTransport(SimpleX, host, serverFingerprint).");
+                    "serverFingerprint required to create invitations. " +
+                    "Configure via Stage.ConfigureTransport(SimpleX, host, serverFingerprint).");
 
             await EnsureConnectedAsync(_configuredFingerprint, CancellationToken.None);
 
@@ -143,8 +149,8 @@ namespace Choreography.Transport.SimpleX
             byte[] keyHash = forwardQueue.ServerFingerprint
                 ?? _configuredFingerprint
                 ?? throw new InvalidOperationException(
-                    "Invitation URI no incluye fingerprint y transport no fue configurado con uno. " +
-                    "Verificar que el Ushier emita URIs en formato smp://HASH@host:port/...");
+                    "Invitation URI does not include a fingerprint and transport was not configured with one. " +
+                    "Verify that the Usher emits URIs in the format smp://HASH@host:port/...");
 
             await EnsureConnectedAsync(keyHash, CancellationToken.None);
 
@@ -199,6 +205,10 @@ namespace Choreography.Transport.SimpleX
                 invitation.InviterId, invitation.Purpose, _logger);
             await channel.StartAsync(CancellationToken.None);
 
+            // Bug 19 (SMP resume): persistir el estado del canal establecido para poder
+            // resumirlo tras un process-death (re-SUB unilateral, sin re-handshake).
+            _channelStore?.Save(invitation.InviterId, invitation.Purpose, forwardQueue, reverseQueue);
+
             return channel;
         }
 
@@ -239,8 +249,8 @@ namespace Choreography.Transport.SimpleX
 
             if (envelope.SenderSignPubKey == null || envelope.SenderDhPubKey == null)
                 throw new InvalidOperationException(
-                    "ReverseQueueEnvelope no incluye SenderSignPubKey/SenderDhPubKey; " +
-                    "version pre-Fase 7 del joiner detectada. Upgrade necesario.");
+                    "ReverseQueueEnvelope does not include SenderSignPubKey/SenderDhPubKey; " +
+                    "pre-Phase 7 version of the joiner detected. Upgrade required.");
 
             await _client.AcknowledgeAsync(forwardQueue, firstMsg.MsgId, ct);
 
@@ -275,6 +285,37 @@ namespace Choreography.Transport.SimpleX
                 envelope.PerformerId, pending.Purpose, _logger);
             await channel.StartAsync(ct);
 
+            // Bug 19 (SMP resume): persistir el estado del canal establecido para poder
+            // resumirlo tras un process-death (re-SUB unilateral, sin re-handshake).
+            _channelStore?.Save(envelope.PerformerId, pending.Purpose, reverseQueue, forwardQueue);
+
+            return channel;
+        }
+
+        // Bug 19 (SMP resume) — Reabre un canal previamente establecido tras un process-death,
+        // SIN handshake. SMP es store-and-forward: la queue del canal sobrevive en el server con
+        // lo que el peer publico mientras este nodo estaba muerto. Reconstruimos las dos queues
+        // desde el estado persistido (Save al establecer el canal), reconectamos al server y
+        // levantamos un SimplexChannel; su StartAsync re-SUBea el inbound y drena lo encolado.
+        //
+        // Es UNILATERAL: el peer no participa (sigue publicando a la misma queue). Devuelve null si
+        // no hay estado persistido para (peer, purpose) — el caller decide el fallback.
+        public async Task<IStageChannel> ResumeChannelAsync(PerformerId peer, ChannelPurpose purpose, CancellationToken ct)
+        {
+            if (_channelStore == null) return null;
+            if (!_channelStore.TryLoad(peer, purpose, out var outbound, out var inbound))
+                return null;
+
+            byte[] keyHash = inbound.ServerFingerprint ?? outbound.ServerFingerprint ?? _configuredFingerprint
+                ?? throw new InvalidOperationException(
+                    "Resumed channel state has no server fingerprint and transport was not configured with one.");
+
+            await EnsureConnectedAsync(keyHash, ct);
+
+            var channel = new SimplexChannel(_client, outbound, inbound, peer, purpose, _logger);
+            await channel.StartAsync(ct);
+
+            _logger.Debug($"[SimplexTransport] Resumed {purpose} channel to {peer} from persisted state (no handshake).");
             return channel;
         }
 
@@ -308,6 +349,14 @@ namespace Choreography.Transport.SimpleX
                 receivingQueue.RecipientDhSecretKey,
                 receivingQueue.ServerDhPublicKey);
             return SmpCrypto.ExtractMsgBodyFromRcvMsgBody(rcvMsgBody);
+        }
+
+        // Cierra la conexion al SMP server. Tras esto el server deja de ver una subscripcion
+        // de este nodo, asi que los mensajes que el peer publique se encolan (store-and-forward)
+        // hasta que un ResumeChannelAsync re-SUBee la queue desde el estado persistido.
+        public async ValueTask DisposeAsync()
+        {
+            if (_client != null) await _client.DisposeAsync();
         }
 
         private sealed class PendingInvitation

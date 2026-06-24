@@ -1,15 +1,15 @@
-# Gramática BNF del Pattern Matching DSL
+# Pattern Matching DSL BNF Grammar
 
-## Expresiones Base (Commit 2.2)
+## Base Expressions (Commit 2.2)
 
 ```bnf
 <pattern> ::= <pattern-list>
 
 <pattern-list> ::= <expression> (<separator> <expression>)*
 
-<separator> ::= ' '         # Espacio: patrones en la misma línea
-              | '...'       # Tres puntos: azúcar sintáctico equivalente a espacio
-              | '\n'        # Nueva línea: patrones en diferentes líneas
+<separator> ::= ' '         # Space: patterns on the same line
+              | '...'       # Three dots: syntactic sugar equivalent to space
+              | '\n'        # Newline: patterns on different lines
 
 <expression> ::= <assignment>
                | <instance-access>
@@ -108,181 +108,181 @@
 <second> ::= [0-9] | [0-5][0-9]
 ```
 
-## Notas:
+## Notes:
 
-### Separadores de Patrones
-- **Espacio (' ')**: Separa patrones en la misma línea/comando. Ejemplo: `[A].X() [B].Y()` busca ambos en el mismo comando.
-- **Tres puntos ('...')**: En contexto de separadores, es azúcar sintáctico equivalente a espacio. Ejemplo: `[A].X() ... [B].Y()` es idéntico a `[A].X() [B].Y()`.
-  - **Nota**: Los tres puntos requieren espacios alrededor cuando se usan como separadores (no pueden pegarse directamente a los identificadores).
-- **Nueva línea ('\n')**: Separa patrones en diferentes líneas/comandos. Permite escribir patrones multilinea.
+### Pattern Separators
+- **Space (' ')**: Separates patterns on the same line/command. Example: `[A].X() [B].Y()` looks for both in the same command.
+- **Three dots ('...')**: In separator context, it is syntactic sugar equivalent to a space. Example: `[A].X() ... [B].Y()` is identical to `[A].X() [B].Y()`.
+  - **Note**: The three dots require surrounding spaces when used as separators (they cannot be attached directly to identifiers).
+- **Newline ('\n')**: Separates patterns on different lines/commands. Allows writing multiline patterns.
 
-**IMPORTANTE**: Los tres puntos `...` tienen **diferente significado según el contexto**:
-- **Fuera de asignaciones**: Son azúcar sintáctico para separar patrones (equivalente a espacio)
-- **Dentro de asignaciones**: Indican partial matching (ver sección Asignaciones y Partial Matching)
+**IMPORTANT**: The three dots `...` have a **different meaning depending on the context**:
+- **Outside assignments**: They are syntactic sugar for separating patterns (equivalent to a space)
+- **Inside assignments**: They indicate partial matching (see the Assignments and Partial Matching section)
 
-### Ejemplos de Separadores
+### Separator Examples
 ```
-# Estos son EQUIVALENTES (todos buscan ambos patrones en el mismo comando):
+# These are EQUIVALENT (all look for both patterns in the same command):
 [A].X() [B].Y()
 [A].X() ... [B].Y()
 
-# Patrón multilinea (busca X en una línea, Y en otra):
+# Multiline pattern (looks for X on one line, Y on another):
 [A].X()
 [B].Y()
 ```
 
-### Asignaciones y Partial Matching (Commit 2.5 y 2.6)
-Las asignaciones capturan valores durante el matching y deben terminar con punto y coma (`;`) para mayor legibilidad.
+### Assignments and Partial Matching (Commit 2.5 and 2.6)
+Assignments capture values during matching and must end with a semicolon (`;`) for readability.
 
-**Sintaxis básica:**
+**Basic syntax:**
 ```
-$variable = <expresion>;
+$variable = <expression>;
 ```
 
-**Partial Matching con `...`:**
-Dentro de una asignación, `...` indica que puede haber cualquier expresión antes, después, o entre los patrones especificados.
+**Partial Matching with `...`:**
+Inside an assignment, `...` indicates that there can be any expression before, after, or between the specified patterns.
 
-**Semántica:**
-- `$x = ... patron;` → El patrón está en alguna parte del lado derecho de la asignación
-- `$x = patron ...;` → El patrón está justo después del `=`, puede haber más expresiones después
-- `$x = ... patron;` → El patrón está al final del lado derecho
-- `$x = ... patron1 ... patron2 ...;` → Ambos patrones están presentes, con cualquier expresión antes, entre, o después
+**Semantics:**
+- `$x = ... pattern;` → The pattern is somewhere on the right-hand side of the assignment
+- `$x = pattern ...;` → The pattern is right after the `=`, there may be more expressions after it
+- `$x = ... pattern;` → The pattern is at the end of the right-hand side
+- `$x = ... pattern1 ... pattern2 ...;` → Both patterns are present, with any expression before, between, or after
 
-**Ejemplos:**
+**Examples:**
 
-1. **Asignación simple (sin partial matching):**
+1. **Simple assignment (no partial matching):**
    ```
    $x = [String].Length;
    ```
-   Hace match exacto con: `$x = [String].Length`
+   Matches exactly: `$x = [String].Length`
 
-2. **Partial matching - patrón en cualquier parte:**
+2. **Partial matching - pattern anywhere:**
    ```
    $x = ... [String].Length ...;
    ```
-   Hace match con:
+   Matches:
    - `$x = [String].Length`
-   - `$x = [objeto:Objeto].Propiedad + [String].Length`
+   - `$x = [obj:Base].Property + [String].Length`
    - `$x = [String].Length * 2`
-   - `$x = [objeto:Objeto].Propiedad + [String].Length * 2`
+   - `$x = [obj:Base].Property + [String].Length * 2`
 
-3. **Partial matching - patrón al inicio:**
+3. **Partial matching - pattern at the start:**
    ```
    $x = [String].Length ...;
    ```
-   Hace match con:
+   Matches:
    - `$x = [String].Length`
    - `$x = [String].Length * 2`
-   - `$x = [String].Length + [otra:Clase].Valor`
+   - `$x = [String].Length + [other:Class].Value`
 
-   NO hace match con:
+   Does NOT match:
    - `$x = 10 + [String].Length`
 
-4. **Partial matching - patrón al final:**
+4. **Partial matching - pattern at the end:**
    ```
    $x = ... [String].Length;
    ```
-   Hace match con:
+   Matches:
    - `$x = [String].Length`
    - `$x = 10 + [String].Length`
-   - `$x = [objeto:Objeto].Propiedad + [String].Length`
+   - `$x = [obj:Base].Property + [String].Length`
 
-   NO hace match con:
+   Does NOT match:
    - `$x = [String].Length * 2`
 
-5. **Múltiples patrones con partial matching:**
+5. **Multiple patterns with partial matching:**
    ```
-   $resultado = ... [texto:String].ToUpper() ... [String].Length ...;
+   $result = ... [text:String].ToUpper() ... [String].Length ...;
    ```
-   Hace match con cualquier asignación que contenga ambas llamadas en alguna parte, en ese orden
+   Matches any assignment that contains both calls somewhere, in that order
 
-### Parámetros Tipados (Commit 2.3)
-Los parámetros pueden especificar opcionalmente su tipo mediante la sintaxis `:tipo`:
+### Typed Parameters (Commit 2.3)
+Parameters may optionally specify their type via the `:type` syntax:
 
-**Sintaxis:**
-- Identificador con tipo: `identificador:Tipo` (ej: `fecha:DateTime`, `cantidad:int`)
-- Literal con tipo: `literal:Tipo` (ej: `10:int`, `3.14:double`, `100:decimal`)
-- Sin tipo: El parser infiere el tipo de la literal automáticamente
+**Syntax:**
+- Identifier with type: `identifier:Type` (e.g., `date:DateTime`, `count:int`)
+- Literal with type: `literal:Type` (e.g., `10:int`, `3.14:double`, `100:decimal`)
+- Without type: The parser infers the literal's type automatically
 
-**Reglas de Validación:**
-- Una literal debe ser compatible con el tipo especificado
-- `10:int` es válido
-- `10:decimal` es **inválido** (debe ser `10m:decimal`)
-- `3.14:double` es válido
-- `3.14:int` es **inválido** (no se puede convertir un double a int)
+**Validation Rules:**
+- A literal must be compatible with the specified type
+- `10:int` is valid
+- `10:decimal` is **invalid** (must be `10m:decimal`)
+- `3.14:double` is valid
+- `3.14:int` is **invalid** (a double cannot be converted to int)
 
-**Casos de Uso:**
-- **Forzar tipo específico:** `[Clase].Metodo(10:decimal)` solo hace match si el parámetro es decimal
-- **Evitar ambigüedad:** `fecha:DateTime` vs una variable llamada `fecha`
-- **Validar sobrecarga:** Ayuda a distinguir entre sobrecargas de métodos
+**Use Cases:**
+- **Force a specific type:** `[Class].Method(10:decimal)` only matches if the parameter is decimal
+- **Avoid ambiguity:** `date:DateTime` vs a variable named `date`
+- **Validate overload:** Helps distinguish between method overloads
 
-**IMPORTANTE:** Para evitar confusión, cuando se usa un identificador (no literal) en un parámetro, se **debe** especificar el tipo con `:`.
-- `[Clase].Metodo(fecha:DateTime, _)` ✅ Correcto - busca un parámetro de tipo DateTime
-- `[Clase].Metodo(fecha, _)` ❌ Incorrecto - buscaría una variable llamada `fecha`
+**IMPORTANT:** To avoid confusion, when an identifier (not a literal) is used in a parameter, the type **must** be specified with `:`.
+- `[Class].Method(date:DateTime, _)` ✅ Correct - looks for a parameter of type DateTime
+- `[Class].Method(date, _)` ❌ Incorrect - would look for a variable named `date`
 
-**Tipos soportados:**
-- **Tipos primitivos:** `int`, `string`, `bool`, `double`, `decimal`, `datetime`, `object`
-- **Tipos de dominio:** Cualquier nombre de clase del DLL de lógica de negocios (ej: `Carrito`, `Producto`, `Orden`)
-  - En fase de parsing, los tipos de dominio NO se validan contra las DLLs cargadas
-  - La validación de tipos de dominio se realiza posteriormente en la fase de matching
-  - Ejemplo: `[Orden].AgregarItem(producto:Producto, cantidad:int)`
+**Supported types:**
+- **Primitive types:** `int`, `string`, `bool`, `double`, `decimal`, `datetime`, `object`
+- **Domain types:** Any class name from the business-logic assembly (e.g., `Foo`, `Bar`)
+  - During the parsing phase, domain types are NOT validated against the loaded assemblies
+  - Domain-type validation is performed later in the matching phase
+  - Example: `[Container].AddItem(item:Item, count:int)`
 
 ### Method/Property Chaining (Commit 2.4)
-El DSL soporta completamente el encadenamiento (chaining) de métodos y propiedades, reflejando patrones comunes en C# y LINQ.
+The DSL fully supports chaining of methods and properties, reflecting common patterns in C# and LINQ.
 
-**Sintaxis:**
+**Syntax:**
 ```
 [Type].Member1.Member2.Member3(...)
 [Type].Method1().Property.Method2(...)
 [instance:Type].Property.Method().Property
 ```
 
-**Ejemplos:**
+**Examples:**
 
-1. **Chaining de propiedades:**
+1. **Property chaining:**
    ```
-   [Carrito].Cliente.Direccion.Ciudad
+   [Container].Owner.Address.City
    ```
-   Busca acceso a la propiedad Ciudad de Direccion de Cliente en Carrito
+   Looks for access to the City property of Address of Owner in Container
 
-2. **Chaining mixto (propiedades y métodos):**
+2. **Mixed chaining (properties and methods):**
    ```
-   [Orden].Items.First().Producto.ObtenerPrecio()
+   [Container].Items.First().Item.GetPrice()
    ```
-   - `Items` - propiedad
-   - `First()` - método
-   - `Producto` - propiedad
-   - `ObtenerPrecio()` - método
+   - `Items` - property
+   - `First()` - method
+   - `Item` - property
+   - `GetPrice()` - method
 
-3. **Chaining con parámetros:**
+3. **Chaining with parameters:**
    ```
-   [Orden].Items.Where($condicion).Select(item:Item).ToList()
+   [Container].Items.Where($condition).Select(item:Item).ToList()
    ```
-   Patrón LINQ típico con parámetros variables y tipados
+   Typical LINQ pattern with variable and typed parameters
 
-4. **Chaining profundo:**
+4. **Deep chaining:**
    ```
-   [Sistema].Clientes.Find(_).Ordenes.Last().Items.Sum()
+   [Root].Members.Find(_).Children.Last().Items.Sum()
    ```
-   Múltiples niveles de navegación y operaciones
+   Multiple levels of navigation and operations
 
-5. **Chaining con literales:**
+5. **Chaining with literals:**
    ```
    [String].Substring(0,10).ToUpper().Replace('A','B')
    ```
-   Operaciones secuenciales con parámetros literales
+   Sequential operations with literal parameters
 
-**Implementación:**
-- El nodo `MemberAccessNode` tiene una propiedad `NextAccess` que permite recursión
-- Distingue automáticamente entre propiedades (sin parámetros) y métodos (con paréntesis)
-- Soporta cualquier profundidad de encadenamiento
+**Implementation:**
+- The `MemberAccessNode` node has a `NextAccess` property that allows recursion
+- It automatically distinguishes between properties (no parameters) and methods (with parentheses)
+- It supports any chaining depth
 
-### Otros
-- El constructor se reconoce como una llamada a la clase con los parámetros: `Clase(param1, param2, ...)` o `[Clase](param1, param2, ...)`.
-- Las invocaciones de métodos siempre son de la forma `instancia.Metodo(...)`.
-- Los wildcards '_' pueden aparecer en lugar de nombres de instancia o como parámetros.
-- Las variables '$identifier' capturan valores durante el matching.
-- Los comentarios // y /* */ son ignorados por el lexer.
-- Literales double pueden terminar opcionalmente con 'd' o 'D' (ej: 3.14d, 10d).
-- Literales decimal deben terminar con 'm' o 'M' en lugar de '%' (ej: 3.14m, 100m).
-- Literales datetime soportan: solo fecha (MM/DD/YYYY o M/D/YYYY), solo hora (HH:MM:SS o H:MM:SS o H:M:S), o fecha con hora (MM/DD/YYYY HH:MM:SS).
+### Other
+- The constructor is recognized as a call to the class with parameters: `Class(param1, param2, ...)` or `[Class](param1, param2, ...)`.
+- Method invocations are always of the form `instance.Method(...)`.
+- The wildcards '_' may appear in place of instance names or as parameters.
+- The variables '$identifier' capture values during matching.
+- Comments // and /* */ are ignored by the lexer.
+- Double literals may optionally end with 'd' or 'D' (e.g., 3.14d, 10d).
+- Decimal literals must end with 'm' or 'M' instead of '%' (e.g., 3.14m, 100m).
+- Datetime literals support: date only (MM/DD/YYYY or M/D/YYYY), time only (HH:MM:SS or H:MM:SS or H:M:S), or date with time (MM/DD/YYYY HH:MM:SS).

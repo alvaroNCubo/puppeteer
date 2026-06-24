@@ -56,7 +56,7 @@ namespace Choreography.Theater
             return this;
         }
 
-        // PerformanceV1 is the legacy actor surface; per Alvaro firma 2026-05-19
+        // PerformanceV1 is the legacy actor surface; per sign-off 2026-05-19
         // it does NOT expose Formatter API and always emits JSON (the legacy
         // contract that EvalStatement V1 relies on for its {} slice mechanic).
         // We defensively push a null context so any outer V2 context does not
@@ -99,7 +99,7 @@ namespace Choreography.Theater
             }
         }
 
-        // ── Playbill API (V1 backward compat — Fase 4.5) ────────────────────
+        // ── Playbill API (V1 backward compat — Phase 4.5) ────────────────────
 
         public PerformanceV1 Playbill(string schemaName, Action<PlaybillSchemaBuilder> build)
         {

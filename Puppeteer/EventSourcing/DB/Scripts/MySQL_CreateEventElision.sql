@@ -1,10 +1,10 @@
 -- =============================================
--- Script: Crear tablas EventElision y EventElisionBuffer para MySQL
--- Descripción: Implementa patrón de staging/buffer transaccional
---              para operaciones masivas de marcado de elisiones
+-- Script: Create EventElision and EventElisionBuffer tables for MySQL
+-- Description: Implements a transactional staging/buffer pattern
+--              for bulk elision marking operations
 -- =============================================
 
--- Tabla definitiva de elisiones
+-- Final elision table
 CREATE TABLE IF NOT EXISTS EventElision
 (
     DairyId BIGINT NOT NULL,
@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS EventElision
     INDEX IX_EventElision_DairyId (DairyId)
 ) ENGINE=InnoDB CHARSET=utf8;
 
--- Tabla de buffer temporal para staging de elisiones
--- Se usa para acumular elisiones antes del commit transaccional
+-- Temporary buffer table for elision staging
+-- Used to accumulate elisions before the transactional commit
 CREATE TABLE IF NOT EXISTS EventElisionBuffer
 (
     DairyId BIGINT NOT NULL,
@@ -24,25 +24,25 @@ CREATE TABLE IF NOT EXISTS EventElisionBuffer
 ) ENGINE=InnoDB CHARSET=utf8;
 
 -- =============================================
--- Script: Migración de datos existentes
--- Descripción: Migra registros con Skip=1 de tablas Dairy existentes
---              a la nueva tabla EventElision
+-- Script: Migration of existing data
+-- Description: Migrates records with Skip=1 from existing Dairy tables
+--              to the new EventElision table
 -- =============================================
 
--- Nota: Este script debe ejecutarse para cada actor/tabla Dairy existente
--- Reemplazar {NOMBRE_ACTOR} con el nombre real del actor
+-- Note: This script must be run for each existing actor/Dairy table
+-- Replace {ACTOR_NAME} with the actual actor name
 
--- Ejemplo de migración para una tabla específica:
+-- Migration example for a specific table:
 /*
 INSERT INTO EventElision (DairyId, ReactionId, Timestamp)
 SELECT id, 0, NOW()
-FROM {NOMBRE_ACTOR}
+FROM {ACTOR_NAME}
 WHERE Skip = 1
 AND NOT EXISTS (
     SELECT 1 FROM EventElision
-    WHERE DairyId = {NOMBRE_ACTOR}.id
+    WHERE DairyId = {ACTOR_NAME}.id
 );
 
--- El ReactionId se establece en 0 para datos históricos previos
--- al sistema de Reactions, indicando "elision manual o legacy"
+-- ReactionId is set to 0 for historical data predating
+-- the Reactions system, indicating "manual or legacy elision"
 */

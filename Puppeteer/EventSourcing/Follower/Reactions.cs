@@ -120,7 +120,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			if (reactionsToExecute.Count == 0)
 			{
-				System.Diagnostics.Debug.WriteLine($"[Reactions] Ninguna reaction esta activa o vigente. No se ejecuta nada.");
+				System.Diagnostics.Debug.WriteLine($"[Reactions] No reaction is active or in effect. Nothing is executed.");
 				return;
 			}
 

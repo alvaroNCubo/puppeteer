@@ -83,9 +83,28 @@ namespace Puppeteer.EventSourcing.PromotionCandidate
 						body.Append(canonicalScript, cursor, tok.Start - cursor);
 					}
 
+					// Mirror Parser.ParseDate: a `date` token immediately followed (in
+					// the token stream) by a `time` token is fused into a single
+					// DateTime literal. ParseLiteral has no `case time` of its own, so
+					// ParseDate consumes the adjacent time — which is why a script with
+					// an unquoted `MM/dd/yyyy HH:mm:ss` parses live as one DateTime.
+					// Extracting them as two separate parameters would emit "pN pN+1"
+					// (separated only by the source whitespace, with no comma) into the
+					// body, which then fails to re-parse when the promotion materializes
+					// the Action — ParseArguments reads pN as the argument and finds
+					// pN+1 where it expects ',' or ')'. We capture the combined lexeme
+					// up to the time token's end and advance the lexer past both.
+					int literalEnd = tok.End;
+					lexer.Accept();
+					if (tok.Type == TokenType.date && lexer.CurrentToken.Type == TokenType.time)
+					{
+						literalEnd = lexer.CurrentToken.End;
+						lexer.Accept();
+					}
+
 					// Capture the raw lexeme (including surrounding quotes for
 					// stringLit) as the argument value, and emit @pN in its place.
-					int length = tok.End - tok.Start + 1;
+					int length = literalEnd - tok.Start + 1;
 					string lexeme = canonicalScript.Substring(tok.Start, length);
 
 					string paramName = "p" + literalCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -106,8 +125,11 @@ namespace Puppeteer.EventSourcing.PromotionCandidate
 					if (args.Length > 0) args.Append(',');
 					args.Append(lexeme);
 
-					cursor = tok.End + 1;
+					cursor = literalEnd + 1;
 					literalCount++;
+					// The lexer was already advanced past this literal (and the
+					// fused time token, if any) above; do not Accept again here.
+					continue;
 				}
 
 				lexer.Accept();

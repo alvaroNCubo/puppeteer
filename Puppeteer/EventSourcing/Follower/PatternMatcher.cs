@@ -273,6 +273,32 @@ namespace Puppeteer.EventSourcing.Follower
 					return false;
 			}
 		}
+		// A receiver-type pattern ([_:T] or [name:T]) matches a script call/access when T
+		// names a type the receiver "is-a": any type on the chain from the receiver's static
+		// type up through its base types. When the receiver's static type was not resolved
+		// (unnamed chained expression) it falls back to the matched member's declaring-type
+		// chain. Plain name equality at the declaring type is the degenerate case. This is
+		// what lets a pattern be written against the receiver's declared type even when the
+		// matched member is inherited from an abstract base — i.e. the type that DECLARES the
+		// member is a base of the type the script NAMED. Without this, a method declared only
+		// on an abstract base would match exclusively through the base's name and never
+		// through the (abstract or concrete) subtype the receiver was typed as.
+		private static bool ReceiverTypePatternMatches(string patternTypeName, Type receiverType, Type declaringType)
+		{
+			if (string.IsNullOrEmpty(patternTypeName)) return false;
+
+			for (Type t = receiverType; t != null; t = t.BaseType)
+			{
+				if (string.Equals(t.Name, patternTypeName, StringComparison.OrdinalIgnoreCase)) return true;
+			}
+
+			for (Type t = declaringType; t != null; t = t.BaseType)
+			{
+				if (string.Equals(t.Name, patternTypeName, StringComparison.OrdinalIgnoreCase)) return true;
+			}
+
+			return false;
+		}
 		private bool MatchTypeAccess(TypeAccessNode typeAccess, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (typeAccess == null) return false;
@@ -299,7 +325,7 @@ namespace Puppeteer.EventSourcing.Follower
 					if (scriptMethodCall.Method.DeclaringType == null)
 						continue;
 
-					if (!scriptMethodCall.Method.DeclaringType.Name.Equals(typeAccess.TypeName, StringComparison.OrdinalIgnoreCase))
+					if (!ReceiverTypePatternMatches(typeAccess.TypeName, scriptMethodCall.ReceiverType, scriptMethodCall.Method.DeclaringType))
 						continue;
 
 					// Check the method against its arguments.
@@ -331,7 +357,7 @@ namespace Puppeteer.EventSourcing.Follower
 					if (scriptAccess.Member == null || scriptAccess.Member.DeclaringType == null)
 						continue;
 
-					if (!scriptAccess.Member.DeclaringType.Name.Equals(typeAccess.TypeName, StringComparison.OrdinalIgnoreCase))
+					if (!ReceiverTypePatternMatches(typeAccess.TypeName, scriptAccess.ReceiverType, scriptAccess.Member.DeclaringType))
 						continue;
 
 					// 3. Check that the member matches.
@@ -409,7 +435,7 @@ namespace Puppeteer.EventSourcing.Follower
 						continue;
 					}
 
-					if (!scriptMethodCall.Method.DeclaringType.Name.Equals(instanceAccess.TypeName, StringComparison.OrdinalIgnoreCase))
+					if (!ReceiverTypePatternMatches(instanceAccess.TypeName, scriptMethodCall.ReceiverType, scriptMethodCall.Method.DeclaringType))
 					{
 #if DEBUG
 						System.Diagnostics.Debug.WriteLine($"[MatchInstanceAccess]     SKIP: type mismatch {scriptMethodCall.Method.DeclaringType.Name} != {instanceAccess.TypeName}");
@@ -472,7 +498,7 @@ namespace Puppeteer.EventSourcing.Follower
 					if (scriptAccess.Member == null || scriptAccess.Member.DeclaringType == null)
 						continue;
 
-					if (!scriptAccess.Member.DeclaringType.Name.Equals(instanceAccess.TypeName, StringComparison.OrdinalIgnoreCase))
+					if (!ReceiverTypePatternMatches(instanceAccess.TypeName, scriptAccess.ReceiverType, scriptAccess.Member.DeclaringType))
 						continue;
 
 					// If the pattern specifies an instance name (neither null nor "_"), verify it matches.

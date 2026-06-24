@@ -809,6 +809,8 @@ namespace Puppeteer.EventSourcing.Follower
 				return typeof(decimal);
 			else if (typeName.Equals("datetime", StringComparison.OrdinalIgnoreCase))
 				return typeof(DateTime);
+			else if (typeName.Equals("byte", StringComparison.OrdinalIgnoreCase))
+				return typeof(byte);
 			else if (typeName.Equals("object", StringComparison.OrdinalIgnoreCase))
 				return typeof(object);
 

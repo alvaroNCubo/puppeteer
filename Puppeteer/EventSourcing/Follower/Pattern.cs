@@ -490,6 +490,7 @@ namespace Puppeteer.EventSourcing.Follower
 				String.Equals(typeName, "decimal", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "bool", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "DateTime", StringComparison.OrdinalIgnoreCase) ||
+				String.Equals(typeName, "byte", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "object", StringComparison.OrdinalIgnoreCase)
 			)
 			{

@@ -375,10 +375,16 @@ namespace Choreography.StageManager
                              "Run on Android emulator or Linux for the real path.");
                 return new InMemoryTransport(Id, logger);
             }
+            // Bug 19 (SMP resume): el transport persiste el estado de cada canal establecido en
+            // StageStateDirectory para poder resumirlo tras un process-death. Si StageStateDirectory
+            // aun no esta seteado (ConfigureTransport antes que ConfigureStorage), el resume queda
+            // deshabilitado (el transport sigue funcionando) — para habilitarlo, configurar storage
+            // antes que transport.
             return new Transport.SimpleX.SimplexTransport(Id,
                 url ?? throw new ArgumentNullException(nameof(url), "url is required for SimpleX transport"),
                 serverFingerprint,
-                logger);
+                logger,
+                config.StageStateDirectory);
         }
 
         // --- Lifecycle ---
@@ -445,6 +451,22 @@ namespace Choreography.StageManager
         {
             if (transport == null) throw new InvalidOperationException("Transport not configured");
             return transport.WaitForConnectionAsync(invitation, ct);
+        }
+
+        // Bug 19 (SMP) — Reabre un canal previamente establecido con un peer conocido tras un
+        // process-death, sin re-handshake. Pensado para que el host, al arrancar, recorra
+        // RecallKnownPeers() y resuma Coordination con cada peer (luego JoinCoordination); el
+        // DirectorAnnounce que llega por el canal resumido dispara term-first y, si hubo
+        // rotacion, el re-handshake in-band de bug 18 restaura Replication/Command.
+        //
+        // Devuelve null si el transport no soporta resume (PortableHttps/InMemory: el rejoin se
+        // resuelve por re-host/pairing normal) o si no hay estado persistido para (peer, purpose).
+        public Task<IStageChannel> ResumeChannelAsync(PerformerId peer, ChannelPurpose purpose, CancellationToken ct = default)
+        {
+            if (transport == null) throw new InvalidOperationException("Transport not configured");
+            return transport is IResumableTransport resumable
+                ? resumable.ResumeChannelAsync(peer, purpose, ct)
+                : Task.FromResult<IStageChannel>(null);
         }
 
         // --- Write guard ---
@@ -1064,7 +1086,7 @@ namespace Choreography.StageManager
                                 System.Threading.Interlocked.Increment(ref replicationDroppedOlderCount);
                                 hook.Logger.Debug(
                                     $"[Stage {Id}] DROP older CueEvent EntryId={cue.EntryId} (localMax={localMax} from peer={peerId}). " +
-                                    $"Collision: este Stage ya tiene una entry en esa posicion. Total drops={replicationDroppedOlderCount}.");
+                                    $"Collision: this Stage already has an entry at that position. Total drops={replicationDroppedOlderCount}.");
                             }
                             break;
 

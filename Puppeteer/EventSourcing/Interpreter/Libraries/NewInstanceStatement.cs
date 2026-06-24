@@ -307,7 +307,31 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// for the symmetric "member only on subclass" pattern.
 				bool covariantOverrideAccepted = rValue is DotAccess rValueAsDotAccess
 					&& rValueAsDotAccess.HasOverrideReturnTypeAssignableTo(lValue.ForcedType);
-				if (!covariantOverrideAccepted) throw new LanguageException($"Type {type} does not inherit from {lValue.ForcedType}.");
+				if (!covariantOverrideAccepted)
+				{
+					// Sibling reassignment: rValue's type is neither base nor subclass
+					// of the lValue's ForcedType, but both descend from a shared base
+					// (e.g. a variable fixed to one refined subtype is later reassigned
+					// a distinct subtype of the same hierarchy). The assignment is sound
+					// dynamically — the variable simply needs a static type wide enough
+					// to hold either value. Widen its ForcedType to the least common base
+					// across every occurrence of the name plus the persisted symbol so
+					// member resolution and the compiled storage cast remain valid. If the
+					// only shared ancestor is object (genuinely unrelated types), there is
+					// no sound common type and the assignment is rejected as before.
+					Type commonBase = LeastCommonBase(lValue.ForcedType, type);
+					bool widenedToSharedBase = commonBase != null
+						&& commonBase != typeof(object)
+						&& lValue is Id lValueId;
+					if (widenedToSharedBase)
+					{
+						WidenVariableToCommonBase((Id)lValue, commonBase);
+					}
+					else
+					{
+						throw new LanguageException($"Type {type} does not inherit from {lValue.ForcedType}.");
+					}
+				}
 			}
 
 			if (lValue is SubscriptAstExpression subscriptLValue)
@@ -315,6 +339,42 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else
 				lValue.ValidateStatically();
 			rValue.ValidateStatically();
+		}
+
+		// Least common base of two types: the most derived type that is assignable
+		// from both. Walks lhs's base chain and returns the first ancestor that is
+		// also assignable from rhs. Returns object for unrelated types (their only
+		// shared ancestor), which the caller treats as "no sound common base".
+		private static Type LeastCommonBase(Type lhs, Type rhs)
+		{
+			if (lhs == null || rhs == null) return null;
+			for (Type ancestor = lhs; ancestor != null; ancestor = ancestor.BaseType)
+			{
+				if (ancestor.IsAssignableFrom(rhs)) return ancestor;
+			}
+			return null;
+		}
+
+		// Apply the widened static type uniformly: every Id occurrence of the
+		// variable (declaration and references, in this script and any carried over
+		// from a previous PerformCmd) and the persisted global symbol must agree on
+		// the common base. Otherwise a stale narrower ForcedType on one occurrence
+		// would drive the compiled storage cast and fail at runtime for a value of
+		// the sibling type.
+		private void WidenVariableToCommonBase(Id variable, Type commonBase)
+		{
+			foreach (Id occurrence in variable.Program.Collect<Id>())
+			{
+				if (string.Equals(occurrence.Name, variable.Name, StringComparison.OrdinalIgnoreCase))
+				{
+					occurrence.WidenForcedTypeTo(commonBase);
+				}
+			}
+			if (this.symbolTable.HasVariable(variable.Name))
+			{
+				VariableSymbol symbol = this.symbolTable.Entry(variable.Name);
+				if (symbol != null) symbol.type = commonBase;
+			}
 		}
 
 		// B.3.1: include LValue + RValue contributions so two assignments with
@@ -365,7 +425,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (FueFiltrado) return;
 			if (lValue != null && rValue != null)
 			{
-				if (tabs > 0) resultado.Append(GenerarTabs(tabs));
+				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
 				lValue.write(resultado, databaseType);
 				resultado.Append(" = ");
 				rValue.write(resultado, databaseType);

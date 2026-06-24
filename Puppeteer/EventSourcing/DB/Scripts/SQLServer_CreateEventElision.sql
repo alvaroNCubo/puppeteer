@@ -1,10 +1,10 @@
 -- =============================================
--- Script: Crear tablas EventElision y EventElisionBuffer para SQL Server
--- Descripción: Implementa patrón de staging/buffer transaccional
---              para operaciones masivas de marcado de elisiones
+-- Script: Create EventElision and EventElisionBuffer tables for SQL Server
+-- Description: Implements a transactional staging/buffer pattern
+--              for bulk elision marking operations
 -- =============================================
 
--- Tabla definitiva de elisiones
+-- Final elision table
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'EventElision')
 BEGIN
     CREATE TABLE EventElision
@@ -17,16 +17,16 @@ BEGIN
     CREATE NONCLUSTERED INDEX IX_EventElision_DairyId
     ON EventElision (DairyId);
 
-    PRINT 'Tabla EventElision creada exitosamente.';
+    PRINT 'EventElision table created successfully.';
 END
 ELSE
 BEGIN
-    PRINT 'La tabla EventElision ya existe.';
+    PRINT 'EventElision table already exists.';
 END
 GO
 
--- Tabla de buffer temporal para staging de elisiones
--- Se usa para acumular elisiones antes del commit transaccional
+-- Temporary buffer table for elision staging
+-- Used to accumulate elisions before the transactional commit
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'EventElisionBuffer')
 BEGIN
     CREATE TABLE EventElisionBuffer
@@ -39,39 +39,39 @@ BEGIN
     CREATE NONCLUSTERED INDEX IX_EventElisionBuffer_DairyId
     ON EventElisionBuffer (DairyId);
 
-    PRINT 'Tabla EventElisionBuffer creada exitosamente.';
+    PRINT 'EventElisionBuffer table created successfully.';
 END
 ELSE
 BEGIN
-    PRINT 'La tabla EventElisionBuffer ya existe.';
+    PRINT 'EventElisionBuffer table already exists.';
 END
 GO
 
 -- =============================================
--- Script: Migración de datos existentes
--- Descripción: Migra registros con Skip=1 de tablas Dairy existentes
---              a la nueva tabla EventElision
+-- Script: Migration of existing data
+-- Description: Migrates records with Skip=1 from existing Dairy tables
+--              to the new EventElision table
 -- =============================================
 
--- Nota: Este script debe ejecutarse para cada actor/tabla Dairy existente
--- Reemplazar {NOMBRE_ACTOR} con el nombre real del actor
+-- Note: This script must be run for each existing actor/Dairy table
+-- Replace {ACTOR_NAME} with the actual actor name
 
--- Ejemplo de migración para una tabla específica:
+-- Migration example for a specific table:
 /*
-IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{NOMBRE_ACTOR}')
+IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{ACTOR_NAME}')
 BEGIN
     INSERT INTO EventElision (DairyId, ReactionId, Timestamp)
     SELECT id, 0, GETDATE()
-    FROM {NOMBRE_ACTOR} WITH (NOLOCK)
+    FROM {ACTOR_NAME} WITH (NOLOCK)
     WHERE Skip = 1
     AND NOT EXISTS (
         SELECT 1 FROM EventElision
-        WHERE DairyId = {NOMBRE_ACTOR}.id
+        WHERE DairyId = {ACTOR_NAME}.id
     );
 
-    PRINT 'Migración completada para {NOMBRE_ACTOR}: ' + CAST(@@ROWCOUNT AS VARCHAR(10)) + ' registros migrados.';
+    PRINT 'Migration completed for {ACTOR_NAME}: ' + CAST(@@ROWCOUNT AS VARCHAR(10)) + ' records migrated.';
 END
 */
 
--- El ReactionId se establece en 0 para datos históricos previos
--- al sistema de Reactions, indicando "elision manual o legacy"
+-- ReactionId is set to 0 for historical data predating
+-- the Reactions system, indicating "manual or legacy elision"

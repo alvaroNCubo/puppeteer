@@ -111,6 +111,11 @@ namespace Puppeteer.EventSourcing
 				if (value != null && !ReferenceEquals(value, _transport))
 				{
 					value.RegisterAckHandler(HandleAckEnvelope);
+					// Plan 10: the failure handler is the non-delivery mirror of the
+					// ack handler — the transport invokes it when it declares an
+					// envelope dead (dead-letter / exhausted retries), and the actor
+					// journals the non-delivery verdict through the same 1-writer path.
+					value.RegisterFailureHandler(HandleTellFailure);
 				}
 				_transport = value;
 			}
@@ -191,7 +196,7 @@ namespace Puppeteer.EventSourcing
 
 		internal void EnableSkipPreview()
 		{
-			if (!IsShadow) throw new LanguageException("Skip-preview (dry-run de Elide) solo es valido en un shadow. Construilo via actor.Shadow(cfg) / ActorHandler.CreateShadow(cfg).");
+			if (!IsShadow) throw new LanguageException("Skip-preview (dry-run of Elide) is only valid on a shadow. Build it via actor.Shadow(cfg) / ActorHandler.CreateShadow(cfg).");
 			SkipPreviewEnabled = true;
 		}
 
@@ -588,6 +593,146 @@ namespace Puppeteer.EventSourcing
 			return sb.ToString();
 		}
 
+		// Plan 10 of the Tell primitive roadmap: non-delivery ingestion — the
+		// failure-side mirror of HandleAckEnvelope. Invoked by the configured
+		// ITransport (by declaration: a dead-letter / exhausted-retries callback)
+		// or by the post-rehydration recovery pass (by citation). Records the
+		// TERMINAL non-delivery verdict on the actor's own journal so the log
+		// becomes self-sufficient about the FATE of the tell, not just its
+		// issuance. Acquires the write lock manually — there is no PerformCmd
+		// around this callback. The verdict is NOT pair-elided: unlike a completed
+		// ack round-trip, a non-delivery is a fact worth keeping visible in the log.
+		internal void HandleTellFailure(TellFailure failure)
+		{
+			if (string.IsNullOrEmpty(failure.Id))
+			{
+				Debug.WriteLine($"[Tell.Failure] rejected non-delivery with empty envelope.Id (witness '{failure.Witness}') — the originating tell id must round-trip.");
+				return;
+			}
+
+			if (!symbolTable.IsTellEnvelopeIdKnown(failure.Id))
+			{
+				Debug.WriteLine($"[Tell.Failure] orphan non-delivery '{failure.Id}' (witness '{failure.Witness}') — no matching tell was ever sent from this actor. Likely transport bug or split-brain restart.");
+				return;
+			}
+
+			rwLock.EnterWriteLock();
+			try
+			{
+				// Terminal-fate precedence: an envelope already acked is delivered —
+				// a later failure report is stale and must not overwrite the verdict.
+				if (symbolTable.IsTellEnvelopeIdAcked(failure.Id))
+				{
+					Debug.WriteLine($"[Tell.Failure] stale non-delivery '{failure.Id}' (witness '{failure.Witness}') — already acked; delivered wins.");
+					return;
+				}
+
+				if (symbolTable.IsTellEnvelopeIdNotDelivered(failure.Id))
+				{
+					Debug.WriteLine($"[Tell.Failure] duplicate non-delivery '{failure.Id}' (witness '{failure.Witness}') — already recorded.");
+					return;
+				}
+
+				// Witness fallback: a transport may decline to name itself in the
+				// failure report; the journaled sentence still needs a witness.
+				string witness = string.IsNullOrEmpty(failure.Witness) ? (_transport?.WitnessName ?? "transport") : failure.Witness;
+
+				symbolTable.MarkTellEnvelopeIdNotDelivered(failure.Id);
+
+				if (dairy != null)
+				{
+					string sentence = RenderNotDeliveredSentence(failure.Id, witness);
+					long entryId = TakeAndIncrementEntryId();
+					DateTime now = DateTime.Now;
+					dairy.WriteScriptEntry(entryId, sentence, now, exposeData: null);
+				}
+			}
+			finally
+			{
+				rwLock.ExitWriteLock();
+			}
+		}
+
+		// Render the canonical non-delivery sentence:
+		// `tell '<id>' not delivered, per '<witness>';` — same shape
+		// TellNotDeliveredStatement.Write produces, kept in lockstep so that the
+		// journal and live-emitted entries are indistinguishable.
+		private static string RenderNotDeliveredSentence(string envelopeId, string witness)
+		{
+			StringBuilder sb = new StringBuilder(64);
+			sb.Append("tell '");
+			sb.Append(envelopeId);
+			sb.Append("' not delivered, per '");
+			sb.Append(witness);
+			sb.Append("';");
+			return sb.ToString();
+		}
+
+		// Plan 10 of the Tell primitive roadmap: post-rehydration tell-fate
+		// recovery. Closes the crash window between a tell's journal commit and its
+		// post-commit dispatch: if the actor died in that window, the in-memory
+		// envelope was lost, so the tell is journaled as issued yet never
+		// dispatched, never acked, and — without this pass — unrecoverable.
+		//
+		// After replay reconstructs the dedup state, the set of PENDING tells
+		// (issued, neither acked nor not-delivered) is read back from the journal.
+		// For each, the transport TESTIFIES the envelope's fate (by citation) and
+		// the journal records the verdict:
+		//   - Delivered: only our ack was lost -> journal the ack (existing path).
+		//   - Failed:    journal a non-delivery verdict with the transport as witness.
+		//   - InFlight:  leave pending — the transport still owns it and will settle
+		//                it later through its ack / failure handler.
+		//
+		// This runs OUTSIDE the rehydration write lock and after RecoveringState has
+		// been cleared, so it is a deliberate post-rehydration action — not part of
+		// the replay (replay must never re-emit live messages). The verdicts it
+		// journals (ack / non-delivery) replay into terminal dedup state on any
+		// subsequent rehydration, so the transport is cited at most once per tell.
+		internal void RecoverPendingTells()
+		{
+			// Shadow isolation (S1): a shadow produces zero external effect; it
+			// neither cites a transport nor journals verdicts on recovery.
+			if (IsShadow) return;
+			ITransport transport = _transport;
+			if (transport == null) return; // No delivery authority to testify.
+			if (dairy == null) return;     // No journal to record the verdict into.
+
+			IReadOnlyList<(string EnvelopeId, TellRecoveryInfo Info)> pending = symbolTable.CollectPendingTellRecoveries();
+			if (pending.Count == 0) return;
+
+			foreach ((string envelopeId, TellRecoveryInfo info) in pending)
+			{
+				TellFate fate;
+				try
+				{
+					fate = transport.GetFateAsync(envelopeId).GetAwaiter().GetResult();
+				}
+				catch (Exception e)
+				{
+					// Testimony unavailable (transport unreachable, etc.) — leave the
+					// tell pending; a future declaration callback can still settle it.
+					Debug.WriteLine($"[Tell.Recovery] could not obtain fate for '{envelopeId}' (witness '{info.Witness}'): {e.GetType().Name}: {e.Message}. Leaving pending.");
+					continue;
+				}
+
+				switch (fate)
+				{
+					case TellFate.Delivered:
+						// Only the ack round-trip was lost. Journal the ack through the
+						// same single-writer path a live ack uses.
+						HandleAckEnvelope(new AckEnvelope(envelopeId, info.TargetClass, info.TargetId));
+						break;
+					case TellFate.Failed:
+						HandleTellFailure(new TellFailure(envelopeId, info.Witness));
+						break;
+					case TellFate.InFlight:
+					default:
+						// Leave pending — the transport retains ownership of delivery.
+						break;
+				}
+			}
+		}
+
 		internal DateTime DateOfLastActivity
 		{
 			get
@@ -686,6 +831,15 @@ namespace Puppeteer.EventSourcing
 			Console.WriteLine($"Starting {this.GetType()}'s Actor");
 
 			EventSourcingStorage(dairy);
+
+			// Plan 10 of the Tell primitive roadmap: now that replay has
+			// reconstructed the tell dedup state, settle the fate of any tell left
+			// PENDING by the crash window (journaled-but-never-dispatched). Primary
+			// path only — a follower replicates the primary's verdicts and must not
+			// author its own (1-writer invariant). Runs after replay (RecoveringState
+			// cleared) so it is a deliberate post-rehydration action, never part of
+			// the replay.
+			RecoverPendingTells();
 
 			reactions.SetDairyStorage(dairy.Storage);
 

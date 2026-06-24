@@ -12,6 +12,10 @@ namespace Choreography.Ensemble
         private readonly ConcurrentDictionary<string, T> performers = new(StringComparer.OrdinalIgnoreCase);
         private readonly Func<string, T> factory;
         private IOutputFormatter formatterPrototype;  // null = default JsonFormatter
+        // Authoring transpiler (input-side mirror of formatterPrototype),
+        // cascaded to V2 performers like the Formatter. Default = Identity so
+        // every V2 performer always carries one.
+        private INotationTranspiler transpilerPrototype = IdentityTranspiler.Instance;
         // Logger injected by the host. null = each Performance starts with its
         // default ConsoleLogger. Applied to existing performers in .Logger(x)
         // and propagated to new ones in GetOrCreate. Per-actor (not singleton): each
@@ -46,6 +50,23 @@ namespace Choreography.Ensemble
                     v2.Formatter(prototype);
                 }
                 // V1 / others: silent ignore.
+            }
+            return this;
+        }
+
+        // Transpiler seam (input-side mirror of Formatter): cascades the
+        // authoring transpiler to existing V2 performers and applies it to new
+        // ones in GetOrCreate. V1 / others: silent ignore (no Enact surface).
+        public EnsemblePerformance<T> Transpiler(INotationTranspiler prototype)
+        {
+            if (prototype == null) throw new ArgumentNullException(nameof(prototype));
+            this.transpilerPrototype = prototype;
+            foreach (var perf in performers.Values)
+            {
+                if (perf is PerformanceV2 v2)
+                {
+                    v2.Transpiler(prototype);
+                }
             }
             return this;
         }
@@ -99,6 +120,12 @@ namespace Choreography.Ensemble
                 if (formatterPrototype != null && perf is PerformanceV2 v2)
                 {
                     v2.Formatter(formatterPrototype);
+                }
+                // Propagate the authoring transpiler to newly created V2
+                // performers (mirror of the formatter propagation above).
+                if (perf is PerformanceV2 v2Transpiler)
+                {
+                    v2Transpiler.Transpiler(transpilerPrototype);
                 }
                 // Per-actor logger: each newly created Performance receives the
                 // sink configured at the ensemble level (if the host wired it

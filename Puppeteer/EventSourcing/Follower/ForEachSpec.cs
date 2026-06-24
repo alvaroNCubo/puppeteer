@@ -46,17 +46,17 @@ namespace Puppeteer.EventSourcing.Follower
 
 			int close = s.IndexOf(')');
 			if (s.Length == 0 || s[0] != '(' || close < 0)
-				throw new LanguageException($"ForEach debe tener la forma '(a, b, ...) in $x × ($y, $z) × ...'. Recibido: '{text}'.");
+				throw new LanguageException($"ForEach must have the form '(a, b, ...) in $x × ($y, $z) × ...'. Received: '{text}'.");
 
 			string tuplePart = s.Substring(1, close - 1);
 			string[] tuple = SplitTrim(tuplePart, ',');
 			if (tuple.Length == 0)
-				throw new LanguageException($"ForEach: la lista de variables de la tupla no puede estar vacia. Recibido: '{text}'.");
+				throw new LanguageException($"ForEach: the tuple variable list cannot be empty. Received: '{text}'.");
 			foreach (string t in tuple) ValidateBareIdentifier(t, text);
 
 			string rest = s.Substring(close + 1).TrimStart();
 			if (rest.Length < 3 || rest[0] != 'i' || rest[1] != 'n' || !char.IsWhiteSpace(rest[2]))
-				throw new LanguageException($"ForEach: se esperaba 'in' despues de la tupla. Recibido: '{text}'.");
+				throw new LanguageException($"ForEach: expected 'in' after the tuple. Received: '{text}'.");
 			rest = rest.Substring(2).TrimStart();
 
 			string[] rawFactors = rest.Split(new[] { '×', '*' }, StringSplitOptions.RemoveEmptyEntries);
@@ -71,12 +71,12 @@ namespace Puppeteer.EventSourcing.Follower
 				if (factor[0] == '(')
 				{
 					if (factor[factor.Length - 1] != ')')
-						throw new LanguageException($"ForEach: grupo zip mal formado '{factor}' (falta ')') en '{text}'.");
+						throw new LanguageException($"ForEach: malformed zip group '{factor}' (missing ')') in '{text}'.");
 
 					string inner = factor.Substring(1, factor.Length - 2);
 					string[] groupVars = SplitTrim(inner, ',');
 					if (groupVars.Length == 0)
-						throw new LanguageException($"ForEach: grupo zip vacio '()' en '{text}'.");
+						throw new LanguageException($"ForEach: empty zip group '()' in '{text}'.");
 
 					foreach (string gv in groupVars) flatSources.Add(ParseSourceVar(gv, text));
 					sizes.Add(groupVars.Length);
@@ -84,7 +84,7 @@ namespace Puppeteer.EventSourcing.Follower
 				else
 				{
 					if (factor[factor.Length - 1] == ')')
-						throw new LanguageException($"ForEach: factor mal formado '{factor}' (')' sin '(') en '{text}'.");
+						throw new LanguageException($"ForEach: malformed factor '{factor}' (')' without '(') in '{text}'.");
 
 					flatSources.Add(ParseSourceVar(factor, text));
 					sizes.Add(1);
@@ -92,11 +92,11 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 
 			if (flatSources.Count == 0)
-				throw new LanguageException($"ForEach: se esperaba al menos una coleccion fuente ($var) despues de 'in'. Recibido: '{text}'.");
+				throw new LanguageException($"ForEach: expected at least one source collection ($var) after 'in'. Received: '{text}'.");
 
 			string[] sources = flatSources.ToArray();
 			if (tuple.Length != sources.Length)
-				throw new LanguageException($"ForEach: la tupla tiene {tuple.Length} variable(s) pero las fuentes suman {sources.Length}; deben coincidir 1:1. Recibido: '{text}'.");
+				throw new LanguageException($"ForEach: the tuple has {tuple.Length} variable(s) but the sources total {sources.Length}; they must match 1:1. Received: '{text}'.");
 
 			return new ForEachSpec(tuple, sources, sizes.ToArray(), text);
 		}
@@ -113,14 +113,14 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(sources);
 			if (sources.Count != sourceVars.Length)
-				throw new LanguageException($"ForEach: se esperaban {sourceVars.Length} coleccion(es) fuente pero se recibieron {sources.Count}.");
+				throw new LanguageException($"ForEach: expected {sourceVars.Length} source collection(s) but received {sources.Count}.");
 
 			List<List<object>> materialized = new List<List<object>>(sources.Count);
 			for (int i = 0; i < sources.Count; i++)
 			{
 				System.Collections.IEnumerable src = sources[i];
 				if (src == null)
-					throw new LanguageException($"ForEach: la coleccion fuente '${sourceVars[i]}' es null.");
+					throw new LanguageException($"ForEach: the source collection '${sourceVars[i]}' is null.");
 
 				List<object> elements = new List<object>();
 				foreach (object o in src) elements.Add(o);
@@ -148,8 +148,8 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						if (materialized[offset + k].Count != length)
 							throw new LanguageException(
-								$"ForEach: las fuentes del grupo zip ({GroupSourceNames(offset, size)}) deben tener la misma longitud (emparejamiento por indice); " +
-								$"'${sourceVars[offset]}' tiene {length} y '${sourceVars[offset + k]}' tiene {materialized[offset + k].Count}.");
+								$"ForEach: the sources of the zip group ({GroupSourceNames(offset, size)}) must have the same length (index-based pairing);" +
+								$"'${sourceVars[offset]}' has {length} and '${sourceVars[offset + k]}' has {materialized[offset + k].Count}.");
 					}
 
 					List<object[]> rows = new List<object[]>(length);
@@ -201,7 +201,7 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			string s = src.Trim();
 			if (s.Length < 2 || s[0] != '$')
-				throw new LanguageException($"ForEach: cada coleccion fuente debe ser una variable capturada '$nombre'. Recibido: '{s}' en '{context}'.");
+				throw new LanguageException($"ForEach: each source collection must be a captured variable '$name'. Received: '{s}' in '{context}'.");
 			string name = s.Substring(1);
 			ValidateBareIdentifier(name, context);
 			return name;
@@ -222,13 +222,13 @@ namespace Puppeteer.EventSourcing.Follower
 		private static void ValidateBareIdentifier(string id, string context)
 		{
 			if (string.IsNullOrWhiteSpace(id))
-				throw new LanguageException($"ForEach: identificador vacio en '{context}'.");
+				throw new LanguageException($"ForEach: empty identifier in '{context}'.");
 			if (!(char.IsLetter(id[0]) || id[0] == '_'))
-				throw new LanguageException($"ForEach: identificador invalido '{id}' en '{context}' (debe empezar con letra o '_').");
+				throw new LanguageException($"ForEach: invalid identifier '{id}' in '{context}' (must start with a letter or '_').");
 			for (int i = 1; i < id.Length; i++)
 			{
 				if (!(char.IsLetterOrDigit(id[i]) || id[i] == '_'))
-					throw new LanguageException($"ForEach: identificador invalido '{id}' en '{context}'.");
+					throw new LanguageException($"ForEach: invalid identifier '{id}' in '{context}'.");
 			}
 		}
 

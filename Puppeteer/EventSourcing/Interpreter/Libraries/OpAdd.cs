@@ -263,7 +263,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else
 			{
-				var msg = $"El operador Mas no puede sumar ni concatenar un {tipo1?.Name ?? "null"} y {tipo2?.Name ?? "null"}";
+				var msg = $"The Plus operator cannot add or concatenate a {tipo1?.Name ?? "null"} and {tipo2?.Name ?? "null"}";
 				var exceptionConstructor = typeof(LanguageException).GetConstructor(new[] { typeof(string) });
 				return Expression.Throw(
 					Expression.New(exceptionConstructor, Expression.Constant(msg)),

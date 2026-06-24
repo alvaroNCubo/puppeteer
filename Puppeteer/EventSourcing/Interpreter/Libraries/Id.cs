@@ -540,6 +540,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// Widen this occurrence's declared (static) type to `widerType`, a common
+		// ancestor of the previously-fixed ForcedType and a newly-assigned sibling
+		// type. Bypasses the strict single-assignment guard of the ForcedType
+		// setter on purpose: reassigning a variable to a sibling of the same base
+		// hierarchy (neither type inherits from the other, but both derive from a
+		// shared base) is legitimate, and the variable's static type must widen to
+		// that base so member resolution and the compiled storage cast stay sound
+		// for either runtime value. The caller resolves `widerType` as the least
+		// common base and applies it uniformly across every occurrence of the name
+		// plus the persisted symbol, so the value remains castable on later reads.
+		internal void WidenForcedTypeTo(Type widerType)
+		{
+			if (widerType == null) throw new ArgumentNullException(nameof(widerType));
+			base.ForcedType = widerType;
+			if (this.symbol != null)
+			{
+				this.symbol.type = widerType;
+			}
+		}
+
 		internal Program Program
 		{
 			get

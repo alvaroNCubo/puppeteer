@@ -8,9 +8,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 	internal abstract class AST
 	{
-		protected internal string GenerarTabs(int cantidad)
+		protected internal string GenerateTabs(int count)
 		{
-			switch (cantidad)
+			switch (count)
 			{
 				case 1:
 					return "\t";
@@ -27,8 +27,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				case 7:
 					return "\t\t\t\t\t\t\t";
 				default:
-					string tabsGenerados = (new string(new char[cantidad])).Replace('\0', '\t');
-					return tabsGenerados;
+					string generatedTabs = (new string(new char[count])).Replace('\0', '\t');
+					return generatedTabs;
 			}
 		}
 

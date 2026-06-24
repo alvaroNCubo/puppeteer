@@ -67,6 +67,25 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// During replay TellAckStatement.Execute repopulates this set.
 		private readonly HashSet<string> ackedTellEnvelopeIds = new HashSet<string>(StringComparer.Ordinal);
 
+		// Plan 10 of the Tell primitive roadmap: terminal NON-delivery verdicts —
+		// the failure-side mirror of ackedTellEnvelopeIds. An envelope id lands
+		// here when the transport testifies a Failed fate (by declaration or by
+		// citation) or when a `tell ... not delivered` sentence replays from the
+		// journal. Acked and not-delivered are both TERMINAL fates: a tell in
+		// neither set is still PENDING, and the pending set is exactly what the
+		// post-rehydration recovery pass cites the transport about. During replay
+		// TellNotDeliveredStatement.Execute repopulates this set.
+		private readonly HashSet<string> notDeliveredTellEnvelopeIds = new HashSet<string>(StringComparer.Ordinal);
+
+		// Plan 10 of the Tell primitive roadmap: minimal facts about each issued
+		// tell, captured during journal replay so the post-rehydration recovery
+		// pass can resolve a pending tell's fate with the transport even though the
+		// original in-memory TellEnvelope was lost to the crash window (committed
+		// to the journal, never dispatched). Populated by TellStatement.Execute on
+		// the RecoveringState branch only — the live path still holds the envelope
+		// in pendingTells, so it needs no recovery record. Keyed by envelope id.
+		private readonly Dictionary<string, TellRecoveryInfo> tellRecoveryByEnvelopeId = new Dictionary<string, TellRecoveryInfo>(StringComparer.Ordinal);
+
 		// Buffer of TellEnvelope produced during program.Execute(). The handler drains
 		// it post-journal-write, outside the actor's write lock, so transport latency
 		// does not block subsequent commands. Plan 5 introduces the buffer; Plan 6
@@ -377,6 +396,49 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
 			ackedTellEnvelopeIds.Add(envelopeId);
+		}
+
+		// Plan 10 helpers — terminal non-delivery verdicts (failure-side mirror of
+		// the acked set) and the recovery-info capture used by the post-rehydration
+		// recovery pass.
+
+		internal bool IsTellEnvelopeIdNotDelivered(string envelopeId)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
+			return notDeliveredTellEnvelopeIds.Contains(envelopeId);
+		}
+
+		internal void MarkTellEnvelopeIdNotDelivered(string envelopeId)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
+			notDeliveredTellEnvelopeIds.Add(envelopeId);
+		}
+
+		// Captures the facts a pending tell needs for recovery. Called only on the
+		// replay branch of TellStatement.Execute — the live path keeps the full
+		// envelope in pendingTells, so it never needs a recovery record. Idempotent:
+		// re-registering the same envelope id overwrites with identical facts.
+		internal void RegisterTellRecoveryInfo(string envelopeId, TellRecoveryInfo info)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
+			tellRecoveryByEnvelopeId[envelopeId] = info;
+		}
+
+		// Collects the still-PENDING tells reconstructed from the journal: those
+		// captured during replay whose envelope id is neither acked nor
+		// not-delivered. This is the set the recovery pass cites the transport
+		// about. Returns a materialised list so the caller can journal verdicts
+		// (which mutate the dedup sets) without invalidating an enumerator.
+		internal IReadOnlyList<(string EnvelopeId, TellRecoveryInfo Info)> CollectPendingTellRecoveries()
+		{
+			List<(string, TellRecoveryInfo)> pending = new List<(string, TellRecoveryInfo)>();
+			foreach (KeyValuePair<string, TellRecoveryInfo> entry in tellRecoveryByEnvelopeId)
+			{
+				if (ackedTellEnvelopeIds.Contains(entry.Key)) continue;
+				if (notDeliveredTellEnvelopeIds.Contains(entry.Key)) continue;
+				pending.Add((entry.Key, entry.Value));
+			}
+			return pending;
 		}
 
 		// Plan 8 helpers — saga cursor lifecycle.

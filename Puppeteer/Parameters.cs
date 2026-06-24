@@ -1237,7 +1237,7 @@ namespace Puppeteer
 			}
 			else
 			{
-				throw new LanguageException("type no valido");
+				throw new LanguageException("invalid type");
 			}
 		}
 
@@ -1364,7 +1364,7 @@ namespace Puppeteer
 			}
 			else
 			{
-				throw new LanguageException("type no valido");
+				throw new LanguageException("invalid type");
 			}
 		}
 
@@ -1401,7 +1401,7 @@ namespace Puppeteer
 			}
 			else
 			{
-				throw new LanguageException("type no valido");
+				throw new LanguageException("invalid type");
 			}
 		}
 

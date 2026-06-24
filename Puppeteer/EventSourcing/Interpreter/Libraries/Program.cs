@@ -528,7 +528,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal void SolveReferences(Parameters initialParameterSet, bool withStaticValidation)
 		{
 			if (initialParameterSet == null) throw new ArgumentNullException(nameof(initialParameterSet));
-			if (!withStaticValidation && this.parameterSignature != null) throw new LanguageException("Ya se han resuelto las referencias del program, no se pueden resolver nuevamente.");
+			if (!withStaticValidation && this.parameterSignature != null) throw new LanguageException("The program references have already been resolved; they cannot be resolved again.");
 
 			var solver = new ReferencesSolver(this, initialParameterSet);
 			solver.SolveIdReferences();

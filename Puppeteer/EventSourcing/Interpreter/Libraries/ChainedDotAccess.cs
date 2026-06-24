@@ -89,12 +89,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				if (memberInfo != null)
 				{
 					string memberName = Property() ?? Method();
-					patternAst.RegisterMemberAccess(null, memberName, memberInfo, position);
+					patternAst.RegisterMemberAccess(null, memberName, memberInfo, position, instanceType);
 
 					if (memberInfo is MethodInfo methodInfo)
 					{
 						List<object> argumentValues = base.GetArgumentValues();
-						patternAst.RegisterMethodCall(methodInfo, null, argumentValues, position, null);
+						patternAst.RegisterMethodCall(methodInfo, null, argumentValues, position, null, instanceType);
 					}
 
 					position++;

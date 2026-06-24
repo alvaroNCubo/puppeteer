@@ -93,14 +93,13 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
-	// Journal-outbox emit (INFRASTRUCTURE — NOT currently exposed as a Reaction
-	// action plane; the three exposed planes are Program, Causation, Metadata).
-	// Retained, not deleted, for future re-exposure: it would record the outgoing
-	// message into the diary's outbox table, committed atomically with the reaction
-	// cursor advance (the exactly-once-recording primitive); a relay (actor.Outbox)
-	// then delivers it at-least-once and a deduplicating sink makes the effect
-	// exactly-once. Write-mode (it touches the journal), so it could never be the
-	// isQuery emit of the read-only Program plane. See notes/reactions-outbox-emit.md.
+	// Journal-outbox emit. `.Outbox.Emit(destination, payload)` records the
+	// outgoing message into the diary's outbox table, committed atomically with
+	// the reaction cursor advance (the exactly-once-recording primitive); a relay
+	// (actor.Outbox) then delivers it at-least-once and a deduplicating sink makes
+	// the effect exactly-once. Distinct from the read-only Program plane: this is
+	// write-mode (it touches the journal), so it can never be the isQuery emit.
+	// See notes/reactions-outbox-emit.md.
 	public sealed class OutboxPlane
 	{
 		private readonly Reaction reaction;
@@ -156,7 +155,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public void Elide(params string[] seeks)
 		{
 			ArgumentNullException.ThrowIfNull(seeks);
-			if (seeks.Length == 0) throw new LanguageException("Elide(seeks:) requiere al menos un Seek; usa Elide() para la cadena completa.");
+			if (seeks.Length == 0) throw new LanguageException("Elide(seeks:) requires at least one Seek; use Elide() for the full chain.");
 			foreach (string s in seeks) ArgumentException.ThrowIfNullOrWhiteSpace(s);
 			reaction.SetMetadataAction(MetadataKind.Elide, destination: null, elideSeeks: seeks);
 		}

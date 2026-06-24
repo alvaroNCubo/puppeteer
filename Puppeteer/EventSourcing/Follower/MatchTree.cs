@@ -679,18 +679,26 @@ namespace Puppeteer.EventSourcing.Follower
 				int threshold = engine.AtLeastCount ?? 1;
 				bool isLastLevel = level == engines.Count - 1;
 
-				// ForEach (F2): coverage mode. If the parent is a captor node with
-				// obligations, this Many discharges one obligation per match instead of
-				// counting. The event only counts if its tuple (formed with the captured
-				// loop-vars) is a pending obligation of the parent; matches whose tuple
-				// does not belong to this parent (or already discharged) are ignored
-				// without accumulating. Fires when the obligation set becomes empty.
-				bool coverage = forEachSpec != null && parent != null && parent.RemainingObligations != null;
+				// ForEach (F2): coverage mode. The coverage (discharge) leg is the CLOSING
+				// leg of the pattern; any ThenSeek between the captor and the closing leg is
+				// an ordinary chained leg that only accumulates. The obligation set lives on
+				// the captor ANCHOR, which is an ANCESTOR of this leg's parent (it is the
+				// immediate parent only when the closing leg is the captor's direct child).
+				// Keying discharge on "the immediate parent holds obligations" misfires for
+				// an intermediate leg whose parent is the captor — its tuple (formed from
+				// loop-vars it never binds) fails the obligation lookup, so it never
+				// accumulates and the whole chain collapses. Restrict coverage to the closing
+				// leg and discharge against the anchor found by walking up. The event only
+				// counts if its tuple is a pending obligation of the anchor; matches whose
+				// tuple is not pending (or already discharged) are ignored without
+				// accumulating. Fires when the obligation set becomes empty.
+				MatchNode coverageAnchor = (forEachSpec != null && isLastLevel) ? FindObligationAnchor(parent) : null;
+				bool coverage = coverageAnchor != null;
 				string coverageKey = null;
 				if (coverage)
 				{
 					coverageKey = CoverageKey(parameters);
-					if (!parent.RemainingObligations.Contains(coverageKey))
+					if (!coverageAnchor.RemainingObligations.Contains(coverageKey))
 					{
 						parameters.PurgeUserParameters();
 						actorHandler.ParametersPool.Return(parameters);
@@ -713,8 +721,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 					if (coverage)
 					{
-						parent.RemainingObligations.Remove(coverageKey);
-						if (isLastLevel && parent.RemainingObligations.Count == 0)
+						coverageAnchor.RemainingObligations.Remove(coverageKey);
+						if (coverageAnchor.RemainingObligations.Count == 0)
 						{
 							// F3 .Aged: if the closing seek has a settle span, do not fire yet
 							// (the front = the just-accumulated confirm, age 0); mark pending and
@@ -761,8 +769,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 				if (coverage)
 				{
-					parent.RemainingObligations.Remove(coverageKey);
-					if (isLastLevel && parent.RemainingObligations.Count == 0)
+					coverageAnchor.RemainingObligations.Remove(coverageKey);
+					if (coverageAnchor.RemainingObligations.Count == 0)
 					{
 						// F3 .Aged: see note in the 'existing' branch.
 						if (engine.AgedSpan.HasValue)
@@ -782,6 +790,22 @@ namespace Puppeteer.EventSourcing.Follower
 				actorHandler.ParametersPool.Return(parameters);
 				throw;
 			}
+		}
+
+		// ForEach: the obligation set is materialized on the captor ANCHOR (the node whose
+		// Seek captured the source collections). The closing coverage leg discharges against
+		// it, but the anchor is not necessarily the immediate parent — with one or more
+		// intermediate chained legs in between it is an ancestor. Walk up the parent chain to
+		// the first node that carries obligations. Returns null when none does (no coverage).
+		private static MatchNode FindObligationAnchor(MatchNode node)
+		{
+			MatchNode current = node;
+			while (current != null)
+			{
+				if (current.RemainingObligations != null) return current;
+				current = current.Parent;
+			}
+			return null;
 		}
 
 		private MatchNode FindManyNode(MatchNode parent, ReactionEngine engine)
@@ -1677,11 +1701,11 @@ namespace Puppeteer.EventSourcing.Follower
 			foreach (string src in forEachSpec.SourceVars)
 			{
 				if (node.CapturedParams == null || !node.CapturedParams.ContainsParameter(src))
-					throw new LanguageException($"ForEach: la coleccion fuente '${src}' no fue capturada por el Seek captor.");
+					throw new LanguageException($"ForEach: the source collection '${src}' was not captured by the captor Seek.");
 
 				object val = node.CapturedParams[src]?.GetValue();
 				if (!(val is System.Collections.IEnumerable enumerable) || val is string)
-					throw new LanguageException($"ForEach: la fuente '${src}' no es una coleccion (es {val?.GetType().Name ?? "null"}).");
+					throw new LanguageException($"ForEach: the source '${src}' is not a collection (it is {val?.GetType().Name ?? "null"}).");
 
 				sources.Add(enumerable);
 			}
@@ -1906,7 +1930,7 @@ namespace Puppeteer.EventSourcing.Follower
 					target[placeholder, typeof(int)] = checked((int)ancestor.EntryId);
 					break;
 				default:
-					throw new LanguageException($"Simbolo scoped desconocido: '{symbolName}'. Validos: Now, EntryId.");
+					throw new LanguageException($"Unknown scoped symbol: '{symbolName}'. Valid: Now, EntryId.");
 			}
 		}
 
@@ -1969,7 +1993,7 @@ namespace Puppeteer.EventSourcing.Follower
 							string symbolName = kvp.Value.symbolName;
 							MatchNode ancestor = FindAncestorBySeekName(parentNode, seekName);
 							if (ancestor == null)
-								throw new LanguageException($"Where del Seek '{engine.PatternDescription}' referencia '{seekName}.@{symbolName}' pero no se encontro el Seek '{seekName}' en la str de matches actual.");
+								throw new LanguageException($"Where of Seek '{engine.PatternDescription}' references '{seekName}.@{symbolName}' but Seek '{seekName}' was not found in the current match chain.");
 
 							InjectScopedSymbol(dedicated, placeholder, symbolName, ancestor);
 						}
@@ -2006,7 +2030,7 @@ namespace Puppeteer.EventSourcing.Follower
 						string symbolName = kvp.Value.symbolName;
 						MatchNode ancestor = FindAncestorBySeekName(parentNode, seekName);
 						if (ancestor == null)
-							throw new LanguageException($"Where del Seek '{engine.PatternDescription}' referencia '{seekName}.@{symbolName}' pero no se encontro el Seek '{seekName}' en la str de matches actual.");
+							throw new LanguageException($"Where of Seek '{engine.PatternDescription}' references '{seekName}.@{symbolName}' but Seek '{seekName}' was not found in the current match chain.");
 
 						InjectScopedSymbol(whereParameters, placeholder, symbolName, ancestor);
 					}

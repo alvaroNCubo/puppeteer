@@ -307,9 +307,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public ProgramPlane Program => this.reaction.Program;
 		public CausationPlane Causation => this.reaction.Causation;
 		public MetadataPlane Metadata => this.reaction.Metadata;
-		// Outbox plane passthrough intentionally omitted — the journal-outbox emit
-		// path is retained as infrastructure but not exposed as a Reaction action
-		// plane (see Reaction.cs). A Reaction's Action touches exactly three planes.
+		public OutboxPlane Outbox => this.reaction.Outbox;
 
 		internal void ExecuteAction(Parameters matchedParameters, long triggeringEntryId)
 		{

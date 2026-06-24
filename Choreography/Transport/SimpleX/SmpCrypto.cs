@@ -164,7 +164,7 @@ namespace Choreography.Transport.SimpleX
                 throw new ArgumentException($"recipient DH secret must be 32 bytes, got {recipientDhSecretRaw.Length}");
             if (serverDhPublicKeyDer == null) throw new ArgumentNullException(nameof(serverDhPublicKeyDer));
             if (wireBody.Length < MacSize + 2)
-                throw new ArgumentException($"wireBody demasiado corto ({wireBody.Length}B) para tag+lenPrefix");
+                throw new ArgumentException($"wireBody too short ({wireBody.Length}B) for tag+lenPrefix");
 
             // 1. Pad msgId to 24 bytes with zeros on the right (simplexmq's cbNonce).
             byte[] nonce = new byte[NonceSize];
@@ -179,11 +179,11 @@ namespace Choreography.Transport.SimpleX
 
             // 3. UnPad: [Word16 BE len][body][# padding]  ->  body of "len" bytes.
             if (padded.Length < 2)
-                throw new InvalidOperationException("padded plaintext demasiado corto para Word16 length prefix");
+                throw new InvalidOperationException("padded plaintext too short for Word16 length prefix");
             int bodyLen = (padded[0] << 8) | padded[1];
             if (bodyLen < 0 || bodyLen > padded.Length - 2)
                 throw new InvalidOperationException(
-                    $"paddedString bodyLen {bodyLen} excede plaintext disponible {padded.Length - 2}");
+                    $"paddedString bodyLen {bodyLen} exceeds available plaintext {padded.Length - 2}");
             byte[] rcvMsgBody = new byte[bodyLen];
             Buffer.BlockCopy(padded, 2, rcvMsgBody, 0, bodyLen);
             return rcvMsgBody;
@@ -203,17 +203,17 @@ namespace Choreography.Transport.SimpleX
                 && rcvMsgBody[0] == (byte)'Q' && rcvMsgBody[1] == (byte)'U'
                 && rcvMsgBody[2] == (byte)'O' && rcvMsgBody[3] == (byte)'T'
                 && rcvMsgBody[4] == (byte)'A' && rcvMsgBody[5] == (byte)' ')
-                throw new InvalidOperationException("Server entrego MsgQuota, no Message");
+                throw new InvalidOperationException("Server delivered MsgQuota, not Message");
 
             const int SystemTimeBytes = 8;
             if (rcvMsgBody.Length < SystemTimeBytes + 2)
                 throw new InvalidOperationException(
-                    $"rcvMsgBody demasiado corto ({rcvMsgBody.Length}B) para meta block");
+                    $"rcvMsgBody too short ({rcvMsgBody.Length}B) for meta block");
 
             int idx = SystemTimeBytes + 1;
             while (idx < rcvMsgBody.Length && rcvMsgBody[idx] != (byte)' ') idx++;
             if (idx >= rcvMsgBody.Length)
-                throw new InvalidOperationException("rcvMsgBody sin space separador entre MsgFlags y msgBody");
+                throw new InvalidOperationException("rcvMsgBody missing space separator between MsgFlags and msgBody");
             idx++;
 
             int len = rcvMsgBody.Length - idx;
@@ -274,7 +274,7 @@ namespace Choreography.Transport.SimpleX
             if (keyParam is X25519PublicKeyParameters x25519)
                 return x25519.GetEncoded();
             throw new ArgumentException(
-                $"DER no contiene una pubkey X25519 valida: {keyParam.GetType().Name}");
+                $"DER does not contain a valid X25519 pubkey: {keyParam.GetType().Name}");
         }
 
         // --- Hash + encoding helpers (native managed, unchanged) ---

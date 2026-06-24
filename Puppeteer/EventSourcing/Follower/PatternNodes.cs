@@ -202,12 +202,12 @@ namespace Puppeteer.EventSourcing.Follower
 
 			scriptIdentifiers.Add(new ScriptParameterIdentifier(name, resolvedType, position, parameterRef));
 		}
-		internal void RegisterMemberAccess(string targetName, string memberName, MemberInfo member, int position)
+		internal void RegisterMemberAccess(string targetName, string memberName, MemberInfo member, int position, Type receiverType = null)
 		{
 			ArgumentNullException.ThrowIfNull(memberName);
 			ArgumentNullException.ThrowIfNull(member);
 
-			scriptMemberAccesses.Add(new ScriptMemberAccess(targetName, memberName, member, position));
+			scriptMemberAccesses.Add(new ScriptMemberAccess(targetName, memberName, member, position, receiverType));
 		}
 		internal void RegisterChainedAccess(List<MemberInfo> chain, int position)
 		{
@@ -223,11 +223,11 @@ namespace Puppeteer.EventSourcing.Follower
 
 			scriptConstructorCalls.Add(new ScriptConstructorCall(type, arguments, position));
 		}
-		internal void RegisterMethodCall(MethodInfo method, object target, List<object> arguments, int position, string targetName = null)
+		internal void RegisterMethodCall(MethodInfo method, object target, List<object> arguments, int position, string targetName = null, Type receiverType = null)
 		{
 			ArgumentNullException.ThrowIfNull(method);
 
-			scriptMethodCalls.Add(new ScriptMethodCall(method, target, arguments ?? new List<object>(), position, targetName));
+			scriptMethodCalls.Add(new ScriptMethodCall(method, target, arguments ?? new List<object>(), position, targetName, receiverType));
 		}
 		internal void RegisterAssignment(string targetName, Type targetType, object value, int position)
 		{
@@ -329,13 +329,20 @@ namespace Puppeteer.EventSourcing.Follower
 		internal string MemberName { get; }
 		internal MemberInfo Member { get; }
 		internal int Position { get; }
+		// Static type of the receiver as the script typed it (may be a subtype of the
+		// member's DeclaringType when the member is inherited from an abstract base). Lets
+		// the matcher accept a receiver-type pattern written against the declared type, not
+		// only against the type that declares the member. Null when the receiver is an
+		// unnamed chained expression whose type was not resolved.
+		internal Type ReceiverType { get; }
 
-		internal ScriptMemberAccess(string targetName, string memberName, MemberInfo member, int position)
+		internal ScriptMemberAccess(string targetName, string memberName, MemberInfo member, int position, Type receiverType = null)
 		{
 			TargetName = targetName;
 			MemberName = memberName;
 			Member = member;
 			Position = position;
+			ReceiverType = receiverType;
 		}
 	}
 
@@ -372,14 +379,21 @@ namespace Puppeteer.EventSourcing.Follower
 		internal List<object> Arguments { get; }
 		internal int Position { get; }
 		internal string TargetName { get; }
+		// Static type of the receiver as the script typed it (may be a subtype of the
+		// method's DeclaringType when the method is inherited from an abstract base). Lets
+		// the matcher accept a receiver-type pattern written against the declared type, not
+		// only against the type that declares the method. Null when the receiver is an
+		// unnamed chained expression whose type was not resolved.
+		internal Type ReceiverType { get; }
 
-		internal ScriptMethodCall(MethodInfo method, object target, List<object> arguments, int position, string targetName = null)
+		internal ScriptMethodCall(MethodInfo method, object target, List<object> arguments, int position, string targetName = null, Type receiverType = null)
 		{
 			Method = method;
 			Target = target;
 			Arguments = arguments;
 			Position = position;
 			TargetName = targetName;
+			ReceiverType = receiverType;
 		}
 	}
 
