@@ -98,7 +98,7 @@ namespace Puppeteer
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(parameters);
 			if (position < 0) throw new ArgumentOutOfRangeException(nameof(position));
 
-			int posicionInicial = position;
+			int initialPosition = position;
 			while (position < parameters.Length)
 			{
 				char currentChar = parameters[position];
@@ -109,11 +109,11 @@ namespace Puppeteer
 				position++;
 			}
 
-			if (posicionInicial == position)
+			if (initialPosition == position)
 			{
 				throw new LanguageException("Script Eval is not valid");
 			}
-			return parameters.AsSpan(posicionInicial, position - posicionInicial);
+			return parameters.AsSpan(initialPosition, position - initialPosition);
 		}
 
 		private static int ParameterModify(ReadOnlySpan<char> parameterModify)
@@ -172,34 +172,34 @@ namespace Puppeteer
 			}
 		}
 
-		public object this[int tipoDeParametro, string parameterName, Type parameterType]
+		public object this[int parameterKind, string parameterName, Type parameterType]
 		{
 			set
 			{
 				ArgumentNullException.ThrowIfNullOrWhiteSpace(parameterName);
 				ArgumentNullException.ThrowIfNull(parameterType);
 
-				SetParameter(value, tipoDeParametro, parameterName, parameterType);
+				SetParameter(value, parameterKind, parameterName, parameterType);
 			}
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif
-		private void SetParameter(object value, int tipoDeParametro, string parameterName, Type parameterType)
+		private void SetParameter(object value, int parameterKind, string parameterName, Type parameterType)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(parameterName);
-			if (value == null && tipoDeParametro == Parameter.In)
+			if (value == null && parameterKind == Parameter.In)
 			{
-				bool esNullable = !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
-				if (!esNullable)
+				bool isNullable = !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
+				if (!isNullable)
 					throw new LanguageException($"Parameter '{parameterName}' can not be null");
 			}
-			else if (value == null && tipoDeParametro != Parameter.Out)
+			else if (value == null && parameterKind != Parameter.Out)
 			{
 				ArgumentNullException.ThrowIfNull(value);
 			}
-			if (tipoDeParametro < 0) throw new LanguageException("Parameter Type can not be negative");
+			if (parameterKind < 0) throw new LanguageException("Parameter Type can not be negative");
 			ArgumentNullException.ThrowIfNull(parameterType);
 			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
 
@@ -214,7 +214,7 @@ namespace Puppeteer
 			}
 			if (parameter == null)
 			{
-				parameter = new Parameter(tipoDeParametro, parameterName, parameterType);
+				parameter = new Parameter(parameterKind, parameterName, parameterType);
 				parameters.Add(parameter);
 			}
 			else
@@ -397,22 +397,22 @@ namespace Puppeteer
 		internal string ParametersAsString()
 		{
 			var sb = new StringBuilder();
-			bool esElprimero = true;
+			bool isFirst = true;
 			foreach (var parameter in parameters)
 			{
 				if (parameter.ParameterModifier != Parameter.Eval)
 				{
-					if (!esElprimero) sb.Append(',');
+					if (!isFirst) sb.Append(',');
 					ParameterModifierAsString(parameter.ParameterModifier, sb);
 					sb.Append(',');
 					sb.Append(parameter.Name);
 					sb.Append(':');
 					WriteParameterType(parameter.ParameterType, sb);
-					esElprimero = false;
+					isFirst = false;
 				}
 				else
 				{
-					if (!esElprimero) sb.Append(',');
+					if (!isFirst) sb.Append(',');
 					ParameterModifierAsString(parameter.ParameterModifier, sb);
 					sb.Append(',');
 					sb.Append(parameter.Name);
@@ -420,7 +420,7 @@ namespace Puppeteer
 					WriteParameterType(parameter.ParameterType, sb);
 					sb.Append(':');
 					sb.Append(parameter.EvalScript);
-					esElprimero = false;
+					isFirst = false;
 				}
 			}
 			return sb.ToString();
@@ -498,7 +498,7 @@ namespace Puppeteer
 
 		private ReadOnlySpan<char> StringAsParameterModifier(string parameters, ref int position)
 		{
-			int posicionInicial = position;
+			int initialPosition = position;
 			while (position < parameters.Length)
 			{
 				char currentChar = parameters[position];
@@ -512,17 +512,17 @@ namespace Puppeteer
 				}
 			}
 
-			if (posicionInicial == position)
+			if (initialPosition == position)
 			{
 				throw new LanguageException("Parameter name is not valid");
 			}
-			return parameters.AsSpan(posicionInicial, position - posicionInicial);
+			return parameters.AsSpan(initialPosition, position - initialPosition);
 		}
 
 		private ReadOnlySpan<char> ParameterName(string parameters, ref int position)
 		{
-			bool esElPrimero = true;
-			int posicionInicial = position;
+			bool isFirst = true;
+			int initialPosition = position;
 			while (position < parameters.Length)
 			{
 				char currentChar = parameters[position];
@@ -534,7 +534,7 @@ namespace Puppeteer
 				{
 					position++;
 				}
-				else if (char.IsDigit(currentChar) && !esElPrimero)
+				else if (char.IsDigit(currentChar) && !isFirst)
 				{
 					position++;
 				}
@@ -543,14 +543,14 @@ namespace Puppeteer
 					break;
 				}
 
-				esElPrimero = false;
+				isFirst = false;
 			}
 
-			if (posicionInicial == position)
+			if (initialPosition == position)
 			{
 				throw new LanguageException("Parameter name is not valid");
 			}
-			return parameters.AsSpan(posicionInicial, position - posicionInicial);
+			return parameters.AsSpan(initialPosition, position - initialPosition);
 		}
 
 		private void Separator(string parameters, ref int position)
@@ -864,14 +864,14 @@ namespace Puppeteer
 		{
 			if (databaseType < 0) throw new ArgumentOutOfRangeException(nameof(databaseType));
 			var sb = new StringBuilder();
-			bool esElprimero = true;
+			bool isFirst = true;
 			foreach (var parameter in parameters)
 			{
 				// System Now: excluded from the journal's arguments blob (symmetric with
 				// LoadArguments). On replay Now is re-injected from OccurredAt.
 				if (IsSystemNow(parameter)) continue;
 
-				if (!esElprimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				Type parameterType = parameter.ParameterType;
 				if (parameterType.IsGenericType || parameterType.IsArray)
 				{
@@ -886,7 +886,7 @@ namespace Puppeteer
 				{
 					WriteSingleValuePrimitive(parameter, sb, databaseType);
 				}
-				esElprimero = false;
+				isFirst = false;
 			}
 			return sb.ToString();
 		}
@@ -1019,7 +1019,7 @@ namespace Puppeteer
 		private object ValueCollectionString(string agumentsAsString, ref int position)
 		{
 			List<string> list = new List<string>();
-			bool esLaPrimeraLetra = true;
+			bool isFirstLetter = true;
 			if (agumentsAsString[position] != '{') throw new LanguageException("Parameter definition is not valid");
 			position++;
 			int startPosition = position;
@@ -1031,16 +1031,16 @@ namespace Puppeteer
 
 			while (position < agumentsAsString.Length)
 			{
-				if (esLaPrimeraLetra)
+				if (isFirstLetter)
 				{
 					if (agumentsAsString[position] != '\'') throw new LanguageException("Parameter definition is not valid");
-					esLaPrimeraLetra = false;
+					isFirstLetter = false;
 				}
 				else if (agumentsAsString[position] == ',' && agumentsAsString[position - 1] == '\'')
 				{
 					list.Add(agumentsAsString.AsSpan(startPosition + 1, position - startPosition - 2).ToString());
 					startPosition = position + 1;
-					esLaPrimeraLetra = true;
+					isFirstLetter = true;
 				}
 				else if (agumentsAsString[position] == '}')
 				{
@@ -1255,16 +1255,16 @@ namespace Puppeteer
 		{
 			int startPosition = position;
 			if (agumentsAsString[position++] != '\'') throw new LanguageException("Parameter definition is not valid");
-			int inicioDelString = position;
+			int stringStart = position;
 			while (position < agumentsAsString.Length)
 			{
 				if (agumentsAsString[position] == '\'' && agumentsAsString.Length == position + 1) break;
 				if ((agumentsAsString[position] == '\'' && agumentsAsString[position + 1] == ',')) break;
 				position++;
 			}
-			int finDelString = position;
+			int stringEnd = position;
 			if (agumentsAsString[position++] != '\'') throw new LanguageException("Parameter definition is not valid");
-			return agumentsAsString.AsSpan(inicioDelString, finDelString - inicioDelString);
+			return agumentsAsString.AsSpan(stringStart, stringEnd - stringStart);
 		}
 
 		private void WriteSingleValueCollection(Parameter parameter, StringBuilder sb, DatabaseType databaseType)
@@ -1416,243 +1416,243 @@ namespace Puppeteer
 
 		private void Append(double[] values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString(CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(DateTime[] values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
 					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
 					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(decimal[] values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(bool[] values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(int[] values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(string[] values, StringBuilder sb, DatabaseType databaseType)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				LiteralString.Write(sb, value, databaseType);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<double> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString(CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<DateTime> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
 					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
 					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<decimal> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<bool> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<int> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(List<string> values, StringBuilder sb, DatabaseType databaseType)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				LiteralString.Write(sb, value, databaseType);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<double> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString(CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<DateTime> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				if (value.Hour == 00 && value.Minute == 00 && value.Second == 00)
 					sb.Append(value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture));
 				else
 					sb.Append(value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<decimal> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value.ToString("0.######################", CultureInfo.InvariantCulture));
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<bool> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<int> values, StringBuilder sb)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				sb.Append(value);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}
 
 		private void Append(IEnumerable<string> values, StringBuilder sb, DatabaseType databaseType)
 		{
-			var esElPrimero = true;
+			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
 			{
-				if (!esElPrimero) sb.Append(',');
+				if (!isFirst) sb.Append(',');
 				LiteralString.Write(sb, value, databaseType);
-				esElPrimero = false;
+				isFirst = false;
 			}
 			sb.Append('}');
 		}

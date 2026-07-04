@@ -33,20 +33,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object objeto1 = e.Execute();
-			if (objeto1.GetType() == typeof(int))
+			object object1 = e.Execute();
+			if (object1.GetType() == typeof(int))
 			{
-				return -(int)objeto1;
+				return -(int)object1;
 			}
-			else if (objeto1.GetType() == typeof(double))
+			else if (object1.GetType() == typeof(double))
 			{
-				return -(double)objeto1;
+				return -(double)object1;
 			}
-			else if (objeto1.GetType() == typeof(decimal))
+			else if (object1.GetType() == typeof(decimal))
 			{
-				return -(decimal)objeto1;
+				return -(decimal)object1;
 			}
-			throw new LanguageException($"The unary minus operator cannot operate on a value of type '{objeto1.GetType().Name}'.");
+			throw new LanguageException($"The unary minus operator cannot operate on a value of type '{object1.GetType().Name}'.");
 		}
 
 
@@ -56,26 +56,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (value is ConstantExpression)
 			{
-				var result = Execute();
-				return Expression.Constant(result, value.Type);
+				var folded = Execute();
+				return Expression.Constant(folded, value.Type);
 			}
 
-			Expression resultado = null;
+			Expression result = null;
 			if (value.Type == typeof(int) || value.Type == typeof(double) || value.Type == typeof(decimal))
 			{
-				resultado = Expression.Negate(value);
+				result = Expression.Negate(value);
 			}
 			else
 			{
 				throw new LanguageException($"The unary minus operator cannot operate on an expression of type '{value.Type.Name}'.");
 			}
-			return resultado;
+			return result;
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append('-');
-			e.write(resultado, databaseType);
+			result.Append('-');
+			e.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

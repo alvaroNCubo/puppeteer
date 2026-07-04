@@ -86,6 +86,38 @@ namespace Choreography.Theater
             }
         }
 
+        // Backward-compat check-then-command for the legacy V1 surface. The check
+        // runs first without holding the write lock; if it passes, the write lock
+        // is taken and the check is re-evaluated before the command is committed,
+        // so the command only lands while the guarding condition still holds. As
+        // with PerformCmd, ip/user are V1 domain globals concatenated into the
+        // script and a null FormatterContext is pushed to keep V1's JSON contract.
+        public string PerformCheckThenCmd(string scriptForChk, string scriptForCmd, string ip, string user)
+        {
+            if (scriptForChk == null) throw new ArgumentNullException(nameof(scriptForChk));
+            if (scriptForCmd == null) throw new ArgumentNullException(nameof(scriptForCmd));
+            if (ip == null) throw new ArgumentNullException(nameof(ip));
+            if (user == null) throw new ArgumentNullException(nameof(user));
+
+            LastActivity = DateTime.Now;
+            using (FormatterContext.Push(null))
+            {
+                return hook.PerformCheckThenCmd(scriptForChk, scriptForCmd, DateTime.Now, ip, user);
+            }
+        }
+
+        public string PerformCheckThenCmd(string scriptForChk, string scriptForCmd)
+        {
+            if (scriptForChk == null) throw new ArgumentNullException(nameof(scriptForChk));
+            if (scriptForCmd == null) throw new ArgumentNullException(nameof(scriptForCmd));
+
+            LastActivity = DateTime.Now;
+            using (FormatterContext.Push(null))
+            {
+                return hook.PerformCheckThenCmd(scriptForChk, scriptForCmd, DateTime.Now, "", "");
+            }
+        }
+
         public string PerformQry(string script)
         {
             if (script == null) throw new ArgumentNullException(nameof(script));

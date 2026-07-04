@@ -19,10 +19,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			var typeE1 = e1.ComputeType();
 			var typeE2 = e2.ComputeType();
-			bool tiposValidos = (typeE1 == typeof(int) || typeE1 == typeof(double) || typeE1 == typeof(decimal) || typeE1 == typeof(DateTime)) &&
+			bool validTypes = (typeE1 == typeof(int) || typeE1 == typeof(double) || typeE1 == typeof(decimal) || typeE1 == typeof(DateTime)) &&
 				(typeE2 == typeof(int) || typeE2 == typeof(double) || typeE2 == typeof(decimal) || typeE2 == typeof(DateTime));
 			bool ambosTimeSpan = typeE1 == typeof(TimeSpan) && typeE2 == typeof(TimeSpan);
-			if (!tiposValidos && !ambosTimeSpan)
+			if (!validTypes && !ambosTimeSpan)
 			{
 				throw new LanguageException($"Operator '>=' cannot compare value type '{typeE1.Name}' with value type '{typeE2.Name}'.");
 			}
@@ -31,36 +31,36 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			object objeto2 = e2.Execute();
+			object object1 = e1.Execute();
+			object object2 = e2.Execute();
 
-			Type tipo1 = objeto1.GetType();
-			Type tipo2 = objeto2.GetType();
+			Type type1 = object1.GetType();
+			Type type2 = object2.GetType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
-				return (int)objeto1 >= (int)objeto2;
-			else if (tipo1 == typeof(int) && tipo2 == typeof(double))
-				return Convert.ToDouble(objeto1) >= (double)objeto2;
-			else if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) >= (decimal)objeto2;
-			else if (tipo1 == typeof(double) && tipo2 == typeof(int))
-				return (double)objeto1 >= Convert.ToDouble(objeto2);
-			else if (tipo1 == typeof(double) && tipo2 == typeof(double))
-				return (double)objeto1 >= (double)objeto2;
-			else if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) >= (decimal)objeto2;
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
-				return (decimal)objeto1 >= Convert.ToDecimal(objeto2);
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
-				return (decimal)objeto1 >= Convert.ToDecimal(objeto2);
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
-				return (decimal)objeto1 >= (decimal)objeto2;
-			else if (tipo1 == typeof(DateTime) && tipo2 == typeof(DateTime))
-				return (DateTime)objeto1 >= (DateTime)objeto2;
-			else if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(TimeSpan))
-				return (TimeSpan)objeto1 >= (TimeSpan)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(int))
+				return (int)object1 >= (int)object2;
+			else if (type1 == typeof(int) && type2 == typeof(double))
+				return Convert.ToDouble(object1) >= (double)object2;
+			else if (type1 == typeof(int) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) >= (decimal)object2;
+			else if (type1 == typeof(double) && type2 == typeof(int))
+				return (double)object1 >= Convert.ToDouble(object2);
+			else if (type1 == typeof(double) && type2 == typeof(double))
+				return (double)object1 >= (double)object2;
+			else if (type1 == typeof(double) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) >= (decimal)object2;
+			else if (type1 == typeof(decimal) && type2 == typeof(int))
+				return (decimal)object1 >= Convert.ToDecimal(object2);
+			else if (type1 == typeof(decimal) && type2 == typeof(double))
+				return (decimal)object1 >= Convert.ToDecimal(object2);
+			else if (type1 == typeof(decimal) && type2 == typeof(decimal))
+				return (decimal)object1 >= (decimal)object2;
+			else if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
+				return (DateTime)object1 >= (DateTime)object2;
+			else if (type1 == typeof(TimeSpan) && type2 == typeof(TimeSpan))
+				return (TimeSpan)object1 >= (TimeSpan)object2;
 
-			throw new LanguageException($"Operator '>=' cannot compare type '{tipo1.Name}' with type '{tipo2.Name}'.");
+			throw new LanguageException($"Operator '>=' cannot compare type '{type1.Name}' with type '{type2.Name}'.");
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -74,51 +74,51 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Constant(result, typeof(bool));
 			}
 
-			Type tipo1 = left.Type;
-			Type tipo2 = right.Type;
+			Type type1 = left.Type;
+			Type type2 = right.Type;
 
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
+			if (type1 == typeof(int) && type2 == typeof(int))
 				return Expression.GreaterThanOrEqual(left, right);
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(double))
+			if (type1 == typeof(int) && type2 == typeof(double))
 				return Expression.GreaterThanOrEqual(Expression.Convert(left, typeof(double)), right);
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
+			if (type1 == typeof(int) && type2 == typeof(decimal))
 				return Expression.GreaterThanOrEqual(Expression.Convert(left, typeof(decimal)), right);
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(int))
+			if (type1 == typeof(double) && type2 == typeof(int))
 				return Expression.GreaterThanOrEqual(left, Expression.Convert(right, typeof(double)));
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(double))
+			if (type1 == typeof(double) && type2 == typeof(double))
 				return Expression.GreaterThanOrEqual(left, right);
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
+			if (type1 == typeof(double) && type2 == typeof(decimal))
 				return Expression.GreaterThanOrEqual(Expression.Convert(left, typeof(decimal)), right);
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
+			if (type1 == typeof(decimal) && type2 == typeof(int))
 				return Expression.GreaterThanOrEqual(left, Expression.Convert(right, typeof(decimal)));
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
+			if (type1 == typeof(decimal) && type2 == typeof(double))
 				return Expression.GreaterThanOrEqual(left, Expression.Convert(right, typeof(decimal)));
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
+			if (type1 == typeof(decimal) && type2 == typeof(decimal))
 				return Expression.GreaterThanOrEqual(left, right);
 
-			if (tipo1 == typeof(DateTime) && tipo2 == typeof(DateTime))
+			if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
 				return Expression.GreaterThanOrEqual(left, right);
 
-			if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(TimeSpan))
+			if (type1 == typeof(TimeSpan) && type2 == typeof(TimeSpan))
 				return Expression.GreaterThanOrEqual(left, right);
 
-			throw new LanguageException($"Operator '>=' cannot compare type '{tipo1.Name}' with type '{tipo2.Name}'.");
+			throw new LanguageException($"Operator '>=' cannot compare type '{type1.Name}' with type '{type2.Name}'.");
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" >= ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" >= ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

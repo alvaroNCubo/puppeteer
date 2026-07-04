@@ -171,19 +171,22 @@ namespace Puppeteer.EventSourcing.Follower
 				ScriptTellStatement script = patternAst.ScriptTellStatements[i];
 				if (script.Position <= lastMatchedPosition) continue;
 
-				if (!string.Equals(script.TargetClass, pattern.TargetClass, StringComparison.Ordinal)) continue;
-				if (!string.Equals(script.CommandName, pattern.CommandName, StringComparison.Ordinal)) continue;
-				if (script.CommandArgsValues.Length != pattern.CommandParameters.Count) continue;
+				if (!string.Equals(script.MessageName, pattern.MessageName, StringComparison.Ordinal)) continue;
+				if (!string.Equals(script.Addressee, pattern.Addressee, StringComparison.Ordinal)) continue;
+				if (script.WithValues.Length != pattern.WithParameters.Count) continue;
 
 				// Snapshot capturedVariables in case sub-matches partially fill it
-				// before a later mismatch — we restore on rollback. Plan 7b uses a
-				// simple tentative approach: try in order, bail out on mismatch.
-				if (!MatchOrConstraintParameter(pattern.TargetParameter, script.TargetIdValue, capturedVariables)) continue;
+				// before a later mismatch — we restore on rollback. Simple tentative
+				// approach: try in order, bail out on mismatch.
+				if (pattern.AddresseeInstanceParameter != null)
+				{
+					if (!MatchOrConstraintParameter(pattern.AddresseeInstanceParameter, script.AddresseeInstanceValue, capturedVariables)) continue;
+				}
 
 				bool argsMatch = true;
-				for (int a = 0; a < pattern.CommandParameters.Count; a++)
+				for (int a = 0; a < pattern.WithParameters.Count; a++)
 				{
-					if (!MatchOrConstraintParameter(pattern.CommandParameters[a], script.CommandArgsValues[a], capturedVariables))
+					if (!MatchOrConstraintParameter(pattern.WithParameters[a], script.WithValues[a], capturedVariables))
 					{
 						argsMatch = false;
 						break;
@@ -191,9 +194,9 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				if (!argsMatch) continue;
 
-				if (pattern.IdParameter != null)
+				if (pattern.OnceParameter != null)
 				{
-					if (!MatchOrConstraintParameter(pattern.IdParameter, script.EnvelopeId, capturedVariables)) continue;
+					if (!MatchOrConstraintParameter(pattern.OnceParameter, script.EnvelopeId, capturedVariables)) continue;
 				}
 
 				usedTellStatementIndices.Add(i);
@@ -215,10 +218,11 @@ namespace Puppeteer.EventSourcing.Follower
 
 				if (!MatchOrConstraintParameter(pattern.AckIdParameter, script.AckId, capturedVariables)) continue;
 
-				if (pattern.FromTargetClass != null)
+				if (pattern.FromAddressee != null)
 				{
-					if (!string.Equals(script.FromTargetClass, pattern.FromTargetClass, StringComparison.Ordinal)) continue;
-					if (!MatchOrConstraintParameter(pattern.FromTargetParameter, script.FromTargetIdValue, capturedVariables)) continue;
+					if (!string.Equals(script.FromAddressee, pattern.FromAddressee, StringComparison.Ordinal)) continue;
+					if (pattern.FromAddresseeInstanceParameter != null
+						&& !MatchOrConstraintParameter(pattern.FromAddresseeInstanceParameter, script.FromAddresseeInstanceValue, capturedVariables)) continue;
 				}
 
 				usedTellAckStatementIndices.Add(i);
@@ -941,16 +945,34 @@ namespace Puppeteer.EventSourcing.Follower
 					return true;
 
 				case VariableParameterNode variable:
-					// Capture the concrete value if available (for guard evaluation).
+					// A $var binds the runtime VALUE of the observed argument into the
+					// results (it is forwarded downstream, e.g. as a tell payload, and
+					// read by guards). Pattern matching is defined over parameters: the
+					// only arguments whose value is knowable statically are literals and
+					// @parameter references (id.IsParameter == true). Both arrive here as a
+					// concrete value; capture it.
 					if (scriptValue != null && !(scriptValue is TypedValuePlaceholder))
 					{
 						string paramName = variable.VariableName.StartsWith("$") ? variable.VariableName.Substring(1) : variable.VariableName;
 						capturedVariables[paramName, scriptValue.GetType()] = scriptValue;
+						return true;
 					}
-					else if (scriptValue is TypedValuePlaceholder tvp && !string.IsNullOrEmpty(tvp.VariableName))
+
+					// Otherwise the argument reached the matcher as a TypedValuePlaceholder:
+					// its value is not statically knowable (a local variable, a general
+					// expression, or an @parameter reference that did not resolve to its
+					// value). The placeholder only carries the source IDENTIFIER name, which
+					// is NOT the argument's value, so the pattern does not match here (see the
+					// inline note below).
+					if (scriptValue is TypedValuePlaceholder tvp && !string.IsNullOrEmpty(tvp.VariableName))
 					{
-						string paramName = variable.VariableName.StartsWith("$") ? variable.VariableName.Substring(1) : variable.VariableName;
-						capturedVariables[paramName, typeof(string)] = tvp.VariableName;
+						// Non-parameter in a $-capture position: value not statically knowable,
+						// so the pattern does NOT match here. We neither bind the identifier
+						// name as fake data nor throw: failing the match keeps a live Cue/Job
+						// reaction alive (skips this event, advances its checkpoint) instead of
+						// poisoning the push loop with an uncaught throw. LastResolutionError
+						// still records the cause when it came from a swallowed resolution failure.
+						return false;
 					}
 					return true;
 

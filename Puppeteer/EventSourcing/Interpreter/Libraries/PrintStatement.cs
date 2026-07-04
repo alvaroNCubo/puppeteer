@@ -12,14 +12,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 	internal class PrintStatementIndividual : OutputStatementIndividual
 	{
-		internal PrintStatementIndividual(AstExpression expression, String alias) : base(expression, alias, fueFiltrado: true)
+		internal PrintStatementIndividual(AstExpression expression, String alias) : base(expression, alias, wasFiltered: true)
 		{
 		}
 
-		protected override string GetComandoName()
+		protected override string GetCommandName()
 		{
 			return "Print";
 		}
+
+		protected override bool PreservedInAuthoredBody => true;
 
 		protected override Output GetTargetBuffer(ExecutionOutput output)
 		{

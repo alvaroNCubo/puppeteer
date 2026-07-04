@@ -14,12 +14,12 @@ namespace Puppeteer
 		private long lastProcessedEntryId = 0;
 		private bool conEstado;
 
-		internal static ActorFollower CreateFollowerSinActor(Actor actor, int followerId)
+		internal static ActorFollower CreateFollowerWithoutActor(Actor actor, int followerId)
 		{
 			return new ActorFollower(actor, followerId, conEstado: false);
 		}
 
-		internal static ActorFollower CreateFollowerConActor(Actor actor, int followerId)
+		internal static ActorFollower CreateFollowerWithActor(Actor actor, int followerId)
 		{
 			return new ActorFollower(actor, followerId, conEstado: true);
 		}
@@ -204,7 +204,7 @@ namespace Puppeteer
 		{
 			if (conEstado) (actor as IActorEventJournalClient).ReplayEvent(retornableEventData);
 
-			Program rentedPrograma = actor.Handler.GenerateAndRentProgram(retornableEventData);
+			Program rentedProgram = actor.Handler.GenerateAndRentProgram(retornableEventData);
 
 			retornableEventData.ReturnToEventDataPool();
 
@@ -212,7 +212,7 @@ namespace Puppeteer
 			// null for orphan Invocations (cache miss on the actionId). Skip the
 			// rest of the follower-replay pipeline — the orphan path is
 			// otherwise unreachable post-Fase-4 by construction.
-			if (rentedPrograma == null) return;
+			if (rentedProgram == null) return;
 
 
 			bool needsToMatchRules = lastProcessedEntryId > _lastEntryProcessedByFollower;
@@ -221,15 +221,15 @@ namespace Puppeteer
 			{
 				if (conEstado)
 				{
-					MatchRules(rentedPrograma, actor);
+					MatchRules(rentedProgram, actor);
 				}
 				else
 				{
-					MatchRules(rentedPrograma);
+					MatchRules(rentedProgram);
 				}
 			}
 
-			actor.Handler.ReturnProgram(rentedPrograma);
+			actor.Handler.ReturnProgram(rentedProgram);
 		}
 
 		void IActorEventJournalClient.EndJournalReplay(bool forcedToEnd)

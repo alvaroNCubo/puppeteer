@@ -45,9 +45,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append(value ? "true" : "false");
+			result.Append(value ? "true" : "false");
 		}
 
 	}

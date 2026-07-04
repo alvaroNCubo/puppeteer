@@ -433,16 +433,16 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
+		protected internal override MemoryStream Archive(DateTime startDate, DateTime endDate)
 		{
 			var ms = new MemoryStream();
 			using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
 			{
-				var entry = archive.CreateEntry($"{Name}-{fechaFin:yyyyMMdd}_bak.txt");
+				var entry = archive.CreateEntry($"{Name}-{endDate:yyyyMMdd}_bak.txt");
 				using (var writer = new StreamWriter(entry.Open()))
 				{
 					writer.WriteLine($"-- Archive of skipped events for {Name}");
-					writer.WriteLine($"-- Date range: {fechaInicio:yyyy-MM-dd} to {fechaFin:yyyy-MM-dd}");
+					writer.WriteLine($"-- Date range: {startDate:yyyy-MM-dd} to {endDate:yyyy-MM-dd}");
 					writer.WriteLine($"-- Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
 
 					var skipSet = skipStore.Load();

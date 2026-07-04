@@ -12,6 +12,10 @@ namespace Choreography.Ensemble
         private readonly ConcurrentDictionary<string, T> performers = new(StringComparer.OrdinalIgnoreCase);
         private readonly Func<string, T> factory;
         private IOutputFormatter formatterPrototype;  // null = default JsonFormatter
+        // Push channel (Paper 9 / OutputTarget): the sink + optional push
+        // formatter, cascaded to V2 performers like Formatter. null = pull-only.
+        private IOutputSink outputTargetPrototype;
+        private IOutputFormatter outputTargetFormatPrototype;
         // Authoring transpiler (input-side mirror of formatterPrototype),
         // cascaded to V2 performers like the Formatter. Default = Identity so
         // every V2 performer always carries one.
@@ -48,6 +52,28 @@ namespace Choreography.Ensemble
                 if (perf is PerformanceV2 v2)
                 {
                     v2.Formatter(prototype);
+                }
+                // V1 / others: silent ignore.
+            }
+            return this;
+        }
+
+        // ── Output target API (cascades to V2 performers) ─────────────────
+        //
+        // Sets the push sink for the ensemble. Same cascade semantics as
+        // Formatter: propagated to existing V2 performers immediately and applied
+        // to new ones in GetOrCreate. A null sink reverts the ensemble to
+        // pull-only. V1 / others: silent ignore (V1 is pull-only by design).
+        // The push renders TOON by default; pass a formatter to override.
+        public EnsemblePerformance<T> OutputTarget(IOutputSink transport, IOutputFormatter format = null)
+        {
+            this.outputTargetPrototype = transport;
+            this.outputTargetFormatPrototype = format;
+            foreach (var perf in performers.Values)
+            {
+                if (perf is PerformanceV2 v2)
+                {
+                    v2.OutputTarget(transport, format);
                 }
                 // V1 / others: silent ignore.
             }
@@ -120,6 +146,12 @@ namespace Choreography.Ensemble
                 if (formatterPrototype != null && perf is PerformanceV2 v2)
                 {
                     v2.Formatter(formatterPrototype);
+                }
+                // Propagate the push sink (Paper 9 / OutputTarget) to newly
+                // created V2 performers (mirror of the formatter propagation).
+                if (outputTargetPrototype != null && perf is PerformanceV2 v2OutputTarget)
+                {
+                    v2OutputTarget.OutputTarget(outputTargetPrototype, outputTargetFormatPrototype);
                 }
                 // Propagate the authoring transpiler to newly created V2
                 // performers (mirror of the formatter propagation above).

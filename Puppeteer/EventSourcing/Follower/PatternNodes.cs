@@ -26,7 +26,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public override string Namespace => null;
 		public override Type BaseType => typeof(object);
 		public override Type UnderlyingSystemType => this;
-		public override Assembly Assembly => throw new NotSupportedException("UnresolvedDomainType no tiene Assembly asociado hasta la fase de matching");
+		public override Assembly Assembly => throw new NotSupportedException("UnresolvedDomainType has no associated Assembly until the matching phase");
 		public override Guid GUID => throw new NotSupportedException();
 		public override Module Module => throw new NotSupportedException();
 		public override string AssemblyQualifiedName => throw new NotSupportedException();
@@ -79,7 +79,7 @@ namespace Puppeteer.EventSourcing.Follower
 		public override string Namespace => elementType.Namespace;
 		public override Type BaseType => typeof(Array);
 		public override Type UnderlyingSystemType => this;
-		public override Assembly Assembly => throw new NotSupportedException("UnresolvedArrayType no tiene Assembly asociado hasta la fase de matching");
+		public override Assembly Assembly => throw new NotSupportedException("UnresolvedArrayType has no associated Assembly until the matching phase");
 		public override Guid GUID => throw new NotSupportedException();
 		public override Module Module => throw new NotSupportedException();
 		public override string AssemblyQualifiedName => throw new NotSupportedException();
@@ -237,24 +237,24 @@ namespace Puppeteer.EventSourcing.Follower
 			scriptAssignments.Add(new ScriptAssignment(targetName, targetType, value, position));
 		}
 
-		// Plan 7 of the Tell primitive roadmap: register an outbound tell sentence
-		// from the script's parsed AST so the matcher can compare it against
-		// TellPatternNode entries in the Reaction's pattern.
-		internal void RegisterTellStatement(string targetClass, object targetIdValue, string commandName, object[] commandArgsValues, string envelopeId, int position)
+		// Register an outbound tell sentence from the script's parsed AST so the
+		// matcher can compare it against TellPatternNode entries in the Reaction's
+		// pattern.
+		internal void RegisterTellStatement(string messageName, string addressee, object addresseeInstanceValue, object[] withValues, string envelopeId, int position)
 		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(targetClass);
-			ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
-			ArgumentNullException.ThrowIfNull(commandArgsValues);
+			ArgumentException.ThrowIfNullOrWhiteSpace(messageName);
+			ArgumentException.ThrowIfNullOrWhiteSpace(addressee);
+			ArgumentNullException.ThrowIfNull(withValues);
 
-			scriptTellStatements.Add(new ScriptTellStatement(targetClass, targetIdValue, commandName, commandArgsValues, envelopeId, position));
+			scriptTellStatements.Add(new ScriptTellStatement(messageName, addressee, addresseeInstanceValue, withValues, envelopeId, position));
 		}
 
-		internal void RegisterTellAckStatement(string ackId, string fromTargetClass, object fromTargetIdValue, int position)
+		internal void RegisterTellAckStatement(string ackId, string fromAddressee, object fromAddresseeInstanceValue, int position)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(ackId);
-			ArgumentException.ThrowIfNullOrWhiteSpace(fromTargetClass);
+			ArgumentException.ThrowIfNullOrWhiteSpace(fromAddressee);
 
-			scriptTellAckStatements.Add(new ScriptTellAckStatement(ackId, fromTargetClass, fromTargetIdValue, position));
+			scriptTellAckStatements.Add(new ScriptTellAckStatement(ackId, fromAddressee, fromAddresseeInstanceValue, position));
 		}
 
 		// Accessors for the matching.
@@ -397,43 +397,43 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
-	// Plan 7 of the Tell primitive roadmap: a tell sentence captured from the
-	// script's parsed AST, evaluated to runtime values so the matcher can
-	// compare it against a TellPatternNode without re-evaluating expressions.
+	// An outbound tell sentence captured from the script's parsed AST, resolved to
+	// runtime values so the matcher can compare it against a TellPatternNode without
+	// re-evaluating expressions.
 	internal class ScriptTellStatement
 	{
-		internal string TargetClass { get; }
-		internal object TargetIdValue { get; }       // null for broadcasts (TargetId expression was null)
-		internal string CommandName { get; }
-		internal object[] CommandArgsValues { get; }
-		internal string EnvelopeId { get; }          // explicit IdLiteral or formatted hex of the implicit hash
+		internal string MessageName { get; }
+		internal string Addressee { get; }
+		internal object AddresseeInstanceValue { get; }   // null for a role-only tell
+		internal object[] WithValues { get; }
+		internal string EnvelopeId { get; }               // content hash hex or the `once` literal
 		internal int Position { get; }
 
-		internal ScriptTellStatement(string targetClass, object targetIdValue, string commandName, object[] commandArgsValues, string envelopeId, int position)
+		internal ScriptTellStatement(string messageName, string addressee, object addresseeInstanceValue, object[] withValues, string envelopeId, int position)
 		{
-			TargetClass = targetClass;
-			TargetIdValue = targetIdValue;
-			CommandName = commandName;
-			CommandArgsValues = commandArgsValues;
+			MessageName = messageName;
+			Addressee = addressee;
+			AddresseeInstanceValue = addresseeInstanceValue;
+			WithValues = withValues;
 			EnvelopeId = envelopeId;
 			Position = position;
 		}
 	}
 
-	// Plan 7 of the Tell primitive roadmap: an ack sentence captured from the
-	// script's parsed AST, ready for comparison against a TellAckPatternNode.
+	// An ack sentence captured from the script's parsed AST, ready for comparison
+	// against a TellAckPatternNode.
 	internal class ScriptTellAckStatement
 	{
 		internal string AckId { get; }
-		internal string FromTargetClass { get; }
-		internal object FromTargetIdValue { get; }
+		internal string FromAddressee { get; }
+		internal object FromAddresseeInstanceValue { get; }
 		internal int Position { get; }
 
-		internal ScriptTellAckStatement(string ackId, string fromTargetClass, object fromTargetIdValue, int position)
+		internal ScriptTellAckStatement(string ackId, string fromAddressee, object fromAddresseeInstanceValue, int position)
 		{
 			AckId = ackId;
-			FromTargetClass = fromTargetClass;
-			FromTargetIdValue = fromTargetIdValue;
+			FromAddressee = fromAddressee;
+			FromAddresseeInstanceValue = fromAddresseeInstanceValue;
 			Position = position;
 		}
 	}
@@ -809,67 +809,59 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
-	// Plan 7 of the Tell primitive roadmap: pattern node for outbound tell
-	// statements in the journal. The DSL pattern syntax is:
+	// Pattern node for outbound tell statements in the journal. The DSL pattern
+	// syntax mirrors the assertive form:
 	//
-	//     tell <TargetClass>(<targetParam>) <CommandName>(<commandParams>) [id <idParam>]
+	//     tell <Message> [with <withParams>] to <Addressee>[(<instanceParam>)] [once <onceParam>]
 	//
-	// where each <param> can be a wildcard (_), a variable bind ($name), a
-	// literal, or a typed variant. Plan 7 (b) does NOT match saga verbs
-	// (start/step/compensate/close) or the through trailer — those are
-	// recognised as part of Plan 8 (saga sub-family) and as future work.
+	// where each <param> can be a wildcard (_), a variable bind ($name), a literal,
+	// or a typed variant.
 	internal class TellPatternNode : ExpressionNode
 	{
-		internal string TargetClass { get; }
-		internal ParameterNode TargetParameter { get; }
-		internal string CommandName { get; }
-		internal List<ParameterNode> CommandParameters { get; }
-		internal ParameterNode IdParameter { get; } // null when the pattern omits the `id` trailer
+		internal string MessageName { get; }
+		internal List<ParameterNode> WithParameters { get; }      // empty when the pattern omits `with`
+		internal string Addressee { get; }
+		internal ParameterNode AddresseeInstanceParameter { get; } // null when the pattern omits (instance)
+		internal ParameterNode OnceParameter { get; }             // null when the pattern omits `once`
 
-		internal TellPatternNode(string targetClass, ParameterNode targetParameter, string commandName, List<ParameterNode> commandParameters, ParameterNode idParameter)
+		internal TellPatternNode(string messageName, List<ParameterNode> withParameters, string addressee, ParameterNode addresseeInstanceParameter, ParameterNode onceParameter)
 		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(targetClass);
-			ArgumentNullException.ThrowIfNull(targetParameter);
-			ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
-			ArgumentNullException.ThrowIfNull(commandParameters);
+			ArgumentException.ThrowIfNullOrWhiteSpace(messageName);
+			ArgumentNullException.ThrowIfNull(withParameters);
+			ArgumentException.ThrowIfNullOrWhiteSpace(addressee);
 
-			TargetClass = targetClass;
-			TargetParameter = targetParameter;
-			CommandName = commandName;
-			CommandParameters = commandParameters;
-			IdParameter = idParameter;
+			MessageName = messageName;
+			WithParameters = withParameters;
+			Addressee = addressee;
+			AddresseeInstanceParameter = addresseeInstanceParameter;
+			OnceParameter = onceParameter;
 		}
 	}
 
-	// Plan 7 of the Tell primitive roadmap: pattern node for ack sentences in
-	// the journal. The DSL pattern syntax is:
+	// Pattern node for ack sentences in the journal. The DSL pattern syntax is:
 	//
-	//     tell ack <ackIdParam> [from <FromTargetClass>(<fromTargetParam>)]
+	//     tell ack <ackIdParam> [from <Addressee>[(<instanceParam>)]]
 	//
-	// where <ackIdParam> is typically a variable bind ($tid) so the OnSeek that
-	// matched the originating tell can correlate against ThenSeek. The `from`
-	// clause is optional in the pattern — if present it filters by sender.
+	// where <ackIdParam> is typically a variable bind ($tid) so the Seek that
+	// matched the originating tell can correlate against a ThenSeek. The `from`
+	// clause is optional in the pattern — if present it filters by addressee.
 	internal class TellAckPatternNode : ExpressionNode
 	{
 		internal ParameterNode AckIdParameter { get; }
-		internal string FromTargetClass { get; }                  // null when the pattern omits `from <T>(...)`
-		internal ParameterNode FromTargetParameter { get; }       // null when FromTargetClass is null
+		internal string FromAddressee { get; }                    // null when the pattern omits `from <Addressee>`
+		internal ParameterNode FromAddresseeInstanceParameter { get; } // null when no instance is named
 
-		internal TellAckPatternNode(ParameterNode ackIdParameter, string fromTargetClass, ParameterNode fromTargetParameter)
+		internal TellAckPatternNode(ParameterNode ackIdParameter, string fromAddressee, ParameterNode fromAddresseeInstanceParameter)
 		{
 			ArgumentNullException.ThrowIfNull(ackIdParameter);
-			if (fromTargetClass != null && fromTargetParameter == null)
+			if (fromAddressee == null && fromAddresseeInstanceParameter != null)
 			{
-				throw new ArgumentNullException(nameof(fromTargetParameter), "fromTargetParameter must be provided when fromTargetClass is given.");
-			}
-			if (fromTargetClass == null && fromTargetParameter != null)
-			{
-				throw new ArgumentNullException(nameof(fromTargetClass), "fromTargetClass must be provided when fromTargetParameter is given.");
+				throw new ArgumentNullException(nameof(fromAddressee), "fromAddressee must be provided when fromAddresseeInstanceParameter is given.");
 			}
 
 			AckIdParameter = ackIdParameter;
-			FromTargetClass = fromTargetClass;
-			FromTargetParameter = fromTargetParameter;
+			FromAddressee = fromAddressee;
+			FromAddresseeInstanceParameter = fromAddresseeInstanceParameter;
 		}
 	}
 }

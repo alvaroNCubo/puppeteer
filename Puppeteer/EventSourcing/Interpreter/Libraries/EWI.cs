@@ -32,8 +32,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return;
 			}
-			string resultado = (string)reason.Execute();
-			if (resultado == null)
+			string result = (string)reason.Execute();
+			if (result == null)
 			{
 				throw new LanguageException("The output value of an EWI cannot be null.");
 			}
@@ -55,7 +55,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			;
 
-			output.AddEWI(type, resultado);
+			output.AddEWI(type, result);
 		}
 
 		internal Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
@@ -71,7 +71,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			);
 
 			var reasonExpr = reason.ExecuteExpression(parametersParam);
-			var resultVar = Expression.Variable(typeof(string), "resultado");
+			var resultVar = Expression.Variable(typeof(string), "result");
 			var assignResult = Expression.Assign(resultVar, Expression.Convert(reasonExpr, typeof(string)));
 
 			var nullCheck = Expression.IfThen(
@@ -80,17 +80,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					Expression.Constant("The output value of an EWI cannot be null.")))
 			);
 
-			Expression tipoExpr;
+			Expression typeExpr;
 			switch (this)
 			{
 				case Error:
-					tipoExpr = Expression.Constant("Error");
+					typeExpr = Expression.Constant("Error");
 					break;
 				case Information:
-					tipoExpr = Expression.Constant("Message");
+					typeExpr = Expression.Constant("Message");
 					break;
 				case Warning:
-					tipoExpr = Expression.Constant("Warning");
+					typeExpr = Expression.Constant("Warning");
 					break;
 				default:
 					throw new LanguageException("Unhandled EWI type.");
@@ -107,7 +107,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var addEwiCall = Expression.Call(
 				outputParam,
 				addEwiMethod,
-				tipoExpr,
+				typeExpr,
 				resultVar
 			);
 
@@ -128,25 +128,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			reason.Visit(v);
 		}
 
-		internal void Write(StringBuilder resultado, DatabaseType databaseType)
+		internal void Write(StringBuilder result, DatabaseType databaseType)
 		{
 			switch (this)
 			{
 				case Error e:
-					resultado.Append(" Error ");
+					result.Append(" Error ");
 					break;
 				case Information m:
-					resultado.Append(" Message ");
+					result.Append(" Message ");
 					break;
 				case Warning w:
-					resultado.Append(" Warning ");
+					result.Append(" Warning ");
 					break;
 				default:
 					throw new LanguageException("Unhandled EWI type.");
 			}
 			;
 
-			reason.write(resultado, databaseType);
+			reason.write(result, databaseType);
 		}
 
 		protected AstExpression Reason

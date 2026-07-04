@@ -9,7 +9,7 @@ namespace Puppeteer.EventSourcing.Follower
 	// The Reaction keeps a ring buffer (LastMatchesCapacity = 32) of these so
 	// callers can assert behavioral properties retrospectively against the
 	// journal that was just replayed:
-	//   Assert.Equal(123, reaction.LastMatches[^1].Bindings["cliente"]);
+	//   Assert.Equal(123, reaction.LastMatches[^1].Bindings["obj"]);
 	// Bindings are filtered to exclude Now/User/Ip — consistent with the
 	// HashParameters8 convention used by the Reactions LabInstrumentation
 	// callbacks — so the snapshot reflects domain captures, not wall-clock

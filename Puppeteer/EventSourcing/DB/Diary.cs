@@ -76,6 +76,10 @@ namespace Puppeteer.EventSourcing.DB
 			{
 				diaryStorage = new DiaryStorageFileSystem(eventJournalClient, backendConnectionString);
 			}
+			else if (dbType == DatabaseType.PlainText)
+			{
+				diaryStorage = new DiaryStorageTxt(eventJournalClient, backendConnectionString);
+			}
 			else
 			{
 				throw new Exception($"Unknown database type '{dbType}'.");

@@ -56,7 +56,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 		//   EndCollection(collectionName)
 		//
 		// Today the DSL only knows collectionName at the close site (legacy
-		// CloseFor(alias) signature). itemName propagation is deferred to a
+		// CloseForEach(alias) signature). itemName propagation is deferred to a
 		// future phase (XmlFormatter may need it).
 
 		void BeginCollection();
@@ -122,7 +122,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 
 		/// <summary>
 		/// True when no field, collection, or EWI has been emitted in the
-		/// current document. Equivalent to the legacy Output.Vacio() check.
+		/// current document. Equivalent to the legacy Output.IsEmpty() check.
 		/// </summary>
 		bool IsDocumentEmpty { get; }
 

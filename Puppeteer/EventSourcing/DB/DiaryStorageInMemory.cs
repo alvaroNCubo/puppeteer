@@ -437,7 +437,7 @@ namespace Puppeteer.EventSourcing.DB
 			throw new LanguageException($"Unknown EventData type: {evt.GetType().Name}");
 		}
 
-		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
+		protected internal override MemoryStream Archive(DateTime startDate, DateTime endDate)
 		{
 			throw new NotImplementedException("Archive not supported in InMemory storage.");
 		}

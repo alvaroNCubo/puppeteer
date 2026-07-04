@@ -64,11 +64,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
 			foreach (var item in items)
 			{
-				item.Write(resultado, tabs, databaseType);
+				item.Write(result, tabs, databaseType);
 			}
 		}
 	}
@@ -132,14 +132,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return method;
 		}
 
-		protected abstract string GetComandoName();
+		protected abstract string GetCommandName();
 		protected abstract Output GetTargetBuffer(ExecutionOutput output);
 
-		internal OutputStatementIndividual(AstExpression expression, String alias, bool fueFiltrado)
+		// Whether this filtered output statement is kept in the authored render
+		// (Program.ConvertToAuthoredString, under AuthoredRenderScope). Prints
+		// override this to true so they survive in the once-written Action body;
+		// expose stays false because its data is journaled through its own
+		// exposeData channel, not the body text.
+		protected virtual bool PreservedInAuthoredBody => false;
+
+		internal OutputStatementIndividual(AstExpression expression, String alias, bool wasFiltered)
 		{
 			this.expression = expression;
 			this.alias = alias;
-			base.FueFiltrado = fueFiltrado;
+			base.WasFiltered = wasFiltered;
 		}
 
 		internal override void Execute(ExecutionOutput output)
@@ -153,54 +160,54 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return;
 			}
-			var resultado = expression.Execute();
-			buffer.Append(alias.AsSpan(), resultado);
+			var result = expression.Execute();
+			buffer.Append(alias.AsSpan(), result);
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
-			Expression resultado = expression.ExecuteExpression(parametersParam);
-			var resultadoType = resultado.Type;
+			Expression result = expression.ExecuteExpression(parametersParam);
+			var resultType = result.Type;
 
 			if (
-				(resultadoType.IsArray || typeof(System.Collections.IEnumerable).IsAssignableFrom(resultadoType)) &&
+				(resultType.IsArray || typeof(System.Collections.IEnumerable).IsAssignableFrom(resultType)) &&
 				(
-					resultadoType != typeof(string) &&
-					resultadoType != typeof(string[]) &&
-					resultadoType != typeof(int[]) &&
-					resultadoType != typeof(bool[]) &&
-					resultadoType != typeof(double[]) &&
-					resultadoType != typeof(decimal[]) &&
-					resultadoType != typeof(DateTime[])
+					resultType != typeof(string) &&
+					resultType != typeof(string[]) &&
+					resultType != typeof(int[]) &&
+					resultType != typeof(bool[]) &&
+					resultType != typeof(double[]) &&
+					resultType != typeof(decimal[]) &&
+					resultType != typeof(DateTime[])
 				)
 			)
 			{
-				return CreateAppendExpressionForGenericCollection(resultado, resultadoType, outputParam);
+				return CreateAppendExpressionForGenericCollection(result, resultType, outputParam);
 			}
 			else if (
-				resultadoType != typeof(string) &&
-				typeof(object).IsAssignableFrom(resultadoType) &&
-				resultadoType.IsClass &&
-				!resultadoType.IsArray &&
-				typeof(System.Collections.IEnumerable).IsAssignableFrom(resultadoType)
+				resultType != typeof(string) &&
+				typeof(object).IsAssignableFrom(resultType) &&
+				resultType.IsClass &&
+				!resultType.IsArray &&
+				typeof(System.Collections.IEnumerable).IsAssignableFrom(resultType)
 			)
 			{
-				return CreateAppendExpressionForEnumerableClass(resultado, resultadoType, outputParam);
+				return CreateAppendExpressionForEnumerableClass(result, resultType, outputParam);
 			}
 			else
 			{
-				return CreateAppendExpressionForType(resultado, resultadoType, outputParam);
+				return CreateAppendExpressionForType(result, resultType, outputParam);
 			}
 		}
 
-		private Expression CreateAppendExpressionForGenericCollection(Expression resultado, Type resultadoType, ParameterExpression outputParam)
+		private Expression CreateAppendExpressionForGenericCollection(Expression result, Type resultType, ParameterExpression outputParam)
 		{
 			Expression castedCollection;
-			Type elementType = resultadoType.IsArray
-				? resultadoType.GetElementType()
-				: (resultadoType.IsGenericType && resultadoType.GetGenericTypeDefinition() == typeof(List<>) ? resultadoType.GetGenericArguments()[0] : typeof(object));
+			Type elementType = resultType.IsArray
+				? resultType.GetElementType()
+				: (resultType.IsGenericType && resultType.GetGenericTypeDefinition() == typeof(List<>) ? resultType.GetGenericArguments()[0] : typeof(object));
 
-			if (resultadoType.IsArray)
+			if (resultType.IsArray)
 			{
 				var castMethod = typeof(Enumerable)
 					.GetMethods()
@@ -210,10 +217,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					.GetMethods()
 					.First(m => m.Name == "ToArray" && m.GetParameters().Length == 1)
 					.MakeGenericMethod(typeof(object));
-				var castCall = Expression.Call(castMethod, resultado);
+				var castCall = Expression.Call(castMethod, result);
 				castedCollection = Expression.Call(toArrayMethod, castCall);
 			}
-			else if (resultadoType.IsGenericType && resultadoType.GetGenericTypeDefinition() == typeof(List<>))
+			else if (resultType.IsGenericType && resultType.GetGenericTypeDefinition() == typeof(List<>))
 			{
 				var castMethod = typeof(Enumerable)
 					.GetMethods()
@@ -223,7 +230,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					.GetMethods()
 					.First(m => m.Name == "ToList" && m.GetParameters().Length == 1)
 					.MakeGenericMethod(typeof(object));
-				var castCall = Expression.Call(castMethod, resultado);
+				var castCall = Expression.Call(castMethod, result);
 				castedCollection = Expression.Call(toListMethod, castCall);
 			}
 			else
@@ -232,29 +239,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					.GetMethods()
 					.First(m => m.Name == "Cast" && m.GetParameters().Length == 1)
 					.MakeGenericMethod(typeof(object));
-				castedCollection = Expression.Call(toObjectEnumerable, resultado);
+				castedCollection = Expression.Call(toObjectEnumerable, result);
 			}
 
 			Type collectionType = castedCollection.Type;
-			var salidaAppendMethod = GetAppendMethodForType(collectionType);
+			var outputAppendMethod = GetAppendMethodForType(collectionType);
 
 			return Expression.IfThen(
 				Expression.Property(outputParam, EstaEscribiendoProperty),
 				Expression.Call(
 					outputParam,
-					salidaAppendMethod,
+					outputAppendMethod,
 					Expression.Call(AsSpanMethod, Expression.Constant(alias)),
 					castedCollection
 				)
 			);
 		}
 
-		private Expression CreateAppendExpressionForEnumerableClass(Expression resultado, Type resultadoType, ParameterExpression outputParam)
+		private Expression CreateAppendExpressionForEnumerableClass(Expression result, Type resultType, ParameterExpression outputParam)
 		{
-			resultado = Expression.Condition(
-				Expression.Equal(resultado, Expression.Constant(null, resultadoType)),
+			result = Expression.Condition(
+				Expression.Equal(result, Expression.Constant(null, resultType)),
 				Expression.Constant(string.Empty),
-				Expression.Call(resultado, resultadoType.GetMethod("ToString", Type.EmptyTypes))
+				Expression.Call(result, resultType.GetMethod("ToString", Type.EmptyTypes))
 			);
 
 			return Expression.IfThen(
@@ -263,32 +270,32 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					outputParam,
 					AppendStringMethod,
 					Expression.Call(AsSpanMethod, Expression.Constant(alias)),
-					resultado
+					result
 				)
 			);
 		}
 
-		private Expression CreateAppendExpressionForType(Expression resultado, Type resultadoType, ParameterExpression outputParam)
+		private Expression CreateAppendExpressionForType(Expression result, Type resultType, ParameterExpression outputParam)
 		{
-			var salidaAppendMethod = GetAppendMethodForType(resultadoType);
+			var outputAppendMethod = GetAppendMethodForType(resultType);
 
-			if (resultadoType.IsEnum)
+			if (resultType.IsEnum)
 			{
-				salidaAppendMethod = AppendStringMethod;
-				resultado = Expression.Call(resultado, typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes));
+				outputAppendMethod = AppendStringMethod;
+				result = Expression.Call(result, typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes));
 			}
-			else if (salidaAppendMethod == null && resultadoType.IsClass && resultadoType != typeof(string))
+			else if (outputAppendMethod == null && resultType.IsClass && resultType != typeof(string))
 			{
-				salidaAppendMethod = AppendObjectMethod;
+				outputAppendMethod = AppendObjectMethod;
 			}
 
 			return Expression.IfThen(
 				Expression.Property(outputParam, EstaEscribiendoProperty),
 				Expression.Call(
 					outputParam,
-					salidaAppendMethod,
+					outputAppendMethod,
 					Expression.Call(AsSpanMethod, Expression.Constant(alias)),
-					resultado
+					result
 				)
 			);
 		}
@@ -349,38 +356,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			expression.Visit(v);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append(GetComandoName());
-			resultado.Append(' ');
-			expression.write(resultado, databaseType);
-			resultado.Append(' ');
-			WriteAlias(resultado);
-			resultado.Append(';');
-			resultado.Append('\r');
-		}
-
-		private void WriteAlias(StringBuilder resultado)
-		{
-			resultado.Append(LiteralString.SLASH_OR_SINGLE_QUOTED_CHARACTER).Append('\'');
-			foreach (char c in alias)
-			{
-				switch (c)
-				{
-					case '\"':
-						resultado.Append(LiteralString.DOUBLE_QUOTED_CHARACTER).Append('"');
-						break;
-					case '\'':
-						resultado.Append(LiteralString.SLASH_OR_SINGLE_QUOTED_CHARACTER).Append('\'');
-						break;
-					default:
-						resultado.Append(c);
-						break;
-				}
-			}
-			resultado.Append(LiteralString.SLASH_OR_SINGLE_QUOTED_CHARACTER).Append('\'');
+			if (WasFiltered && !(AuthoredRenderScope.Active && PreservedInAuthoredBody)) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append(GetCommandName());
+			result.Append(' ');
+			expression.write(result, databaseType);
+			result.Append(' ');
+			// The alias is a string literal — render it through the same path as every
+			// other string literal (LiteralString.Write) so it is properly quoted,
+			// escaped per DatabaseType, and a fixed point under parse -> render. The
+			// earlier hand-rolled form emitted the internal  / sentinels
+			// directly, which the SQL Server storage writer post-processes but the
+			// in-memory / render paths do not — leaving raw sentinels that accreted a
+			// character on every render -> parse cycle (surfaced once the Action body
+			// began carrying prints in the journal).
+			LiteralString.Write(result, alias, databaseType);
+			result.Append(';');
+			result.Append('\r');
 		}
 	}
 }

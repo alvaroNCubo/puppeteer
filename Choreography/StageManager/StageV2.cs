@@ -54,6 +54,50 @@ namespace Choreography.StageManager
             return this;
         }
 
+        // ── Output target (push channel, Paper 9) ───────────────────────────
+        //
+        // Configure the transport sink a Reaction's Program.Emit projection is
+        // pushed to. PerformCmd/PerformQry stay pull (the caller reads the
+        // result). OutputTarget is assembly-agnostic — it lives at the
+        // ActorHandler and is exposed identically on Performance, Ensemble and
+        // StageV2; this method just lets the StageManager assembly (a distributed,
+        // decentralized swarm topology) set it. The assembly is a packaging/
+        // topology decision, orthogonal to what the actor does — push vs pull is a
+        // property of the destination, not of the assembly or of `print`. The push
+        // renders TOON by default; pass a formatter to override. Pass a null sink
+        // to revert to pull-only. Ephemeral channel; durable delivery is the
+        // Outbox Reaction plane. The sink receives the immutable document, never
+        // the pooled buffer.
+        public StageV2 OutputTarget(IOutputSink transport, IOutputFormatter format = null)
+        {
+            hook.SetOutputTarget(transport, format);
+            return this;
+        }
+
+        // ── Tell transport (V2 surface, mirror of PerformanceV2) ────────────
+        //
+        // Plug the transport that carries this Stage's tells across a boundary. A
+        // StageV2 hosts an actor just like a Performance does (via StageHook); the
+        // Tell capability lives on that ActorHandler and is set here. This lets a
+        // Stage's Reaction issue a `tell` in its Causation body — the replicating
+        // node itself heralds the change to another actor, without a separate
+        // Performance doing the emit.
+        //
+        // Single-assignment: the ActorHandler rejects swapping a live transport (it
+        // would orphan in-flight tells), so call this once, before the first tell.
+        //
+        // Replication caveat: a StageV2 is a REPLICATED actor (one Director, N
+        // Casts). A Reaction that emits a `tell` must therefore be gated
+        // `.DirectorOnly()`, so only the Director heralds — under `.Company()` every
+        // replica would emit the same tell. The ack/verdict the Director journals
+        // then replicates to the Casts like any other entry.
+        public StageV2 UseTellTransport(Puppeteer.Tell.ITransport transport)
+        {
+            if (transport == null) throw new ArgumentNullException(nameof(transport));
+            hook.Transport = transport;
+            return this;
+        }
+
         // Install the authoring transpiler for this Stage (input-side mirror of
         // Formatter). Lowers a domain notation into a Puppeteer DSL command body
         // at author-time; only the transpiled body is journaled / forwarded,

@@ -62,18 +62,18 @@ namespace Puppeteer.EventSourcing.DB
 			materializationCheckpointStorage = new MaterializationCheckpointStorageMySQL(eventJournalClient, connectionString);
 		}
 
-		private async Task<bool> CreateDiaryAsync(String nombreDelDiario)
+		private async Task<bool> CreateDiaryAsync(String diaryName)
 		{
 			StringBuilder statement = new StringBuilder();
 			bool created = false;
 
 			statement
 				.Append("SELECT count(TABLE_NAME) alreadyexists FROM information_schema.TABLES WHERE TABLE_NAME = ")
-				.Append('\'').Append(nombreDelDiario).Append('\'')
+				.Append('\'').Append(diaryName).Append('\'')
 				.Append(" AND TABLE_SCHEMA in (SELECT DATABASE());");
 
 			statement
-				.Append("create table IF NOT EXISTS `").Append(nombreDelDiario).Append('`')
+				.Append("create table IF NOT EXISTS `").Append(diaryName).Append('`')
 				.Append('(')
 				.Append("	id BIGINT NOT NULL,")
 				.Append("	OccurredAt DATETIME(3) NOT NULL,")
@@ -156,18 +156,18 @@ namespace Puppeteer.EventSourcing.DB
 			return created;
 		}
 
-		private bool CreateDiary(String nombreDelDiario)
+		private bool CreateDiary(String diaryName)
 		{
 			StringBuilder statement = new StringBuilder();
 			bool created = false;
 
 			statement
 				.Append("SELECT count(TABLE_NAME) alreadyexists FROM information_schema.TABLES WHERE TABLE_NAME = ")
-				.Append('\'').Append(nombreDelDiario).Append('\'')
+				.Append('\'').Append(diaryName).Append('\'')
 				.Append(" AND TABLE_SCHEMA in (SELECT DATABASE());");
 
 			statement
-				.Append("create table IF NOT EXISTS `").Append(nombreDelDiario).Append('`')
+				.Append("create table IF NOT EXISTS `").Append(diaryName).Append('`')
 				.Append('(')
 				.Append("	id BIGINT NOT NULL,")
 				.Append("	OccurredAt DATETIME(3) NOT NULL,")
@@ -267,7 +267,7 @@ namespace Puppeteer.EventSourcing.DB
 
 			if (!created)
 			{
-				ValidateExistingSchemaOrThrow(nombreDelDiario);
+				ValidateExistingSchemaOrThrow(diaryName);
 			}
 
 			return created;
@@ -347,10 +347,10 @@ namespace Puppeteer.EventSourcing.DB
 			EventJournalClient.IsNew = CreateDiary(this.Name);
 
 			bool canContinueReplay = false;
-			long ultimoId = afterEntryId;
+			long lastId = afterEntryId;
 			long delta = 0;
-			bool salir = false;
-			int cantidadDeLeaderInitialization = 0;
+			bool shouldExit = false;
+			int leaderInitializationCount = 0;
 
 			// Forward replay: events in ascending id order.
 			string orderByClause = "ORDER BY d.id ASC";
@@ -367,13 +367,13 @@ namespace Puppeteer.EventSourcing.DB
 					string sqlCount = $@"
 						SELECT Count(*) Cantidad
 						FROM `{base.Name}` d
-						WHERE d.Skip = 0 AND d.id > {ultimoId}";
+						WHERE d.Skip = 0 AND d.id > {lastId}";
 					using (MySqlCommand command = new MySqlCommand(sqlCount, connection))
 					using (DbDataReader reader = command.ExecuteReader())
 					{
 						reader.Read();
-						long totalDeRegistros = reader.GetInt64(0);
-						EventJournalClient.BeginJournalReplay(totalDeRegistros);
+						long totalRecords = reader.GetInt64(0);
+						EventJournalClient.BeginJournalReplay(totalRecords);
 						reader.Close();
 					}
 				}
@@ -388,7 +388,7 @@ namespace Puppeteer.EventSourcing.DB
 				int fails = 0;
 				long entryId = 0;
 
-				while (!salir && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+				while (!shouldExit && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
 				{
 					// Phase 5 of the Action refactor: legacy LoadActionsWithExitStatus
 					// (pre-load the _ACTION lateral table) is dropped. Define entries
@@ -400,11 +400,11 @@ namespace Puppeteer.EventSourcing.DB
 						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 							FROM `{base.Name}` d
 							LEFT JOIN ExposeData ed ON d.id = ed.DiaryId
-							WHERE d.Skip = 0 AND d.id > {ultimoId}
+							WHERE d.Skip = 0 AND d.id > {lastId}
 							{orderByClause}"
 						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments
 							FROM `{base.Name}` d
-							WHERE d.Skip = 0 AND d.id > {ultimoId}
+							WHERE d.Skip = 0 AND d.id > {lastId}
 							{orderByClause}";
 
 					using (MySqlConnection connection = new MySqlConnection(ConnectionString))
@@ -418,9 +418,9 @@ namespace Puppeteer.EventSourcing.DB
 							{
 								try
 								{
-									bool salirRead = false;
-									int intentos = 5;
-									while (!salirRead && intentos > 0 && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+									bool exitRead = false;
+									int attempts = 5;
+									while (!exitRead && attempts > 0 && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
 									{
 										try
 										{
@@ -480,11 +480,11 @@ namespace Puppeteer.EventSourcing.DB
 													EventJournalClient.ReplayEvent(scriptData);
 												}
 											}
-											salirRead = true;
+											exitRead = true;
 										}
 										catch (MySqlException mysqlException)
 										{
-											intentos--;
+											attempts--;
 											fails++;
 											// Goes through IPuppeteerLogger.Error instead of Console.WriteLine: with
 											// the default ConsoleLogger it goes to stderr (Console.Error) with prefix
@@ -511,26 +511,26 @@ namespace Puppeteer.EventSourcing.DB
 						}
 					}
 
-					delta = ultimoId - entryId;
-					ultimoId = entryId;
+					delta = lastId - entryId;
+					lastId = entryId;
 
 					if (delta == 0)
 					{
 						const bool AT_LEAST_IS_NECESSARY_ONE_MORE_TIME = false;
-						if (cantidadDeLeaderInitialization < 1)
+						if (leaderInitializationCount < 1)
 						{
 							EventJournalClient.EndJournalReplay(forcedToEnd: !canContinueReplay);
-							salir = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
-							cantidadDeLeaderInitialization++;
+							shouldExit = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
+							leaderInitializationCount++;
 						}
 						else
 						{
-							salir = delta == 0;
+							shouldExit = delta == 0;
 						}
 					}
 					else
 					{
-						salir = delta == 0;
+						shouldExit = delta == 0;
 					}
 				}
 			}
@@ -541,12 +541,12 @@ namespace Puppeteer.EventSourcing.DB
 				// injected a logger (Serilog/MEL/NLog) via Performance.Logger(...),
 				// it also receives it there. The swallow-and-continue is kept to
 				// allow transient failures not to abort the actor — the caller
-				// (EventSourcingStorage) sees ultimoId = afterEntryId and continues with
+				// (EventSourcingStorage) sees lastId = afterEntryId and continues with
 				// partial state; the log is the only evidence of the failure.
 				Logger.Error($"RehydrateFromEvent outer block failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
-			return ultimoId;
+			return lastId;
 		}
 
 		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
@@ -652,7 +652,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
+					throw new Exception("Error writing in MySQL the Script to the Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -714,7 +714,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteScriptCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
+					throw new Exception("Error writing in MySQL the Script to the Diary: [" + mySqlWriteScriptCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -779,7 +779,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir Define entry en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
+					throw new Exception("Error writing Define entry in MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -831,7 +831,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteDefineCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir Define entry async en MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
+					throw new Exception("Error writing Define entry async in MySQL: [" + mySqlWriteDefineCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -887,7 +887,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir Invocation entry en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
+					throw new Exception("Error writing Invocation entry in MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -939,7 +939,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"sql:{mySqlWriteInvocationCommand} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception("Error al escribir Invocation entry async en MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
+					throw new Exception("Error writing Invocation entry async in MySQL: [" + mySqlWriteInvocationCommand + "]. " + e.Message);
 				}
 				catch (Exception e)
 				{
@@ -1006,7 +1006,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"WriteDefineWithFirstInvocation actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception($"Error al escribir Define+Invocation atomic en MySQL (actionId={actionId}). {e.Message}");
+					throw new Exception($"Error writing Define+Invocation atomic in MySQL (actionId={actionId}). {e.Message}");
 				}
 				catch (Exception e)
 				{
@@ -1072,7 +1072,7 @@ namespace Puppeteer.EventSourcing.DB
 				catch (MySqlException e)
 				{
 					Logger.Error($@"WriteDefineWithFirstInvocationAsync actionId:{actionId} defineEntryId:{defineEntryId} invocationEntryId:{invocationEntryId} type:{e.GetType()} error:{e.Message}", e);
-					throw new Exception($"Error al escribir Define+Invocation atomic async en MySQL (actionId={actionId}). {e.Message}");
+					throw new Exception($"Error writing Define+Invocation atomic async in MySQL (actionId={actionId}). {e.Message}");
 				}
 				catch (Exception e)
 				{
@@ -1099,7 +1099,7 @@ namespace Puppeteer.EventSourcing.DB
 			Debug.WriteLine("Mysql tables doesn't need any change.");
 		}
 
-		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
+		protected internal override MemoryStream Archive(DateTime startDate, DateTime endDate)
 		{
 			IEnumerable<string> actorsNames = ListActorNames(Name);
 			if (actorsNames == null) return null;
@@ -1125,8 +1125,8 @@ namespace Puppeteer.EventSourcing.DB
 						swDairyPeriodRangeToExport = new StreamWriter(msDairyPeriodRangeToExport, Encoding.UTF8);
 
 
-						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
-						string sql = $"SELECT OccurredAt, Script, Skip, Id FROM `{aName}` WHERE OccurredAt >= '{fechaInicio.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND OccurredAt < '{fechaFin.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND Skip = 1 ORDER BY id";
+						var fileName = aName + "-" + endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
+						string sql = $"SELECT OccurredAt, Script, Skip, Id FROM `{aName}` WHERE OccurredAt >= '{startDate.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND OccurredAt < '{endDate.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}' AND Skip = 1 ORDER BY id";
 						using (MySqlCommand command = new MySqlCommand(sql, connection))
 						using (MySqlDataReader reader = command.ExecuteReader())
 						{
@@ -1149,7 +1149,7 @@ namespace Puppeteer.EventSourcing.DB
 								insertString.Append(',');
 								insertString.Append("STR_TO_DATE('"); insertString.Append(occurredAt); insertString.Append("','%m/%d/%Y %h:%i:%s %p')");   //STR_TO_DATE('4/23/2019 9:37:16 AM','%m/%d/%Y %h:%i:%s %p')
 								insertString.Append(',');
-								insertString.Append("'" + script.Replace("'", "\\\'").Replace("\"", "\\\"") + "'");
+								insertString.Append("'" + EscapeScriptForSqlBackup(script) + "'");
 								insertString.Append(',');
 								insertString.Append(skip);
 								insertString.AppendLine(");");
@@ -1177,16 +1177,30 @@ namespace Puppeteer.EventSourcing.DB
 			return compressedFileForArchive;
 		}
 
+		// Escapes a journaled Script so it survives a single-quoted MySQL string literal in the
+		// '.sql' backup AND the matching restore. The backslash MUST be escaped FIRST, then the
+		// quote: a journaled Script may legitimately carry a backslash-escaped quote (\'), which the
+		// Lexer accepts. Escaping the quote first leaves the original backslash untouched, so on
+		// restore MySQL un-escapes \\ -> \ and then meets a bare ' that prematurely terminates the
+		// literal, truncating the value and spilling its tail into the surrounding SQL. Escaping the
+		// backslash first emits \\\', which MySQL decodes back to \' -> the script round-trips
+		// unchanged. This mirrors the canonical MySQL rule in LiteralString.Write.
+		internal static string EscapeScriptForSqlBackup(string script)
+		{
+			if (script == null) throw new ArgumentNullException(nameof(script));
+			return script.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\"", "\\\"");
+		}
+
 		protected override internal IEnumerable<string> ListActorNames(string name)
 		{
 			List<string> actors = new List<string>();
 
-			var existActor = ProbarSiEsTablaNueva(name);
+			var existActor = CheckIfNewTable(name);
 			if (existActor && name != "general")
 			{
 				actors.Add(name);
 			}
-			else if (ProbarSiEsTablaNueva("general"))
+			else if (CheckIfNewTable("general"))
 			{
 				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 				{
@@ -1218,9 +1232,9 @@ namespace Puppeteer.EventSourcing.DB
 			return actors;
 		}
 
-		private bool ProbarSiEsTablaNueva(string tableName)
+		private bool CheckIfNewTable(string tableName)
 		{
-			bool esTablaNueva = true;
+			bool isNewTable = true;
 			string sql = $"SELECT 1 FROM `{tableName}` LIMIT 1";
 			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
 			{
@@ -1235,7 +1249,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 				catch
 				{
-					esTablaNueva = false;
+					isNewTable = false;
 				}
 				finally
 				{
@@ -1243,7 +1257,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 
-			return esTablaNueva;
+			return isNewTable;
 		}
 
 		protected internal override void Trim(DateTime trimmedDown)
@@ -1319,7 +1333,7 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					Logger.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
 
-					throw new Exception("Error al escribir en MySQL el Script en el Diary: [" + sql + "]. " + e.Message);
+					throw new Exception("Error writing in MySQL the Script to the Diary: [" + sql + "]. " + e.Message);
 				}
 				finally
 				{
@@ -1366,7 +1380,7 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			if (minimumContributionPercent < 0 && minimumContributionPercent > 100) throw new ArgumentNullException(nameof(minimumContributionPercent));
 
-			List<int> acumuladoPorDia = new List<int>();
+			List<int> accumulatedPerDay = new List<int>();
 			List<string> result = new List<string>(); ;
 
 
@@ -1381,15 +1395,15 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						while (reader.Read())
 						{
-							var cuentasPorDia = reader.GetInt32(1);
-							acumuladoPorDia.Add(cuentasPorDia);
+							var accountsPerDay = reader.GetInt32(1);
+							accumulatedPerDay.Add(accountsPerDay);
 						}
 						reader.Close();
 					}
 
-					int topDeCuentasACargar = CalcularMaximoDeActoresACargar(acumuladoPorDia, minimumContributionPercent);
+					int topAccountsToLoad = CalculateMaxActorsToLoad(accumulatedPerDay, minimumContributionPercent);
 
-					statement = $"SELECT Cuenta, OccurredAt, DATEDIFF(CURDATE(), OccurredAt) As Dias FROM accountsLRU ORDER BY Dias Asc LIMIT {topDeCuentasACargar};";
+					statement = $"SELECT Cuenta, OccurredAt, DATEDIFF(CURDATE(), OccurredAt) As Dias FROM accountsLRU ORDER BY Dias Asc LIMIT {topAccountsToLoad};";
 
 					using (MySqlCommand command = new MySqlCommand(statement, connection))
 					using (MySqlDataReader reader = command.ExecuteReader())

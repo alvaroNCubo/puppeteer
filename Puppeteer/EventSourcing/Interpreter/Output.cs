@@ -14,7 +14,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 	/// holds the sink, EWI accumulator, and the active formatter instance;
 	/// delegates each method to the formatter; preserves the legacy
 	/// "{}" → "" collapse in <see cref="ToString"/>; and gates everything on
-	/// <see cref="escribirSalida"/> (the no-output / rehydrating mode).
+	/// <see cref="writeOutput"/> (the no-output / rehydrating mode).
 	///
 	/// <para>
 	/// The 25+ typed <c>Append(ReadOnlySpan&lt;char&gt;, T)</c> overloads MUST
@@ -25,7 +25,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 	/// </summary>
 	internal class Output
 	{
-		private readonly bool escribirSalida = true;
+		private readonly bool writeOutput = true;
 		private StringBuilder sink;
 		private IOutputFormatter formatter;
 		private List<Tuple<string, string>> ewis;
@@ -34,14 +34,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private static readonly IOutputFormatter DefaultPrototype = new JsonFormatter();
 
-		private Output(bool conSalida)
+		private Output(bool withOutput)
 		{
 			CultureInfo.DefaultThreadCurrentCulture = USculture;
 			CultureInfo.DefaultThreadCurrentUICulture = USculture;
 
-			this.escribirSalida = conSalida;
+			this.writeOutput = withOutput;
 
-			if (escribirSalida)
+			if (writeOutput)
 			{
 				sink = new StringBuilder();
 				ewis = new List<Tuple<string, string>>();
@@ -59,7 +59,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		/// </summary>
 		internal void InstallFormatter(IOutputFormatter prototype)
 		{
-			if (!escribirSalida) return;
+			if (!writeOutput) return;
 			var actualPrototype = prototype ?? DefaultPrototype;
 			if (formatter == null || formatter.GetType() != actualPrototype.GetType())
 			{
@@ -87,14 +87,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 		private class OutputPool
 		{
 			private readonly ThreadLocal<Stack<Output>> _objects = new ThreadLocal<Stack<Output>>(() => new Stack<Output>());
-			private readonly bool _conSalida;
+			private readonly bool _withOutput;
 			private readonly int _maxPoolSize;
 
-			internal OutputPool(bool conSalida, int maxPoolSize = ActorHandler.MAX_NORMAL_LOAD_POOL_SIZE)
+			internal OutputPool(bool withOutput, int maxPoolSize = ActorHandler.MAX_NORMAL_LOAD_POOL_SIZE)
 			{
 				if (maxPoolSize <= 0) throw new LanguageException($"{nameof(OutputPool)} maxPoolSize {maxPoolSize} must be greater than 0.");
 
-				_conSalida = conSalida;
+				_withOutput = withOutput;
 				_maxPoolSize = maxPoolSize;
 			}
 
@@ -102,7 +102,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				var stack = _objects.Value;
 				if (stack.Count > 0) return stack.Pop();
-				return new Output(conSalida: _conSalida);
+				return new Output(withOutput: _withOutput);
 			}
 
 			internal void Return(Output item)
@@ -117,12 +117,12 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		private static readonly OutputPool _conSalidaPool = new OutputPool(conSalida: true);
-		private static readonly OutputPool _sinSalidaPool = new OutputPool(conSalida: false);
+		private static readonly OutputPool _withOutputPool = new OutputPool(withOutput: true);
+		private static readonly OutputPool _withoutOutputPool = new OutputPool(withOutput: false);
 
 		internal static Output RentWithOutput()
 		{
-			var result = _conSalidaPool.Rent();
+			var result = _withOutputPool.Rent();
 			// Install the active formatter (if any) — mirrors ExecutionOutputPool.Rent.
 			// The compiled-mode path (Program.ExecuteExpression) rents an Output
 			// directly (no ExecutionOutput wrapper), so without this call the
@@ -134,20 +134,20 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal static Output RentWithoutOutput()
 		{
-			var result = _sinSalidaPool.Rent();
+			var result = _withoutOutputPool.Rent();
 			result.InstallFormatter(Formatters.FormatterContext.Active);
 			return result;
 		}
 
-		internal static void Return(Output rentedSalida)
+		internal static void Return(Output rentedOutput)
 		{
-			if (rentedSalida.escribirSalida)
+			if (rentedOutput.writeOutput)
 			{
-				_conSalidaPool.Return(rentedSalida);
+				_withOutputPool.Return(rentedOutput);
 			}
 			else
 			{
-				_sinSalidaPool.Return(rentedSalida);
+				_withoutOutputPool.Return(rentedOutput);
 			}
 		}
 
@@ -155,7 +155,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal void Clear()
 		{
-			if (escribirSalida)
+			if (writeOutput)
 			{
 				formatter.Reset();
 				sink.Clear();
@@ -166,7 +166,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal void Finish()
 		{
-			if (escribirSalida)
+			if (writeOutput)
 			{
 				// EWIs go inside the document, before EndDocument.
 				if (ewis.Count > 0)
@@ -182,46 +182,46 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		// ── Collection (for-block) ─────────────────────────────────────────
+		// ── Collection (foreach-block) ─────────────────────────────────────
 
-		internal void OpenFor()
+		internal void OpenForEach()
 		{
-			if (escribirSalida) formatter.BeginCollection();
+			if (writeOutput) formatter.BeginCollection();
 		}
 
-		internal void CloseFor(string alias)
+		internal void CloseForEach(string alias)
 		{
-			if (escribirSalida) formatter.EndCollection(alias.AsSpan());
+			if (writeOutput) formatter.EndCollection(alias.AsSpan());
 		}
 
-		internal void BeginForMoveNext()
+		internal void BeginForEachMoveNext()
 		{
-			if (escribirSalida) formatter.BeginCollectionItem();
+			if (writeOutput) formatter.BeginCollectionItem();
 		}
 
-		internal void EndForMoveNext()
+		internal void EndForEachMoveNext()
 		{
-			if (escribirSalida) formatter.EndCollectionItem();
+			if (writeOutput) formatter.EndCollectionItem();
 		}
 
 		// ── Document introspection ─────────────────────────────────────────
 
-		internal bool IsWriting => escribirSalida;
+		internal bool IsWriting => writeOutput;
 
-		internal StringBuilder Salidas => sink;
+		internal StringBuilder Outputs => sink;
 
-		internal bool Vacio() => escribirSalida && formatter.IsDocumentEmpty;
+		internal bool IsEmpty() => writeOutput && formatter.IsDocumentEmpty;
 
 		// ── EWIs (held in Output; formatter renders them) ──────────────────
 
 		internal bool HasEWIS()
 		{
-			return this.escribirSalida && ewis.Count > 0;
+			return this.writeOutput && ewis.Count > 0;
 		}
 
 		internal void AddEWI(string type, string value)
 		{
-			if (escribirSalida) ewis.Add(new Tuple<string, string>(type, value));
+			if (writeOutput) ewis.Add(new Tuple<string, string>(type, value));
 		}
 
 		// ── Typed Append overloads (preserve EXACT signatures for the ──────
@@ -229,42 +229,42 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal void Append(ReadOnlySpan<char> alias, bool value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, string value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, int value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, double value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, long value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, DateTime value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, decimal value)
 		{
-			if (escribirSalida) formatter.Field(alias, value);
+			if (writeOutput) formatter.Field(alias, value);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, object values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, object[] values) => AppendPrivate(alias, values);
@@ -277,7 +277,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<object> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, int[] values) => AppendPrivate(alias, values);
@@ -290,7 +290,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<int> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, double[] values) => AppendPrivate(alias, values);
@@ -303,7 +303,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<double> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, decimal[] values) => AppendPrivate(alias, values);
@@ -316,7 +316,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<decimal> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, bool[] values) => AppendPrivate(alias, values);
@@ -329,7 +329,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<bool> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, string[] values) => AppendPrivate(alias, values);
@@ -342,7 +342,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<string> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		internal void Append(ReadOnlySpan<char> alias, DateTime[] values) => AppendPrivate(alias, values);
@@ -355,14 +355,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private void AppendPrivate(ReadOnlySpan<char> alias, IEnumerable<DateTime> values)
 		{
-			if (escribirSalida) formatter.Field(alias, values);
+			if (writeOutput) formatter.Field(alias, values);
 		}
 
 		// ── Single-char Append (legacy public API) ─────────────────────────
 
 		internal void Append(string alias, char text)
 		{
-			if (escribirSalida) formatter.Field(alias.AsSpan(), text);
+			if (writeOutput) formatter.Field(alias.AsSpan(), text);
 		}
 
 		// ── Raw splice (JSON-only escape hatch used by EvalStatement V1) ───
@@ -376,14 +376,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal void Append(string stream, int startIndex, int count)
 		{
-			if (escribirSalida) formatter.RawSplice(stream, startIndex, count);
+			if (writeOutput) formatter.RawSplice(stream, startIndex, count);
 		}
 
 		// ── ToString — preserve legacy "{}" → "" collapse ──────────────────
 
 		public override string ToString()
 		{
-			if (!escribirSalida) return "";
+			if (!writeOutput) return "";
 			var result = sink.ToString();
 			if (formatter.CollapseEmptyToString && result == "{}") return "";
 			return result;

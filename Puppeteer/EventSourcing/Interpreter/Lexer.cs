@@ -20,7 +20,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal ReadOnlySpan<char> CurrentLexeme()
 		{
-			return this.CurrentToken.GetValor(input.Script);
+			return this.CurrentToken.GetValue(input.Script);
 		}
 
 		internal string Source
@@ -30,6 +30,25 @@ namespace Puppeteer.EventSourcing.Interpreter
 				input.Script = value;
 				Advance();
 			}
+		}
+
+		// Lightweight lexical scan: true iff the source contains at least one token
+		// of the given type. Used by build-time guards that must reject a statement
+		// placed in a plane that cannot host it, WITHOUT a full parse or any
+		// symbol-table side effect. Reserved-keyword tokens (e.g. TokenType.tell)
+		// are only produced for the keyword itself, never for identifiers or the
+		// contents of a string literal, so the scan yields no false positives.
+		internal static bool SourceContainsToken(string source, TokenType type)
+		{
+			if (string.IsNullOrEmpty(source)) return false;
+
+			Lexer lexer = new Lexer { Source = source };
+			while (lexer.CurrentToken.Type != TokenType.eof)
+			{
+				if (lexer.CurrentToken.Type == type) return true;
+				lexer.Advance();
+			}
+			return false;
 		}
 
 		private void Advance()
@@ -351,84 +370,93 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 						ProcessIdentifier();
 
-						var cadenaActualOriginal = input.CurrentString();
+						var currentOriginalString = input.CurrentString();
 
-						if (cadenaActualOriginal.Equals("PRINT".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						if (currentOriginalString.Equals("PRINT".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.print, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("EXPOSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("EXPOSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.expose, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("AS".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("AS".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.@as, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("TRUE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("TRUE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.boolTrue, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("FALSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("FALSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.boolFalse, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("IF".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("IF".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.IF, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("ELSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("ELSE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.ELSE, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("EVAL".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("EVAL".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.EVAL, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("NULL".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("NULL".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.nullToken, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("FOR".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("FOREACH".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
-							CurrentToken = new Token(TokenType.FOR, input.LexemeStart, input.LexemeEnd);
+							CurrentToken = new Token(TokenType.FOREACH, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("IN".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("FOR".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						{
+							// Deprecated alias of 'foreach'. The construct only iterates an
+							// IEnumerable (there is no counted/C-style form), so 'foreach' is the
+							// canonical keyword; 'for' is kept parsing for backward compatibility
+							// and is rewritten to 'foreach' by canonical serialization.
+							CurrentToken = new Token(TokenType.FOREACH, input.LexemeStart, input.LexemeEnd);
+							return;
+						}
+						else if (currentOriginalString.Equals("IN".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.IN, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("CHECK".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("CHECK".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.check, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("NOTIFY".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("NOTIFY".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.notify, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("UPGRADE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("UPGRADE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.upgrade, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("TELL".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("TELL".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							CurrentToken = new Token(TokenType.tell, input.LexemeStart, input.LexemeEnd);
 							return;
 						}
-						else if (cadenaActualOriginal.Equals("DEFINE".AsSpan(), StringComparison.OrdinalIgnoreCase))
+						else if (currentOriginalString.Equals("DEFINE".AsSpan(), StringComparison.OrdinalIgnoreCase))
 						{
 							// Phase 1 of the Action refactor (project_puppeteer_action_refactor_plan.md):
 							// 'define' is the statement-level keyword for `define action <id> (params) as
@@ -478,15 +506,15 @@ namespace Puppeteer.EventSourcing.Interpreter
 								return;
 							case '/':
 								input.ConsumeChar();
-								bool esComentarioDeLinea = input.CurrentChar == '/';
-								bool esComentarioDeBloque = input.CurrentChar == '*';
-								if (esComentarioDeLinea)
+								bool isLineComment = input.CurrentChar == '/';
+								bool isBlockComment = input.CurrentChar == '*';
+								if (isLineComment)
 								{
 									input.ConsumeChar();
 									ProcessLineComment();
 									continue;
 								}
-								else if (esComentarioDeBloque)
+								else if (isBlockComment)
 								{
 									input.ConsumeChar();
 									ProcessBlockComment();
@@ -646,7 +674,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				if (input.CurrentChar == '\f')
 				{
-					throw new LanguageException("EOF inesperado en comentario de bloque", input.CurrentString().ToString(), input.Row, input.Column);
+					throw new LanguageException("Unexpected EOF in block comment", input.CurrentString().ToString(), input.Row, input.Column);
 				}
 				if (input.CurrentChar == '*')
 				{
@@ -675,7 +703,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 			TokenType currentType = CurrentToken.Type;
 			if (currentType != type)
 			{
-				throw new LanguageException($"Expected token type '{type}' at line {input.Row}, column {input.Column}, but found value '{CurrentToken.GetValor(input.Script)}' of type '{currentType}'.", input.CurrentString().ToString(), input.Row, input.Column);
+				throw new LanguageException($"Expected token type '{type}' at line {input.Row}, column {input.Column}, but found value '{CurrentToken.GetValue(input.Script)}' of type '{currentType}'.", input.CurrentString().ToString(), input.Row, input.Column);
 			}
 			Accept();
 		}
@@ -684,19 +712,19 @@ namespace Puppeteer.EventSourcing.Interpreter
 		private Token ProcessNumber()
 		{
 			Token result;
-			bool esDecimal = false;
+			bool isDecimal = false;
 			while (IsDigit() || IsDot())
 			{
 
 				if (IsDot())
 				{
-					if (esDecimal)
+					if (isDecimal)
 					{
 						throw new LanguageException($"More than one decimal point found in numeric literal at line {input.Row}, column {input.Column}.", input.CurrentString().ToString(), input.Row, input.Column);
 					}
 					else
 					{
-						esDecimal = true;
+						isDecimal = true;
 					}
 				}
 				input.ConsumeChar();
@@ -714,7 +742,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				input.SkipChar();
 				result = new Token(TokenType.@double, input.LexemeStart, input.LexemeEnd);
 			}
-			else if (esDecimal)
+			else if (isDecimal)
 			{
 				result = new Token(TokenType.@double, input.LexemeStart, input.LexemeEnd);
 			}
@@ -758,7 +786,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				}
 				else if (input.CurrentChar == '\f')
 				{
-					throw new LanguageException("EOF inesperado en literal de str", "", input.Row, input.Column);
+					throw new LanguageException("Unexpected EOF in string literal", "", input.Row, input.Column);
 				}
 				else
 				{
@@ -774,14 +802,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			while (true)
 			{
-				bool esFinDeArchivo_o_noEsUnEspacio = char.IsLetterOrDigit(input.CurrentChar) || CARACTERES_VALIDOS.IndexOf(input.CurrentChar) >= 0 || input.CurrentChar == '\f';
-				if (esFinDeArchivo_o_noEsUnEspacio)
+				bool isEndOfFile_or_notSpace = char.IsLetterOrDigit(input.CurrentChar) || CARACTERES_VALIDOS.IndexOf(input.CurrentChar) >= 0 || input.CurrentChar == '\f';
+				if (isEndOfFile_or_notSpace)
 				{
 					break;
 				}
 				else
 				{
-					input.SetInicioLexemaToIndiceProximoChar();
+					input.SetLexemeStartToNextCharIndex();
 					input.SkipChar();
 				}
 			}
@@ -790,75 +818,75 @@ namespace Puppeteer.EventSourcing.Interpreter
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsSlash()
 		{
-			bool esUnDividir = input.CurrentChar == '/';
-			return esUnDividir;
+			bool isDivide = input.CurrentChar == '/';
+			return isDivide;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsDot()
 		{
-			bool esUnPunto = input.CurrentChar == '.';
-			return esUnPunto;
+			bool isDot = input.CurrentChar == '.';
+			return isDot;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsDigit()
 		{
-			bool esUnNumero = char.IsDigit(input.CurrentChar);
-			return esUnNumero;
+			bool isNumber = char.IsDigit(input.CurrentChar);
+			return isNumber;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		internal bool IsWhitespace()
 		{
-			bool esUnEspacio = input.CurrentChar == ' ' || input.CurrentChar == '\t';
-			return esUnEspacio;
+			bool isSpace = input.CurrentChar == ' ' || input.CurrentChar == '\t';
+			return isSpace;
 		}
 
 		private static readonly string OPERADORES = new string(new char[] { '=', '+', '-', '*', '<', '>', '!', '/' });
-		private static readonly string FIN_DE_NUMERO = new string(new char[] { ',', ')', '}', ';', 'm', 'M', 'd', 'D' });
+		private static readonly string NUMBER_END = new string(new char[] { ',', ')', '}', ';', 'm', 'M', 'd', 'D' });
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsEndOfNumber()
 		{
-			bool esUnFinalDeNumero = IsWhitespace() || OPERADORES.IndexOf(input.CurrentChar) >= 0 || FIN_DE_NUMERO.IndexOf(input.CurrentChar) >= 0 || IsEndOfStatement();
-			return esUnFinalDeNumero;
+			bool isNumberEnd = IsWhitespace() || OPERADORES.IndexOf(input.CurrentChar) >= 0 || NUMBER_END.IndexOf(input.CurrentChar) >= 0 || IsEndOfStatement();
+			return isNumberEnd;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsEndOfStatement()
 		{
-			bool esElFinalDelComando = input.CurrentChar == '\n' || input.CurrentChar == '\r' || input.CurrentChar == '\f';
-			return esElFinalDelComando;
+			bool isEndOfCommand = input.CurrentChar == '\n' || input.CurrentChar == '\r' || input.CurrentChar == '\f';
+			return isEndOfCommand;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsDecimalSuffix()
 		{
-			bool esSufijoDecimal = input.CurrentChar == 'm' || input.CurrentChar == 'M';
-			return esSufijoDecimal;
+			bool isDecimalSuffix = input.CurrentChar == 'm' || input.CurrentChar == 'M';
+			return isDecimalSuffix;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsDoubleSuffix()
 		{
-			bool esSufijoDouble = input.CurrentChar == 'd' || input.CurrentChar == 'D';
-			return esSufijoDouble;
+			bool isDoubleSuffix = input.CurrentChar == 'd' || input.CurrentChar == 'D';
+			return isDoubleSuffix;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private bool IsIdentifierChar()
 		{
 			char character = input.CurrentChar;
-			bool esLetra = char.IsLetter(character);
-			if (esLetra)
+			bool isLetter = char.IsLetter(character);
+			if (isLetter)
 			{
 				return true;
 			}
-			bool esGuionBajo = character == '_';
-			bool esNumeral = character == '#';
-			bool esArroba = character == '@';
-			return esGuionBajo || esNumeral || esArroba;
+			bool isUnderscore = character == '_';
+			bool isHash = character == '#';
+			bool isAt = character == '@';
+			return isUnderscore || isHash || isAt;
 		}
 
 		internal int Row()
@@ -874,7 +902,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		private struct Input
 		{
 			private string script;
-			private int indiceProximoChar;
+			private int nextCharIndex;
 
 			private Positions positions;
 
@@ -886,14 +914,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 				Row = 1;
 				Column = 0;
 
-				indiceProximoChar = 0;
+				nextCharIndex = 0;
 				positions = new Positions(32);
 
 				this.script = script;
 				CurrentChar = script.Length > 0 ? this.script[0] : '\t';
 
 
-				positions.SavePosition(Row, Column, indiceProximoChar);
+				positions.SavePosition(Row, Column, nextCharIndex);
 
 				LexemeStart = 0;
 				LexemeEnd = 0;
@@ -906,13 +934,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 					Row = 1;
 					Column = 0;
 
-					indiceProximoChar = 0;
+					nextCharIndex = 0;
 					positions.ResetForNextToken();
 
 					this.script = value;
 					CurrentChar = script.Length > 0 ? this.script[0] : '\t';
 
-					positions.SavePosition(Row, Column, indiceProximoChar);
+					positions.SavePosition(Row, Column, nextCharIndex);
 
 					LexemeStart = 0;
 					LexemeEnd = 0;
@@ -933,10 +961,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
 			internal void ResetForNextToken()
 			{
-				LexemeStart = indiceProximoChar;
-				LexemeEnd = indiceProximoChar;
+				LexemeStart = nextCharIndex;
+				LexemeEnd = nextCharIndex;
 				positions.ResetForNextToken();
-				positions.SavePosition(Row, Column, indiceProximoChar);
+				positions.SavePosition(Row, Column, nextCharIndex);
 			}
 
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -972,29 +1000,29 @@ namespace Puppeteer.EventSourcing.Interpreter
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
 			internal void AdvanceCursor()
 			{
-				positions.SavePosition(Row, Column, indiceProximoChar);
+				positions.SavePosition(Row, Column, nextCharIndex);
 
-				if (indiceProximoChar < script.Length)
+				if (nextCharIndex < script.Length)
 				{
-					LexemeEnd = indiceProximoChar;
-					indiceProximoChar++;
-					CurrentChar = indiceProximoChar >= script.Length ? '\f' : script[indiceProximoChar];
+					LexemeEnd = nextCharIndex;
+					nextCharIndex++;
+					CurrentChar = nextCharIndex >= script.Length ? '\f' : script[nextCharIndex];
 				}
 				else
 				{
 					CurrentChar = '\f';
-					LexemeEnd = indiceProximoChar;
+					LexemeEnd = nextCharIndex;
 				}
 			}
 
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
 			internal void AdvanceCursorNoCapture()
 			{
-				if (indiceProximoChar < script.Length)
+				if (nextCharIndex < script.Length)
 				{
 					// Removed the modification of LexemeStart and LexemeEnd here.
-					indiceProximoChar++;
-					CurrentChar = indiceProximoChar >= script.Length ? '\f' : script[indiceProximoChar];
+					nextCharIndex++;
+					CurrentChar = nextCharIndex >= script.Length ? '\f' : script[nextCharIndex];
 				}
 				else
 				{
@@ -1037,14 +1065,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 			internal void Backtrack()
 			{
-				indiceProximoChar = positions.IndiceActual;
+				nextCharIndex = positions.CurrentIndex;
 				Column = positions.Column;
 				Row = positions.Row;
 				positions.RemoveLastPosition();
-				LexemeEnd = indiceProximoChar - 1;
-				if (indiceProximoChar < script.Length && indiceProximoChar > 0)
+				LexemeEnd = nextCharIndex - 1;
+				if (nextCharIndex < script.Length && nextCharIndex > 0)
 				{
-					CurrentChar = script[indiceProximoChar];
+					CurrentChar = script[nextCharIndex];
 				}
 				else
 				{
@@ -1056,13 +1084,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				if (LexemeEnd >= LexemeStart && LexemeStart >= 0 && LexemeEnd <= script.Length)
 				{
-					var ultimoIndiceNoBlanco = LexemeEnd;
-					while (ultimoIndiceNoBlanco < script.Length && ultimoIndiceNoBlanco >= LexemeStart && char.IsWhiteSpace(script[ultimoIndiceNoBlanco]))
+					var lastNonBlankIndex = LexemeEnd;
+					while (lastNonBlankIndex < script.Length && lastNonBlankIndex >= LexemeStart && char.IsWhiteSpace(script[lastNonBlankIndex]))
 					{
-						ultimoIndiceNoBlanco--;
+						lastNonBlankIndex--;
 					}
 
-					var length = ultimoIndiceNoBlanco - LexemeStart + 1;
+					var length = lastNonBlankIndex - LexemeStart + 1;
 					if (length > 0 && LexemeStart + length <= script.Length)
 					{
 						// AsSpan over the script instead of Substring: CurrentString() is invoked
@@ -1078,9 +1106,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 
 			[MethodImpl(MethodImplOptions.AggressiveInlining)]
-			internal void SetInicioLexemaToIndiceProximoChar()
+			internal void SetLexemeStartToNextCharIndex()
 			{
-				LexemeStart = indiceProximoChar;
+				LexemeStart = nextCharIndex;
 			}
 		}
 
@@ -1094,9 +1122,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 			private readonly List<Position> positions;
 			private int index;
 
-			internal Positions(int tamanoInicial = 32)
+			internal Positions(int initialSize = 32)
 			{
-				positions = new List<Position>(tamanoInicial);
+				positions = new List<Position>(initialSize);
 				index = -1;
 			}
 
@@ -1142,7 +1170,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				}
 			}
 
-			internal int IndiceActual
+			internal int CurrentIndex
 			{
 				get
 				{

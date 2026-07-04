@@ -37,11 +37,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			e.PreparePatternMatching(patternAst, ref position);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append('(');
-			e.write(resultado, databaseType);
-			resultado.Append(')');
+			result.Append('(');
+			e.write(result, databaseType);
+			result.Append(')');
 		}
 
 		internal override void Visit(ASTVisitor v)

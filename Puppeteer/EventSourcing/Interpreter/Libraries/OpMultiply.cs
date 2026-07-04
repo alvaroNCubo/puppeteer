@@ -34,40 +34,40 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var type = ComputeType();
 			if (type == null)
 			{
-				Type tipo1 = e1.ComputeType();
-				Type tipo2 = e2.ComputeType();
-				throw new LanguageException($"Cannot multiply a value of type '{tipo1.Name}' by a value of type '{tipo2.Name}'.");
+				Type type1 = e1.ComputeType();
+				Type type2 = e2.ComputeType();
+				throw new LanguageException($"Cannot multiply a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 			}
 			ForcedType = type;
 		}
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			object objeto2 = e2.Execute();
+			object object1 = e1.Execute();
+			object object2 = e2.Execute();
 
-			Type tipo1 = objeto1.GetType();
-			Type tipo2 = objeto2.GetType();
+			Type type1 = object1.GetType();
+			Type type2 = object2.GetType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
-				return (int)objeto1 * (int)objeto2;
-			else if (tipo1 == typeof(int) && tipo2 == typeof(double))
-				return Convert.ToDouble(objeto1) * (double)objeto2;
-			else if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) * (decimal)objeto2;
-			else if (tipo1 == typeof(double) && tipo2 == typeof(int))
-				return (double)objeto1 * Convert.ToDouble(objeto2);
-			else if (tipo1 == typeof(double) && tipo2 == typeof(double))
-				return (double)objeto1 * (double)objeto2;
-			else if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) * (decimal)objeto2;
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
-				return (decimal)objeto1 * Convert.ToDecimal(objeto2);
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
-				return (decimal)objeto1 * Convert.ToDecimal(objeto2);
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
-				return (decimal)objeto1 * (decimal)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(int))
+				return (int)object1 * (int)object2;
+			else if (type1 == typeof(int) && type2 == typeof(double))
+				return Convert.ToDouble(object1) * (double)object2;
+			else if (type1 == typeof(int) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) * (decimal)object2;
+			else if (type1 == typeof(double) && type2 == typeof(int))
+				return (double)object1 * Convert.ToDouble(object2);
+			else if (type1 == typeof(double) && type2 == typeof(double))
+				return (double)object1 * (double)object2;
+			else if (type1 == typeof(double) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) * (decimal)object2;
+			else if (type1 == typeof(decimal) && type2 == typeof(int))
+				return (decimal)object1 * Convert.ToDecimal(object2);
+			else if (type1 == typeof(decimal) && type2 == typeof(double))
+				return (decimal)object1 * Convert.ToDecimal(object2);
+			else if (type1 == typeof(decimal) && type2 == typeof(decimal))
+				return (decimal)object1 * (decimal)object2;
 
-			throw new LanguageException($"Cannot multiply a value of type '{tipo1.Name}' by a value of type '{tipo2.Name}'.");
+			throw new LanguageException($"Cannot multiply a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -77,60 +77,60 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (left is ConstantExpression && right is ConstantExpression)
 			{
-				var result = Execute();
-				return Expression.Constant(result, PromotesTo(left.Type, right.Type));
+				var folded = Execute();
+				return Expression.Constant(folded, PromotesTo(left.Type, right.Type));
 			}
 
-			Expression resultado = null;
+			Expression result = null;
 
 			if (left.Type == typeof(int) && right.Type == typeof(int))
 			{
-				resultado = Expression.Multiply(left, right);
+				result = Expression.Multiply(left, right);
 			}
 			else if (left.Type == typeof(int) && right.Type == typeof(double))
 			{
-				resultado = Expression.Multiply(Expression.Convert(left, typeof(double)), right);
+				result = Expression.Multiply(Expression.Convert(left, typeof(double)), right);
 			}
 			else if (left.Type == typeof(int) && right.Type == typeof(decimal))
 			{
-				resultado = Expression.Multiply(Expression.Convert(left, typeof(decimal)), right);
+				result = Expression.Multiply(Expression.Convert(left, typeof(decimal)), right);
 			}
 			else if (left.Type == typeof(double) && right.Type == typeof(int))
 			{
-				resultado = Expression.Multiply(left, Expression.Convert(right, typeof(double)));
+				result = Expression.Multiply(left, Expression.Convert(right, typeof(double)));
 			}
 			else if (left.Type == typeof(double) && right.Type == typeof(double))
 			{
-				resultado = Expression.Multiply(left, right);
+				result = Expression.Multiply(left, right);
 			}
 			else if (left.Type == typeof(double) && right.Type == typeof(decimal))
 			{
-				resultado = Expression.Multiply(Expression.Convert(left, typeof(decimal)), right);
+				result = Expression.Multiply(Expression.Convert(left, typeof(decimal)), right);
 			}
 			else if (left.Type == typeof(decimal) && right.Type == typeof(int))
 			{
-				resultado = Expression.Multiply(left, Expression.Convert(right, typeof(decimal)));
+				result = Expression.Multiply(left, Expression.Convert(right, typeof(decimal)));
 			}
 			else if (left.Type == typeof(decimal) && right.Type == typeof(double))
 			{
-				resultado = Expression.Multiply(left, Expression.Convert(right, typeof(decimal)));
+				result = Expression.Multiply(left, Expression.Convert(right, typeof(decimal)));
 			}
 			else if (left.Type == typeof(decimal) && right.Type == typeof(decimal))
 			{
-				resultado = Expression.Multiply(left, right);
+				result = Expression.Multiply(left, right);
 			}
 			else
 			{
 				throw new LanguageException($"Cannot multiply a value of type '{left.Type.Name}' by a value of type '{right.Type.Name}'.");
 			}
-			return resultado;
+			return result;
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" * ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" * ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

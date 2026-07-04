@@ -14,7 +14,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal abstract void ValidateStatically();
 
-		internal abstract void Write(StringBuilder resultado, int tabs, DatabaseType databaseType);
+		internal abstract void Write(StringBuilder result, int tabs, DatabaseType databaseType);
 
 		internal Program Program
 		{
@@ -37,10 +37,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return builder.ToString();
 		}
 
-		internal bool FueFiltrado { get; set; } = false;
+		internal bool WasFiltered { get; set; } = false;
 		internal void FiltrarQueries()
 		{
-			FueFiltrado = true;
+			WasFiltered = true;
 		}
 
 	}

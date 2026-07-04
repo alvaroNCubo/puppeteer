@@ -27,13 +27,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object objeto1 = e.Execute();
-			Type tipo1 = objeto1.GetType();
-			if (tipo1 != typeof(bool))
+			object object1 = e.Execute();
+			Type type1 = object1.GetType();
+			if (type1 != typeof(bool))
 			{
-				throw new LanguageException($"The NOT operator cannot operate on a value of type '{tipo1.Name}'.");
+				throw new LanguageException($"The NOT operator cannot operate on a value of type '{type1.Name}'.");
 			}
-			return !(bool)objeto1;
+			return !(bool)object1;
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -54,10 +54,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return Expression.Not(innerExpression);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append(" ! ");
-			e.write(resultado, databaseType);
+			result.Append(" ! ");
+			e.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

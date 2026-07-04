@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using Choreography.Input;
 using Choreography.Observability;
 using Puppeteer;
 
@@ -20,6 +21,12 @@ namespace Choreography.Dispatch
         private readonly Task[] workerTasks;
         private readonly CancellationTokenSource disposeCts = new();
         private readonly Action<CancellationToken> waitUntilAlive;
+
+        // Bound input sources (the MERGE). Each ConsumeFrom subscribes one
+        // IInputSource through a routing and feeds the routed commands into the
+        // single serial work queue above — so several sources reduce to ONE serial
+        // command flow. Disposed when the Dispatch is disposed.
+        private readonly ConcurrentBag<IDisposable> sourceSubscriptions = new();
 
         internal TaskMonitor Monitor { get; }
         private bool disposed;
@@ -86,6 +93,19 @@ namespace Choreography.Dispatch
 
         public void Receive(string messageId, string rawMessage)
         {
+            Receive(messageId, rawMessage, null);
+        }
+
+        // Overload that signals completion of the handler. onCompleted is
+        // invoked with true after the handler commits and false if it threw or
+        // was cancelled. A transport bridge uses this to ack the source record
+        // ONLY after the receiver's command is durable — the honest delivery
+        // semantics for a tell ("delivered" means "the receiver processed it"),
+        // never "the broker handed me the bytes". An already-processed message
+        // (idempotency hit) reports true so a redelivered record is re-acked;
+        // the origin de-duplicates the ack by tell id.
+        public void Receive(string messageId, string rawMessage, Action<bool> onCompleted)
+        {
             ArgumentNullException.ThrowIfNull(messageId);
             ArgumentNullException.ThrowIfNull(rawMessage);
             if (rawMessage.Length == 0) throw new ArgumentException("Message cannot be empty", nameof(rawMessage));
@@ -94,6 +114,7 @@ namespace Choreography.Dispatch
             if (idempotencyWindow.AlreadyProcessed(messageId))
             {
                 DispatchTracer.Instance.OnIdempotencyHit(messageId);
+                onCompleted?.Invoke(true);
                 return;
             }
 
@@ -102,8 +123,57 @@ namespace Choreography.Dispatch
             if (!handlers.TryGetValue(typeId, out var handler))
                 throw new LanguageException($"No handler registered for message type {typeId}");
 
-            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, null, null, null);
+            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, null, null, null, onCompleted);
             workQueue.Add(workItem);
+        }
+
+        // Consume FROM an input source through a routing — the seam that replaces
+        // the hand-wired `broker.Subscribe(topic, record => dispatch.Receive(...))`
+        // bridge. The source is the MEDIUM (Kafka / InProc / Loopback, behind
+        // IInputSource); the routing is the receiver's mapping signal -> command.
+        // Neither is hardcoded here: Dispatch sees only IInputSource + InputRouting.
+        //
+        // Calling ConsumeFrom more than once is the MERGE: every bound source feeds
+        // the same single serial work queue, so an actor animated by several media
+        // still runs one deterministic serial command flow (idempotency, alive-gate,
+        // and per-key saga locks all apply uniformly, regardless of which medium a
+        // signal arrived on).
+        //
+        // Routing that returns null DROPS the signal (e.g. an ack/control record on
+        // a shared topic): it is neither enqueued nor idempotency-recorded.
+        //
+        // Returns this Dispatch for fluent chaining of several sources.
+        public Dispatch ConsumeFrom(IInputSource source, InputRouting routing)
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            ArgumentNullException.ThrowIfNull(routing);
+            if (disposed) throw new ObjectDisposedException(nameof(Dispatch));
+
+            IDisposable subscription = source.Start(signal =>
+            {
+                DispatchCommand? command;
+                try
+                {
+                    command = routing(signal);
+                }
+                catch (Exception ex)
+                {
+                    // A routing that throws must not tear down the source: log and
+                    // drop this one signal, mirroring the brokers' deliver-safely
+                    // contract. The signal stays unconsumed (and, on a real broker,
+                    // redeliverable).
+                    DispatchTracer.Instance.OnHandlerFailed($"input-routing[{source.SourceName}]", ex);
+                    return;
+                }
+
+                if (command is not DispatchCommand cmd) return;   // routing dropped it
+                if (cmd.MessageId == null || string.IsNullOrEmpty(cmd.RawMessage)) return;
+
+                Receive(cmd.MessageId, cmd.RawMessage);
+            });
+
+            sourceSubscriptions.Add(subscription);
+            return this;
         }
 
         internal void ReceiveFromSaga(string messageId, string rawMessage,
@@ -125,7 +195,7 @@ namespace Choreography.Dispatch
             if (!handlers.TryGetValue(typeId, out var handler))
                 throw new LanguageException($"No handler registered for message type {typeId}");
 
-            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, sagaName, stepName, instanceKey);
+            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, sagaName, stepName, instanceKey, null);
             workQueue.Add(workItem);
         }
 
@@ -170,11 +240,13 @@ namespace Choreography.Dispatch
                 workItem.StepName,
                 workItem.InstanceKey);
 
+            bool succeeded = false;
             try
             {
                 workItem.Handler.Execute(actor, workItem.RawMessage, cts.Token);
                 Monitor.Complete(taskInfo);
                 span.SetOutcome(FlowOutcome.Success);
+                succeeded = true;
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested)
             {
@@ -191,6 +263,7 @@ namespace Choreography.Dispatch
             {
                 span.Dispose();
                 cts.Dispose();
+                NotifyCompletion(workItem.OnCompleted, succeeded);
             }
         }
 
@@ -198,6 +271,12 @@ namespace Choreography.Dispatch
         {
             if (disposed) return;
             disposed = true;
+
+            // Stop the medium first so no new signal is enqueued while we drain.
+            foreach (IDisposable subscription in sourceSubscriptions)
+            {
+                try { subscription.Dispose(); } catch { }
+            }
 
             workQueue.CompleteAdding();
             disposeCts.Cancel();
@@ -215,6 +294,20 @@ namespace Choreography.Dispatch
             disposeCts.Dispose();
         }
 
+        // A completion callback that throws must not poison the worker loop.
+        private static void NotifyCompletion(Action<bool> onCompleted, bool succeeded)
+        {
+            if (onCompleted == null) return;
+            try
+            {
+                onCompleted(succeeded);
+            }
+            catch (Exception ex)
+            {
+                DispatchTracer.Instance.OnHandlerFailed("dispatch-completion", ex);
+            }
+        }
+
         private readonly struct DispatchWorkItem
         {
             internal readonly IDispatchHandler Handler;
@@ -223,9 +316,10 @@ namespace Choreography.Dispatch
             internal readonly string SagaName;
             internal readonly string StepName;
             internal readonly string InstanceKey;
+            internal readonly Action<bool> OnCompleted;
 
             internal DispatchWorkItem(IDispatchHandler handler, string rawMessage, string messageId,
-                string sagaName, string stepName, string instanceKey)
+                string sagaName, string stepName, string instanceKey, Action<bool> onCompleted)
             {
                 Handler = handler;
                 RawMessage = rawMessage;
@@ -233,6 +327,7 @@ namespace Choreography.Dispatch
                 SagaName = sagaName;
                 StepName = stepName;
                 InstanceKey = instanceKey;
+                OnCompleted = onCompleted;
             }
         }
     }

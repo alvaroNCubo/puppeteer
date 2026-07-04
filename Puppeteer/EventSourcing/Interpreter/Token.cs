@@ -9,7 +9,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		ELSE,
 		EVAL,
 		IF,
-		FOR,
+		FOREACH,
 		IN,
 		upgrade,
 		tell,
@@ -111,7 +111,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		internal int Start => start;
 		internal int End => end;
 
-		internal ReadOnlySpan<char> GetValor(ReadOnlySpan<char> input)
+		internal ReadOnlySpan<char> GetValue(ReadOnlySpan<char> input)
 		{
 			if (!HasPosition())
 				return ReadOnlySpan<char>.Empty;
@@ -138,9 +138,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return result;
 		}
 
-		internal ReadOnlySpan<char> GetValor(string input)
+		internal ReadOnlySpan<char> GetValue(string input)
 		{
-			return this.GetValor(input.AsSpan());
+			return this.GetValue(input.AsSpan());
 		}
 
 		public override string ToString()

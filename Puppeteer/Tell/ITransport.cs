@@ -29,12 +29,12 @@ namespace Puppeteer.Tell
 		// receiver (B). Plan 6 will connect this handler to the journaling of actor A.
 		void RegisterAckHandler(Action<AckEnvelope> handler);
 
-		// Plan 10 — fate recovery. Self-identifying label of this transport, used
-		// as the witness in the non-delivery verdict the origin journals when this
-		// transport testifies a Failed fate (e.g. "Kafka:loyalty-v1"). Stable for
-		// the transport instance. The default keeps transports that predate fate
-		// recovery compiling while still producing a meaningful — if generic —
-		// witness.
+		// Self-identifying label of this transport (e.g. "Kafka:loyalty-v1"). It is
+		// transport provenance for runtime telemetry/logs ONLY — the journal records
+		// the non-delivery verdict logically ("unacknowledged by <Addressee>"), never
+		// naming the transport. Stable for the transport instance. The default keeps
+		// transports that predate this contract compiling while still producing a
+		// meaningful — if generic — telemetry label.
 		string WitnessName => "transport";
 
 		// Plan 10 — fate recovery, by citation (subpoena). On recovery the origin

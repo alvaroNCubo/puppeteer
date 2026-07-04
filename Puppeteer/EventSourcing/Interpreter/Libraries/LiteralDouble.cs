@@ -43,11 +43,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			patternAst.RegisterLiteral(value, ComputeType(), position);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
 			string text = value.ToString("0.######################");
-			resultado.Append(text);
-			if (text.IndexOf('.') == -1) resultado.Append(".0");
+			result.Append(text);
+			if (text.IndexOf('.') == -1) result.Append(".0");
 		}
 
 		internal override void Visit(ASTVisitor v)

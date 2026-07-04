@@ -14,14 +14,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			this.expression = expression;
 			this.reason = reason;
-			base.FueFiltrado = true;
+			base.WasFiltered = true;
 		}
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			object valorDeLaExpresion = expression.Execute();
-			bool cumpleCondicion = ((bool)valorDeLaExpresion);
-			if (!cumpleCondicion)
+			object expressionValue = expression.Execute();
+			bool conditionMet = ((bool)expressionValue);
+			if (!conditionMet)
 			{
 				StringBuilder sB = new StringBuilder();
 				expression.write(sB, DatabaseType.IN_MEMORY);
@@ -74,19 +74,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (reason != null) reason.Visit(v);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
 
 			if (expression != LiteralBoolean.LiteralTrue)
 			{
-				resultado.Append("Check (");
-				expression.write(resultado, databaseType);
-				resultado.Append(") ");
+				result.Append("Check (");
+				expression.write(result, databaseType);
+				result.Append(") ");
 			}
 
-			reason.Write(resultado, databaseType);
+			reason.Write(result, databaseType);
 		}
 	}
 }

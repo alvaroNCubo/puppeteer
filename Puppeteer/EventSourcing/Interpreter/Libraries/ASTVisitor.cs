@@ -18,7 +18,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			root.Visit(this);
 		}
 
-		internal abstract void OnVisit(AST nodo);
+		internal abstract void OnVisit(AST node);
 
 		internal Type Target
 		{

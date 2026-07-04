@@ -51,108 +51,108 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var type = ComputeType();
 			if (type == null)
 			{
-				Type tipo1 = e1.ComputeType();
-				Type tipo2 = e2.ComputeType();
-				throw new LanguageException($"Cannot add or concatenate a value of type '{tipo1.Name}' with a value of type '{tipo2.Name}'.");
+				Type type1 = e1.ComputeType();
+				Type type2 = e2.ComputeType();
+				throw new LanguageException($"Cannot add or concatenate a value of type '{type1.Name}' with a value of type '{type2.Name}'.");
 			}
 			ForcedType = type;
 		}
 
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			Type tipo1 = objeto1?.GetType();
+			object object1 = e1.Execute();
+			Type type1 = object1?.GetType();
 
 			if (this.CoercesToString)
 			{
-				if (tipo1 == typeof(int) || tipo1 == typeof(double) || tipo1 == typeof(decimal))
+				if (type1 == typeof(int) || type1 == typeof(double) || type1 == typeof(decimal))
 				{
-					objeto1 = objeto1?.ToString();
-					tipo1 = typeof(string);
+					object1 = object1?.ToString();
+					type1 = typeof(string);
 				}
 			}
 
-			object objeto2 = e2.Execute();
-			Type tipo2 = objeto2?.GetType();
+			object object2 = e2.Execute();
+			Type type2 = object2?.GetType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
+			if (type1 == typeof(int) && type2 == typeof(int))
 			{
-				return (int)objeto1 + (int)objeto2;
+				return (int)object1 + (int)object2;
 			}
-			else if (tipo1 == typeof(int) && tipo2 == typeof(double))
+			else if (type1 == typeof(int) && type2 == typeof(double))
 			{
-				return Convert.ToDouble(objeto1) + (double)objeto2;
+				return Convert.ToDouble(object1) + (double)object2;
 			}
-			else if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
+			else if (type1 == typeof(int) && type2 == typeof(decimal))
 			{
-				return Convert.ToDecimal(objeto1) + (decimal)objeto2;
+				return Convert.ToDecimal(object1) + (decimal)object2;
 			}
-			else if (tipo1 == typeof(double) && tipo2 == typeof(int))
+			else if (type1 == typeof(double) && type2 == typeof(int))
 			{
-				return (double)objeto1 + Convert.ToDouble(objeto2);
+				return (double)object1 + Convert.ToDouble(object2);
 			}
-			else if (tipo1 == typeof(double) && tipo2 == typeof(double))
+			else if (type1 == typeof(double) && type2 == typeof(double))
 			{
-				return (double)objeto1 + (double)objeto2;
+				return (double)object1 + (double)object2;
 			}
-			else if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
+			else if (type1 == typeof(double) && type2 == typeof(decimal))
 			{
-				return Convert.ToDecimal(objeto1) + (decimal)objeto2;
+				return Convert.ToDecimal(object1) + (decimal)object2;
 			}
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
+			else if (type1 == typeof(decimal) && type2 == typeof(int))
 			{
-				return (decimal)objeto1 + Convert.ToDecimal(objeto2);
+				return (decimal)object1 + Convert.ToDecimal(object2);
 			}
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
+			else if (type1 == typeof(decimal) && type2 == typeof(double))
 			{
-				return (decimal)objeto1 + Convert.ToDecimal(objeto2);
+				return (decimal)object1 + Convert.ToDecimal(object2);
 			}
-			else if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
+			else if (type1 == typeof(decimal) && type2 == typeof(decimal))
 			{
-				return (decimal)objeto1 + (decimal)objeto2;
+				return (decimal)object1 + (decimal)object2;
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(string))
+			else if (type1 == typeof(string) && type2 == typeof(string))
 			{
-				return (string)objeto1 + (string)objeto2;
+				return (string)object1 + (string)object2;
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(int))
+			else if (type1 == typeof(string) && type2 == typeof(int))
 			{
-				return (string)objeto1 + (int)objeto2;
+				return (string)object1 + (int)object2;
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(double))
+			else if (type1 == typeof(string) && type2 == typeof(double))
 			{
-				return (string)objeto1 + ((double)objeto2).ToString(CultureInfo.InvariantCulture);
+				return (string)object1 + ((double)object2).ToString(CultureInfo.InvariantCulture);
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(decimal))
+			else if (type1 == typeof(string) && type2 == typeof(decimal))
 			{
-				return (string)objeto1 + ((decimal)objeto2).ToString(CultureInfo.InvariantCulture);
+				return (string)object1 + ((decimal)object2).ToString(CultureInfo.InvariantCulture);
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(DateTime))
+			else if (type1 == typeof(string) && type2 == typeof(DateTime))
 			{
-				var valorDate = ((DateTime)objeto2);
-				if (valorDate.Hour == 0 && valorDate.Minute == 0 && valorDate.Second == 0)
-					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
+				var valueDate = ((DateTime)object2);
+				if (valueDate.Hour == 0 && valueDate.Minute == 0 && valueDate.Second == 0)
+					return (string)object1 + valueDate.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
 				else
-					return (string)objeto1 + valorDate.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
+					return (string)object1 + valueDate.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
 			}
-			else if (tipo1 == typeof(string) && tipo2 == typeof(bool))
+			else if (type1 == typeof(string) && type2 == typeof(bool))
 			{
-				return (string)objeto1 + ((bool)objeto2).ToString();
+				return (string)object1 + ((bool)object2).ToString();
 			}
-			else if (tipo1 == typeof(DateTime) && tipo2 == typeof(TimeSpan))
+			else if (type1 == typeof(DateTime) && type2 == typeof(TimeSpan))
 			{
-				return (DateTime)objeto1 + (TimeSpan)objeto2;
+				return (DateTime)object1 + (TimeSpan)object2;
 			}
-			else if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(DateTime))
+			else if (type1 == typeof(TimeSpan) && type2 == typeof(DateTime))
 			{
-				return (DateTime)objeto2 + (TimeSpan)objeto1;
+				return (DateTime)object2 + (TimeSpan)object1;
 			}
-			else if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(TimeSpan))
+			else if (type1 == typeof(TimeSpan) && type2 == typeof(TimeSpan))
 			{
-				return (TimeSpan)objeto1 + (TimeSpan)objeto2;
+				return (TimeSpan)object1 + (TimeSpan)object2;
 			}
 
-			throw new LanguageException($"The plus operator cannot add or concatenate values of types '{tipo1?.Name ?? "null"}' and '{tipo2?.Name ?? "null"}'.");
+			throw new LanguageException($"The plus operator cannot add or concatenate values of types '{type1?.Name ?? "null"}' and '{type2?.Name ?? "null"}'.");
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -178,8 +178,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				);
 			}
 
-			var tipo1 = expr1.Type;
-			var tipo2 = expr2.Type;
+			var type1 = expr1.Type;
+			var type2 = expr2.Type;
 
 			// Culture-invariant coercion to string for concatenation: dates
 			// use the fixed format MM/dd/yyyy and numbers the decimal separator '.',
@@ -217,29 +217,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Call(operand, typeof(object).GetMethod(nameof(object.ToString)));
 			}
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
+			if (type1 == typeof(int) && type2 == typeof(int))
 			{
 				return Expression.Add(expr1, expr2);
 			}
-			else if ((tipo1 == typeof(int) && tipo2 == typeof(double)) ||
-						(tipo1 == typeof(double) && tipo2 == typeof(int)) ||
-						(tipo1 == typeof(double) && tipo2 == typeof(double)))
+			else if ((type1 == typeof(int) && type2 == typeof(double)) ||
+						(type1 == typeof(double) && type2 == typeof(int)) ||
+						(type1 == typeof(double) && type2 == typeof(double)))
 			{
-				var left = tipo1 == typeof(double) ? expr1 : Expression.Convert(expr1, typeof(double));
-				var right = tipo2 == typeof(double) ? expr2 : Expression.Convert(expr2, typeof(double));
+				var left = type1 == typeof(double) ? expr1 : Expression.Convert(expr1, typeof(double));
+				var right = type2 == typeof(double) ? expr2 : Expression.Convert(expr2, typeof(double));
 				return Expression.Add(left, right);
 			}
-			else if ((tipo1 == typeof(int) && tipo2 == typeof(decimal)) ||
-						(tipo1 == typeof(decimal) && tipo2 == typeof(int)) ||
-						(tipo1 == typeof(decimal) && tipo2 == typeof(double)) ||
-						(tipo1 == typeof(double) && tipo2 == typeof(decimal)) ||
-						(tipo1 == typeof(decimal) && tipo2 == typeof(decimal)))
+			else if ((type1 == typeof(int) && type2 == typeof(decimal)) ||
+						(type1 == typeof(decimal) && type2 == typeof(int)) ||
+						(type1 == typeof(decimal) && type2 == typeof(double)) ||
+						(type1 == typeof(double) && type2 == typeof(decimal)) ||
+						(type1 == typeof(decimal) && type2 == typeof(decimal)))
 			{
-				var left = tipo1 == typeof(decimal) ? expr1 : Expression.Convert(expr1, typeof(decimal));
-				var right = tipo2 == typeof(decimal) ? expr2 : Expression.Convert(expr2, typeof(decimal));
+				var left = type1 == typeof(decimal) ? expr1 : Expression.Convert(expr1, typeof(decimal));
+				var right = type2 == typeof(decimal) ? expr2 : Expression.Convert(expr2, typeof(decimal));
 				return Expression.Add(left, right);
 			}
-			else if (tipo1 == typeof(string) || tipo2 == typeof(string))
+			else if (type1 == typeof(string) || type2 == typeof(string))
 			{
 				var left = CoerceToString(expr1);
 				var right = CoerceToString(expr2);
@@ -249,21 +249,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					typeof(string).GetMethod(nameof(String.Concat), new[] { typeof(string), typeof(string) })
 				);
 			}
-			else if (tipo1 == typeof(DateTime) && tipo2 == typeof(TimeSpan))
+			else if (type1 == typeof(DateTime) && type2 == typeof(TimeSpan))
 			{
 				return Expression.Add(expr1, expr2);
 			}
-			else if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(DateTime))
+			else if (type1 == typeof(TimeSpan) && type2 == typeof(DateTime))
 			{
 				return Expression.Add(expr2, expr1);
 			}
-			else if (tipo1 == typeof(TimeSpan) && tipo2 == typeof(TimeSpan))
+			else if (type1 == typeof(TimeSpan) && type2 == typeof(TimeSpan))
 			{
 				return Expression.Add(expr1, expr2);
 			}
 			else
 			{
-				var msg = $"The Plus operator cannot add or concatenate a {tipo1?.Name ?? "null"} and {tipo2?.Name ?? "null"}";
+				var msg = $"The Plus operator cannot add or concatenate a {type1?.Name ?? "null"} and {type2?.Name ?? "null"}";
 				var exceptionConstructor = typeof(LanguageException).GetConstructor(new[] { typeof(string) });
 				return Expression.Throw(
 					Expression.New(exceptionConstructor, Expression.Constant(msg)),
@@ -272,11 +272,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" + ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" + ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

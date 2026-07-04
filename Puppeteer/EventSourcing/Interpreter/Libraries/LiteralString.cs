@@ -76,7 +76,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 				output.Append('\'');
 			}
-			else if (databaseType == DatabaseType.IN_MEMORY || databaseType == DatabaseType.FileSystem)
+			else if (databaseType == DatabaseType.IN_MEMORY || databaseType == DatabaseType.FileSystem || databaseType == DatabaseType.PlainText)
 			{
 				output.Append('\'');
 				foreach (char c in value)

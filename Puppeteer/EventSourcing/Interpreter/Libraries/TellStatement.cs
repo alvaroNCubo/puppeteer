@@ -7,48 +7,41 @@ using System.Text;
 namespace Puppeteer.EventSourcing.Interpreter.Libraries
 {
 	// Family of statements that materialise the cross-actor `tell` primitive in the
-	// DSL. Plan 2 covered parsing + AST + render. Plan 3 added domain-library
-	// validation in parse-time. Plan 5 (this plan) wires Execute() to the journal
-	// and the transport: the rendered sentence reaches the journal automatically
-	// via Statement.Write (program.ConvertToString → dairy.WriteScriptEntryAsync),
-	// and the produced TellEnvelope is enqueued in symbolTable.PendingTells so that
-	// ActorHandler.PerformCmdAsync can drain it post-commit, outside the write lock.
+	// DSL. A `tell` is a directed assertive speech act: the sender commits, in its
+	// OWN vocabulary, to the truth of a proposition addressed to a hearer. It does
+	// not invoke the receiver and does not name how the message travels.
+	//
+	// The rendered sentence reaches the journal automatically via Statement.Write
+	// (program.ConvertToString → dairy WriteScriptEntry / Define+Invocation); the
+	// produced TellEnvelope is enqueued in symbolTable.PendingTells so that
+	// ActorHandler.PerformCmd can drain it post-commit, outside the write lock.
 	internal abstract class TellStatement : Statement
 	{
 		private readonly SymbolTable symbolTable;
 
-		// Optional id literal written by the developer. If null, Execute() assigns
-		// a stable deterministic hash so replay does not re-emit.
-		internal string IdLiteral { get; }
-
-		// Optional 'through' transport hint written by the developer. The journal
-		// omits it by default — only renders when present.
-		internal string ThroughLiteral { get; }
-
-		private protected TellStatement(SymbolTable symbolTable, string idLiteral, string throughLiteral)
+		private protected TellStatement(SymbolTable symbolTable)
 		{
 			ArgumentNullException.ThrowIfNull(symbolTable);
 			this.symbolTable = symbolTable;
-			IdLiteral = idLiteral;
-			ThroughLiteral = throughLiteral;
 		}
 
 		private protected SymbolTable SymbolTable => symbolTable;
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
-			throw new NotImplementedException("Tell compiled-mode execution is not implemented yet. Force AlwaysInterpreted mode on actors that need to participate in tells until a later plan adds compiled-mode support.");
+			// Unreachable by design: a `tell` has no compiled-mode lowering, so a
+			// program that contains one is forced to interpreted execution in
+			// Program.AdjustCompilationMode. The actor's other programs keep
+			// compiling — only the Reaction Causation body that holds the tell (a
+			// post-commit, non-hot path) interprets. Reaching here means that
+			// invariant was bypassed.
+			throw new LanguageException("Internal invariant violation: a 'tell' statement was reached under compiled execution. Programs that contain a tell must run interpreted (see Program.AdjustCompilationMode).");
 		}
 
 		internal override void ValidateStatically()
 		{
-			// Domain-library validation runs in parse-time (Plan 3).
 		}
 
-		// Plan 7 of the Tell primitive roadmap: registration of tell sentences
-		// in the patternAst is delegated to subclasses — they know which fields
-		// to evaluate. The base class is a no-op so subclasses without
-		// pattern-matchable shape (e.g. saga tells in Plan 8) can stay silent.
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
 		}
@@ -74,7 +67,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// does not require a configured Transport. The tell still runs its match
 			// and builds the envelope (journaled in the shadow's own storage), but
 			// the envelope is dropped at the drain step (ActorHandler PerformCmd) and
-			// never delivered to the real target actor.
+			// never delivered to the real receiver.
 			if (symbolTable.ActorHandler.IsShadow) return;
 
 			if (symbolTable.ActorHandler.Transport == null)
@@ -83,14 +76,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Tell is a Reaction-Action-only statement. Cross-actor causation
-		// is a consequence of an intra-actor event observed by a Reaction,
-		// not a command/query primitive. Allowing `tell` from
-		// PerformCommand / PerformQuery would let any caller dispatch
-		// outbound traffic outside the observer pattern — breaking the
-		// discipline that makes the journal a faithful catalog of what the
-		// actor decided to say. Run inside a Reaction's .Causation.Continue(...)
-		// body or remove the statement.
+		// Tell is a Reaction-Action-only statement. Cross-actor causation is a
+		// consequence of an intra-actor event observed by a Reaction, not a
+		// command/query primitive. Allowing `tell` from PerformCommand / PerformQuery
+		// would let any caller dispatch outbound traffic outside the observer
+		// pattern — breaking the discipline that makes the journal a faithful catalog
+		// of what the actor decided to say. Run inside a Reaction's
+		// .Causation.Continue(...) body or remove the statement.
 		private protected void EnsureInReactionAction()
 		{
 			if (!symbolTable.ActorHandler.InReactionAction)
@@ -99,16 +91,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Records the originating entry id for an envelope id so the ack-side
-		// elision (Plan 6 (A)) can find this tell when the matching ack arrives.
-		// Also marks the entry as single-tell-eligible when the program contains
-		// exactly one TellStatement — the framework only emits MarkAsSkip on the
-		// pair when both entries are single-statement (entry-coarse elision API).
+		// Records the originating entry id for an envelope id so the ack-side elision
+		// can find this tell when the matching ack arrives. Also marks the entry as
+		// single-tell-eligible when the program contains exactly one TellStatement —
+		// the framework only emits MarkAsSkip on the pair when both entries are
+		// single-statement (entry-coarse elision API).
 		private protected void RegisterTellEntryForElision(string envelopeId)
 		{
-			if (Program == null) return; // No program context (e.g. unit tests rendering directly) → cannot wire elision.
+			if (Program == null) return;
 			long entryId = Program.EntryId;
-			if (entryId <= 0) return; // No entry id assigned (e.g. PerformQuery or ad-hoc execution) → no elision possible.
+			if (entryId <= 0) return;
 			SymbolTable.RegisterTellEnvelopeEntry(envelopeId, entryId);
 			if (Program.HasSingleTellStatement)
 			{
@@ -116,76 +108,86 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Plan 10 of the Tell primitive roadmap: capture the minimal facts a
-		// pending tell needs for post-rehydration fate recovery. Called ONLY on the
-		// replay branch (RecoveringState) — the live path keeps the full envelope
-		// in PendingTells, so it needs no recovery record. The witness for a
-		// non-delivery verdict is the developer's `through` literal when present;
-		// when absent the recovery pass falls back to the transport's WitnessName.
-		private protected void RegisterTellRecoveryInfo(string envelopeId, string targetClass, object targetIdValue)
+		// Capture the minimal facts a pending tell needs for post-rehydration fate
+		// recovery. Called ONLY on the replay branch (RecoveringState) — the live
+		// path keeps the full envelope in PendingTells, so it needs no recovery
+		// record. The verdict the recovery pass later journals is LOGICAL (names the
+		// addressee, never the transport), so only the addressee facts are kept.
+		private protected void RegisterTellRecoveryInfo(string envelopeId, string addressee, object addresseeInstanceValue)
 		{
 			SymbolTable.RegisterTellRecoveryInfo(
 				envelopeId,
-				new TellRecoveryInfo(targetClass, targetIdValue?.ToString(), ThroughLiteral));
+				new TellRecoveryInfo(addressee, addresseeInstanceValue?.ToString()));
 		}
 
-		// Render the command-call text for the journal sentence + envelope.CommandText.
-		// This IS allocating (StringBuilder + string). It is unavoidable: the receiving
-		// side parses command-call text, and the journal sentence has to be a string
-		// for the existing dairy.WriteScriptEntry pipeline. The allocation is made
-		// once per outbound tell — never on the dedup-lookup hot path.
-		private protected static string RenderCommandCall(string commandName, AstExpression[] commandArgs)
+		// Collect the ordered typed VALUES of the `with` payload into a Parameters
+		// object — the data that travels to the receiver. Reactions never compute: a
+		// captured `@token` arg is a parameter reference whose value was matched from
+		// the journal and is already present (and already serialized) in the program's
+		// live Parameters, so it is read BY NAME. A literal arg evaluates directly and
+		// is typed from its runtime value. Values are serialized in order via
+		// ArgumentsAsString; the parameter names/types never travel (the receiver
+		// applies them positionally to the command it already holds). Returns null
+		// when the message carries no payload.
+		private protected Parameters CollectWithValues(AstExpression[] withArgs)
 		{
-			StringBuilder sb = new StringBuilder();
-			sb.Append(commandName);
-			sb.Append("(");
-			for (int i = 0; i < commandArgs.Length; i++)
+			if (withArgs == null || withArgs.Length == 0) return null;
+
+			Parameters source = Program?.Parameters;
+			Parameters collected = null;
+			for (int i = 0; i < withArgs.Length; i++)
 			{
-				if (i > 0) sb.Append(", ");
-				commandArgs[i].write(sb, DatabaseType.IN_MEMORY);
+				AstExpression arg = withArgs[i];
+				if (arg is Id id && source != null && source.ContainsParameter(id.Name))
+				{
+					Parameter p = source[id.Name];
+					collected ??= new Parameters();
+					collected[p.Name, p.ParameterType] = p.GetValue();
+					continue;
+				}
+
+				object value = arg.Execute();
+				collected ??= new Parameters();
+				string name = "arg" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+				collected[name, value?.GetType() ?? typeof(object)] = value;
 			}
-			sb.Append(")");
-			return sb.ToString();
+			return collected;
 		}
 
-		// Evaluate the target-id expression to a runtime value. The downstream code
-		// branches on the returned object directly (string / int / long / etc.) so
-		// no defensive ToString() is performed here — that would alloc on the hot
-		// path for non-string ids. envelope.TargetId stays string-shaped because
-		// the transport serialises it; we render to string only when constructing
-		// the envelope for an outbound send (never on replay).
-		private protected static object EvaluateTargetId(AstExpression targetId)
+		// Resolve a `with` argument to its runtime VALUE without requiring the arg to
+		// be bound as a symbol. A captured `@token` is read BY NAME from the live
+		// Parameters (the same source CollectWithValues uses); a literal or constant
+		// evaluates directly. This is what lets the content-hash fold the captured
+		// values: Reactions never compute, so the captures are not bound for
+		// Id.Execute() in the reaction-action scope, but their values are present in
+		// Program.Parameters.
+		private protected object ResolveArgValue(AstExpression arg)
 		{
-			return targetId?.Execute();
+			if (arg is Id id)
+			{
+				Parameters source = Program?.Parameters;
+				if (source != null && source.ContainsParameter(id.Name))
+				{
+					return source[id.Name].GetValue();
+				}
+			}
+			return arg.Execute();
+		}
+
+		// Evaluate an expression (e.g. the addressee instance id) to a runtime value.
+		// The downstream code branches on the returned object directly so no defensive
+		// ToString() is performed here.
+		private protected static object EvaluateExpr(AstExpression expr)
+		{
+			return expr?.Execute();
 		}
 
 		// FNV-1a 64-bit. Public-domain, fast, deterministic across runs and
-		// processes — exactly what dedup needs. We use it directly on
-		// ReadOnlySpan<char> and on primitive value bytes to avoid the
-		// per-execute string allocations the previous SHA-256 version did.
+		// processes — exactly what content-hash identity needs. Used directly on
+		// ReadOnlySpan<char> and on primitive value bytes to avoid per-execute string
+		// allocations.
 		private protected const long FNV_OFFSET_BASIS = unchecked((long)0xcbf29ce484222325UL);
 		private protected const long FNV_PRIME = unchecked((long)0x100000001b3UL);
-
-		// Deterministic 64-bit identity for an implicit tell — derived from the
-		// target class, target id value, command name, and arg values. Returns the
-		// same long for the same logical tell across runs, so SymbolTable
-		// .IsImplicitTellApplied recognises replays and duplicates without ever
-		// constructing a string id on the lookup path.
-		private protected static long ComputeImplicitTellHash(string targetClass, object targetIdValue, string commandName, AstExpression[] commandArgs)
-		{
-			long h = FNV_OFFSET_BASIS;
-			h = FoldString(h, targetClass);
-			h = FoldSeparator(h);
-			h = FoldValue(h, targetIdValue);
-			h = FoldSeparator(h);
-			h = FoldString(h, commandName);
-			for (int i = 0; i < commandArgs.Length; i++)
-			{
-				h = FoldSeparator(h);
-				h = FoldValue(h, commandArgs[i].Execute());
-			}
-			return h;
-		}
 
 		private protected static long FoldSeparator(long h)
 		{
@@ -214,12 +216,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return h;
 		}
 
-		// Mix any value reachable from the DSL (literals, evaluated expressions)
-		// into the running FNV hash. The common cases (string, int, long, double,
-		// bool, null) are zero-alloc. Boxed primitives unbox via pattern matching;
-		// no ToString fallback runs on those paths. Truly exotic types fall through
-		// to ToString() — that path allocates, but it is also vanishingly rare in
-		// the kind of tells the framework expects.
+		// Mix any value reachable from the DSL (literals, evaluated expressions) into
+		// the running FNV hash. The common cases (string, int, long, double, bool,
+		// null) are zero-alloc.
 		private protected static long FoldValue(long h, object value)
 		{
 			switch (value)
@@ -251,97 +250,90 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// Format the implicit hash as the envelope.Id when the developer omitted
-		// `id 'X'`. This is the single string allocation the implicit path takes,
-		// and only when an envelope is actually constructed for outbound delivery
-		// — replay never reaches here because Execute short-circuits on
+		// Format a content hash as the envelope.Id when the developer omitted
+		// `once 'X'`. This is the single string allocation the content-hash path
+		// takes, and only when an envelope is actually constructed for outbound
+		// delivery — replay never reaches here because Execute short-circuits on
 		// RecoveringState before constructing the envelope.
-		private protected static string FormatImplicitEnvelopeId(long hash)
+		private protected static string FormatContentHash(long hash)
 		{
 			return hash.ToString("x16");
 		}
-
-		// Helpers shared by subclasses for rendering trailing `id 'X'` and `through 'Y'`.
-		private protected void WriteIdTrailer(StringBuilder resultado)
-		{
-			if (IdLiteral == null) return;
-			resultado.Append("\r\tid '");
-			resultado.Append(IdLiteral);
-			resultado.Append("'");
-		}
-
-		private protected void WriteThroughTrailer(StringBuilder resultado)
-		{
-			if (ThroughLiteral == null) return;
-			resultado.Append("\r\tthrough '");
-			resultado.Append(ThroughLiteral);
-			resultado.Append("'");
-		}
 	}
 
-	// Form 1: `tell <Target>[(<targetId>)] <Command>(<args>) [id <id>] [through <s>]`.
-	// When TargetId is null, this is a pure broadcast (e.g. `tell Reporting OrderConfirmed(...)`).
-	// When TargetId is present, it is an addressed tell to a specific actor instance.
-	internal sealed class BasicTellStatement : TellStatement
+	// The assertive `tell`:
+	//   tell <Message> [with <v1, v2, ...>] to <Addressee>[('<instanceId>')] [once '<id>'];
+	//
+	// <Message> is a fact the sender lived, named in ITS OWN vocabulary (never the
+	// receiver's verb). The `with` values are the payload and deduce the typed
+	// signature of the message-action (reusing V2 Action journaling). `to <Addressee>`
+	// is the hearer (a logical role); the optional ('<instanceId>') is a specific
+	// instance the sender can name. Per-utterance identity defaults to the content
+	// hash of (message, addressee, instance, ordered values); the optional `once`
+	// literal pins it to an author-chosen key for an idempotent singleton utterance.
+	internal sealed class AssertiveTellStatement : TellStatement
 	{
-		internal string TargetClass { get; }
-		internal AstExpression TargetId { get; }
-		internal string CommandName { get; }
-		internal AstExpression[] CommandArgs { get; }
+		internal string MessageName { get; }
+		internal AstExpression[] WithArgs { get; }
+		internal string Addressee { get; }
+		internal AstExpression AddresseeInstanceId { get; }
+		// Optional `once '<literal>'`. When present, the per-utterance identity IS the
+		// literal (content does NOT enter the identity), so N utterances under the
+		// same key collapse to one commitment. Null → content-hash identity.
+		internal string OnceLiteral { get; }
 
-		internal BasicTellStatement(SymbolTable symbolTable, string targetClass, AstExpression targetId, string commandName, AstExpression[] commandArgs, string idLiteral, string throughLiteral)
-			: base(symbolTable, idLiteral, throughLiteral)
+		internal AssertiveTellStatement(SymbolTable symbolTable, string messageName, AstExpression[] withArgs, string addressee, AstExpression addresseeInstanceId, string onceLiteral)
+			: base(symbolTable)
 		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(targetClass);
-			ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
-			ArgumentNullException.ThrowIfNull(commandArgs);
+			ArgumentException.ThrowIfNullOrWhiteSpace(messageName);
+			ArgumentNullException.ThrowIfNull(withArgs);
+			ArgumentException.ThrowIfNullOrWhiteSpace(addressee);
 
-			TargetClass = targetClass;
-			TargetId = targetId;
-			CommandName = commandName;
-			CommandArgs = commandArgs;
+			MessageName = messageName;
+			WithArgs = withArgs;
+			Addressee = addressee;
+			AddresseeInstanceId = addresseeInstanceId;
+			OnceLiteral = onceLiteral;
 		}
 
-		// Plan 7 of the Tell primitive roadmap: register this outbound tell as
-		// a script-side ScriptTellStatement so the matcher (PatternMatcher) can
-		// compare it against TellPatternNode entries in the Reaction's pattern.
-		// Argument expressions are evaluated here — same contract as the matcher
-		// uses for ScriptMethodCall (arguments captured as their resolved values).
+		// Register this outbound tell as a script-side ScriptTellStatement so the
+		// matcher (PatternMatcher) can compare it against TellPatternNode entries in
+		// the Reaction's pattern. Argument expressions are resolved to their values
+		// here — same contract the matcher uses for ScriptMethodCall.
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			object targetIdValue = EvaluateTargetId(TargetId);
-			object[] commandArgsValues = new object[CommandArgs.Length];
-			for (int i = 0; i < CommandArgs.Length; i++)
+			object instanceValue = EvaluateExpr(AddresseeInstanceId);
+			object[] withValues = new object[WithArgs.Length];
+			for (int i = 0; i < WithArgs.Length; i++)
 			{
-				commandArgsValues[i] = CommandArgs[i].Execute();
+				withValues[i] = ResolveArgValue(WithArgs[i]);
 			}
-			string envelopeId = IdLiteral
-				?? FormatImplicitEnvelopeId(ComputeImplicitTellHash(TargetClass, targetIdValue, CommandName, CommandArgs));
-			patternAst.RegisterTellStatement(TargetClass, targetIdValue, CommandName, commandArgsValues, envelopeId, position++);
+			string envelopeId = OnceLiteral
+				?? FormatContentHash(ComputeContentHash(MessageName, Addressee, instanceValue, WithArgs));
+			patternAst.RegisterTellStatement(MessageName, Addressee, instanceValue, withValues, envelopeId, position++);
 		}
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			// Replay short-circuit (see SymbolTable.appliedImplicitTellHashes /
-			// .appliedExplicitTellIds for rationale): mark the dedup entry so live
-			// executes after recovery are no-ops, but do NOT enqueue an envelope —
-			// the transport must not see ghost messages from rehydration.
+			// Replay short-circuit: mark the dedup entry so live executes after
+			// recovery are no-ops, but do NOT enqueue an envelope — the transport must
+			// not see ghost messages from rehydration.
 			if (SymbolTable.RecoveringState)
 			{
-				if (IdLiteral != null)
+				object instanceValueReplay = EvaluateExpr(AddresseeInstanceId);
+				if (OnceLiteral != null)
 				{
-					SymbolTable.MarkExplicitTellApplied(IdLiteral);
-					RegisterTellEntryForElision(IdLiteral);
-					RegisterTellRecoveryInfo(IdLiteral, TargetClass, EvaluateTargetId(TargetId));
+					SymbolTable.MarkExplicitTellApplied(OnceLiteral);
+					RegisterTellEntryForElision(OnceLiteral);
+					RegisterTellRecoveryInfo(OnceLiteral, Addressee, instanceValueReplay);
 				}
 				else
 				{
-					object targetIdValueRecovery = EvaluateTargetId(TargetId);
-					long hashRecovery = ComputeImplicitTellHash(TargetClass, targetIdValueRecovery, CommandName, CommandArgs);
-					string implicitEnvelopeIdRecovery = FormatImplicitEnvelopeId(hashRecovery);
-					SymbolTable.MarkImplicitTellApplied(hashRecovery);
-					RegisterTellEntryForElision(implicitEnvelopeIdRecovery);
-					RegisterTellRecoveryInfo(implicitEnvelopeIdRecovery, TargetClass, targetIdValueRecovery);
+					long hashReplay = ComputeContentHash(MessageName, Addressee, instanceValueReplay, WithArgs);
+					string envelopeIdReplay = FormatContentHash(hashReplay);
+					SymbolTable.MarkImplicitTellApplied(hashReplay);
+					RegisterTellEntryForElision(envelopeIdReplay);
+					RegisterTellRecoveryInfo(envelopeIdReplay, Addressee, instanceValueReplay);
 				}
 				return;
 			}
@@ -349,361 +341,135 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			EnsureInReactionAction();
 			EnsureTransportConfigured();
 
-			// Explicit branch — developer wrote `id 'X'`. Reuse the string verbatim
-			// for both the dedup key and the envelope id; no fabrication.
-			if (IdLiteral != null)
+			object instanceValue = EvaluateExpr(AddresseeInstanceId);
+
+			// Explicit branch — developer wrote `once 'X'`. Identity IS the literal.
+			if (OnceLiteral != null)
 			{
-				if (SymbolTable.IsExplicitTellApplied(IdLiteral)) return;
+				if (SymbolTable.IsExplicitTellApplied(OnceLiteral)) return;
 
-				object targetIdValueExplicit = EvaluateTargetId(TargetId);
-				string commandTextExplicit = RenderCommandCall(CommandName, CommandArgs);
-
-				TellEnvelope envelopeExplicit = new TellEnvelope(
-					Id: IdLiteral,
-					TargetClass: TargetClass,
-					TargetId: targetIdValueExplicit?.ToString(),
-					CommandText: commandTextExplicit,
-					Transport: ThroughLiteral,
+				TellEnvelope envelopeOnce = new TellEnvelope(
+					Id: OnceLiteral,
+					MessageName: MessageName,
+					Addressee: Addressee,
+					AddresseeInstanceId: instanceValue?.ToString(),
 					CausalEventId: null,
 					ReactionName: null,
-					Check: SymbolTable.CurrentCausationCheck);
+					Check: SymbolTable.CurrentCausationCheck,
+					Values: CollectWithValues(WithArgs));
 
-				SymbolTable.MarkExplicitTellApplied(IdLiteral);
-				SymbolTable.EnqueuePendingTell(envelopeExplicit);
-				RegisterTellEntryForElision(IdLiteral);
+				SymbolTable.MarkExplicitTellApplied(OnceLiteral);
+				SymbolTable.EnqueuePendingTell(envelopeOnce);
+				RegisterTellEntryForElision(OnceLiteral);
 				return;
 			}
 
-			// Implicit branch — no `id 'X'`. Dedup with FNV-1a long; envelope.Id is
-			// the long formatted as 16-char hex (the single string alloc the
-			// implicit path takes, and only when an envelope is actually built).
-			object targetIdValue = EvaluateTargetId(TargetId);
-			long hash = ComputeImplicitTellHash(TargetClass, targetIdValue, CommandName, CommandArgs);
-
+			// Default branch — content-hash identity over the values.
+			long hash = ComputeContentHash(MessageName, Addressee, instanceValue, WithArgs);
 			if (SymbolTable.IsImplicitTellApplied(hash)) return;
 
-			string commandText = RenderCommandCall(CommandName, CommandArgs);
-			string implicitEnvelopeId = FormatImplicitEnvelopeId(hash);
+			string envelopeId = FormatContentHash(hash);
 			TellEnvelope envelope = new TellEnvelope(
-				Id: implicitEnvelopeId,
-				TargetClass: TargetClass,
-				TargetId: targetIdValue?.ToString(),
-				CommandText: commandText,
-				Transport: ThroughLiteral,
+				Id: envelopeId,
+				MessageName: MessageName,
+				Addressee: Addressee,
+				AddresseeInstanceId: instanceValue?.ToString(),
 				CausalEventId: null,
-				ReactionName: null);
+				ReactionName: null,
+				Check: SymbolTable.CurrentCausationCheck,
+				Values: CollectWithValues(WithArgs));
 
 			SymbolTable.MarkImplicitTellApplied(hash);
 			SymbolTable.EnqueuePendingTell(envelope);
-			RegisterTellEntryForElision(implicitEnvelopeId);
+			RegisterTellEntryForElision(envelopeId);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
-		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("tell ");
-			resultado.Append(TargetClass);
-			if (TargetId != null)
-			{
-				resultado.Append("(");
-				TargetId.write(resultado, databaseType);
-				resultado.Append(")");
-			}
-			resultado.Append("\r\t");
-			resultado.Append(CommandName);
-			resultado.Append("(");
-			for (int i = 0; i < CommandArgs.Length; i++)
-			{
-				if (i > 0) resultado.Append(", ");
-				CommandArgs[i].write(resultado, databaseType);
-			}
-			resultado.Append(")");
-			WriteIdTrailer(resultado);
-			WriteThroughTrailer(resultado);
-			// Plan 9 of the Tell primitive roadmap: emit trailing semicolon so
-			// the rendered sentence parses cleanly when the journal replays it
-			// through the same parser that produced the AST in the first place.
-			resultado.Append(";");
-		}
-	}
-
-	// Form 2: `tell <SagaActor>(<sagaId>) start|step|compensate|close <Command>(<args>) [id <id>] [through <s>]`.
-	// The saga verb is part of the program — auditors read the journal and immediately see
-	// progression, compensation, or closure. Saga always carries a sagaId in parens.
-	internal enum SagaVerb
-	{
-		Start,
-		Step,
-		Compensate,
-		Close
-	}
-
-	internal sealed class TellSagaStatement : TellStatement
-	{
-		internal string SagaActor { get; }
-		internal AstExpression SagaId { get; }
-		internal SagaVerb Verb { get; }
-		internal string CommandName { get; }
-		internal AstExpression[] CommandArgs { get; }
-
-		internal TellSagaStatement(SymbolTable symbolTable, string sagaActor, AstExpression sagaId, SagaVerb verb, string commandName, AstExpression[] commandArgs, string idLiteral, string throughLiteral)
-			: base(symbolTable, idLiteral, throughLiteral)
-		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(sagaActor);
-			ArgumentNullException.ThrowIfNull(sagaId);
-			ArgumentException.ThrowIfNullOrWhiteSpace(commandName);
-			ArgumentNullException.ThrowIfNull(commandArgs);
-
-			SagaActor = sagaActor;
-			SagaId = sagaId;
-			Verb = verb;
-			CommandName = commandName;
-			CommandArgs = commandArgs;
-		}
-
-		internal static string VerbToken(SagaVerb verb)
-		{
-			return verb switch
-			{
-				SagaVerb.Start => "start",
-				SagaVerb.Step => "step",
-				SagaVerb.Compensate => "compensate",
-				SagaVerb.Close => "close",
-				_ => throw new LanguageException($"Unknown saga verb '{verb}'.")
-			};
-		}
-
-		internal override void Execute(ExecutionOutput output)
-		{
-			object sagaIdValue = EvaluateTargetId(SagaId);
-			string sagaIdString = sagaIdValue?.ToString();
-			long currentEntryId = Program?.EntryId ?? 0;
-
-			if (SymbolTable.RecoveringState)
-			{
-				// Replay path: rebuild dedup tables AND saga cursor state, but
-				// do NOT enqueue envelopes (Plan 5 invariant) and tolerate
-				// already-applied transitions (Plan 8 — replay is journal-truth,
-				// invariant-violations on the storage are facts, not new errors).
-				if (IdLiteral != null)
-				{
-					SymbolTable.MarkExplicitTellApplied(IdLiteral);
-					RegisterTellEntryForElision(IdLiteral);
-					RegisterTellRecoveryInfo(IdLiteral, SagaActor, sagaIdValue);
-				}
-				else
-				{
-					long hashRecovery = ComputeImplicitSagaHash(SagaActor, sagaIdValue, Verb, CommandName, CommandArgs);
-					string implicitEnvelopeIdRecovery = FormatImplicitEnvelopeId(hashRecovery);
-					SymbolTable.MarkImplicitTellApplied(hashRecovery);
-					RegisterTellEntryForElision(implicitEnvelopeIdRecovery);
-					RegisterTellRecoveryInfo(implicitEnvelopeIdRecovery, SagaActor, sagaIdValue);
-				}
-
-				if (sagaIdString != null)
-				{
-					SagaCursor cursorReplay = SymbolTable.GetOrCreateSagaCursor(SagaActor, sagaIdString);
-					ApplySagaTransitionAtReplay(cursorReplay, currentEntryId);
-					if (Verb == SagaVerb.Close) ReEmitTrajectoryElisionAtReplay(cursorReplay);
-				}
-				return;
-			}
-
-			EnsureInReactionAction();
-			EnsureTransportConfigured();
-
-			// Plan 8 live-path: enforce saga state-machine invariants BEFORE
-			// running any envelope-emitting work. Illegal transitions (start
-			// twice, step on a closed saga, etc.) raise LanguageException so the
-			// developer sees the bug at execute time rather than as a silent
-			// pile-up of inconsistent saga state.
-			SagaCursor cursor = null;
-			if (sagaIdString != null)
-			{
-				cursor = SymbolTable.GetOrCreateSagaCursor(SagaActor, sagaIdString);
-				ApplySagaTransitionLive(cursor, currentEntryId);
-			}
-
-			string commandCall = RenderCommandCall(CommandName, CommandArgs);
-			string commandText = $"{VerbToken(Verb)} {commandCall}";
-
-			// Explicit branch.
-			if (IdLiteral != null)
-			{
-				if (SymbolTable.IsExplicitTellApplied(IdLiteral))
-				{
-					// Already executed in a previous PerformCmd within this actor's
-					// live session. The state machine has already been advanced at
-					// the original call; do not advance it twice.
-					return;
-				}
-
-				TellEnvelope envelopeExplicit = new TellEnvelope(
-					Id: IdLiteral,
-					TargetClass: SagaActor,
-					TargetId: sagaIdString,
-					CommandText: commandText,
-					Transport: ThroughLiteral,
-					CausalEventId: null,
-					ReactionName: null,
-					Check: SymbolTable.CurrentCausationCheck);
-
-				SymbolTable.MarkExplicitTellApplied(IdLiteral);
-				SymbolTable.EnqueuePendingTell(envelopeExplicit);
-				RegisterTellEntryForElision(IdLiteral);
-
-				if (Verb == SagaVerb.Close && cursor != null) EmitTrajectoryElisionLive(cursor);
-				return;
-			}
-
-			// Implicit branch.
-			long hash = ComputeImplicitSagaHash(SagaActor, sagaIdValue, Verb, CommandName, CommandArgs);
-
-			if (SymbolTable.IsImplicitTellApplied(hash)) return;
-
-			string implicitEnvelopeId = FormatImplicitEnvelopeId(hash);
-			TellEnvelope envelope = new TellEnvelope(
-				Id: implicitEnvelopeId,
-				TargetClass: SagaActor,
-				TargetId: sagaIdString,
-				CommandText: commandText,
-				Transport: ThroughLiteral,
-				CausalEventId: null,
-				ReactionName: null);
-
-			SymbolTable.MarkImplicitTellApplied(hash);
-			SymbolTable.EnqueuePendingTell(envelope);
-			RegisterTellEntryForElision(implicitEnvelopeId);
-
-			if (Verb == SagaVerb.Close && cursor != null) EmitTrajectoryElisionLive(cursor);
-		}
-
-		private void ApplySagaTransitionLive(SagaCursor cursor, long entryId)
-		{
-			switch (Verb)
-			{
-				case SagaVerb.Start: cursor.TransitionStart(entryId); break;
-				case SagaVerb.Step: cursor.TransitionStep(entryId); break;
-				case SagaVerb.Compensate: cursor.TransitionCompensate(entryId); break;
-				case SagaVerb.Close: cursor.TransitionClose(entryId); break;
-				default: throw new LanguageException($"Unknown saga verb '{Verb}'.");
-			}
-		}
-
-		private void ApplySagaTransitionAtReplay(SagaCursor cursor, long entryId)
-		{
-			switch (Verb)
-			{
-				case SagaVerb.Start: cursor.ReplayStart(entryId); break;
-				case SagaVerb.Step: cursor.ReplayStep(entryId); break;
-				case SagaVerb.Compensate: cursor.ReplayCompensate(entryId); break;
-				case SagaVerb.Close: cursor.ReplayClose(entryId); break;
-				default: throw new LanguageException($"Unknown saga verb '{Verb}'.");
-			}
-		}
-
-		private void EmitTrajectoryElisionLive(SagaCursor cursor)
-		{
-			if (SymbolTable.ActorHandler == null) return;
-			SymbolTable.ActorHandler.EmitSagaTrajectoryElision(cursor.TrajectoryEntryIds.ToArray());
-		}
-
-		private void ReEmitTrajectoryElisionAtReplay(SagaCursor cursor)
-		{
-			if (SymbolTable.ActorHandler == null) return;
-			SymbolTable.ActorHandler.EmitSagaTrajectoryElision(cursor.TrajectoryEntryIds.ToArray());
-		}
-
-		// Saga shares the same FNV-1a folding as basic tell, but mixes in the verb
-		// so two structurally identical sentences with different verbs (e.g. step
-		// vs compensate of the same payload) hash to distinct longs and therefore
-		// dedupe independently — they ARE distinct effects on the saga.
-		private static long ComputeImplicitSagaHash(string sagaActor, object sagaIdValue, SagaVerb verb, string commandName, AstExpression[] commandArgs)
+		// Deterministic 64-bit identity for a content-hashed tell — derived from the
+		// message name, addressee, addressee instance, and the ordered `with` values.
+		// Returns the same long for the same logical utterance across runs, so distinct
+		// events hash distinctly and a true re-utterance hashes identically.
+		private long ComputeContentHash(string messageName, string addressee, object instanceValue, AstExpression[] withArgs)
 		{
 			long h = FNV_OFFSET_BASIS;
-			h = FoldString(h, sagaActor);
+			h = FoldString(h, messageName);
 			h = FoldSeparator(h);
-			h = FoldValue(h, sagaIdValue);
+			h = FoldString(h, addressee);
 			h = FoldSeparator(h);
-			h = FoldLong(h, (long)verb);
-			h = FoldSeparator(h);
-			h = FoldString(h, commandName);
-			for (int i = 0; i < commandArgs.Length; i++)
+			h = FoldValue(h, instanceValue);
+			for (int i = 0; i < withArgs.Length; i++)
 			{
 				h = FoldSeparator(h);
-				h = FoldValue(h, commandArgs[i].Execute());
+				h = FoldValue(h, ResolveArgValue(withArgs[i]));
 			}
 			return h;
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("tell ");
-			resultado.Append(SagaActor);
-			resultado.Append("(");
-			SagaId.write(resultado, databaseType);
-			resultado.Append(") ");
-			resultado.Append(VerbToken(Verb));
-			resultado.Append(" ");
-			resultado.Append(CommandName);
-			resultado.Append("(");
-			for (int i = 0; i < CommandArgs.Length; i++)
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("tell ");
+			result.Append(MessageName);
+			if (WithArgs.Length > 0)
 			{
-				if (i > 0) resultado.Append(", ");
-				CommandArgs[i].write(resultado, databaseType);
+				result.Append(" with ");
+				for (int i = 0; i < WithArgs.Length; i++)
+				{
+					if (i > 0) result.Append(", ");
+					WithArgs[i].write(result, databaseType);
+				}
 			}
-			resultado.Append(")");
-			WriteIdTrailer(resultado);
-			WriteThroughTrailer(resultado);
-			// Plan 9: trailing semicolon so journal replay re-parses cleanly.
-			resultado.Append(";");
+			result.Append(" to ");
+			result.Append(Addressee);
+			if (AddresseeInstanceId != null)
+			{
+				result.Append("(");
+				AddresseeInstanceId.write(result, databaseType);
+				result.Append(")");
+			}
+			if (OnceLiteral != null)
+			{
+				result.Append(" once '");
+				result.Append(OnceLiteral);
+				result.Append("'");
+			}
+			result.Append(";");
 		}
 	}
 
-	// Form 3: `tell ack <ackId> from <Target>(<targetId>)`.
-	// Recorded in the journal of the actor of origin (A) when the transport delivers an
-	// acknowledgement coming from B. B is unaware of this primitive — it just emits a
-	// regular event that the transport routes back to A's ack channel.
-	//
-	// Plan 5 leaves Execute as a no-op: ack ingestion comes from the transport via
-	// RegisterAckHandler, not from a developer-authored DSL line. Plan 6 wires the
-	// handler so the rendered ack sentence ends up in the journal automatically and
-	// MarkAsSkip closes the tell+ack pair.
+	// Framework-emitted journal sentence (never user-authored):
+	//   tell ack '<id>' from <Addressee>[('<instanceId>')];
+	// Recorded in A's journal when the transport delivers an acknowledgement from the
+	// addressee. `<id>` is the utterance's content identity; `from <Addressee>` names
+	// the logical hearer that acknowledged — both things A can truthfully say.
 	internal sealed class TellAckStatement : TellStatement
 	{
 		internal string AckId { get; }
-		internal string FromTargetClass { get; }
-		internal AstExpression FromTargetId { get; }
+		internal string FromAddressee { get; }
+		internal AstExpression FromAddresseeInstanceId { get; }
 
-		internal TellAckStatement(SymbolTable symbolTable, string ackId, string fromTargetClass, AstExpression fromTargetId)
-			: base(symbolTable, idLiteral: null, throughLiteral: null)
+		internal TellAckStatement(SymbolTable symbolTable, string ackId, string fromAddressee, AstExpression fromAddresseeInstanceId)
+			: base(symbolTable)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(ackId);
-			ArgumentException.ThrowIfNullOrWhiteSpace(fromTargetClass);
-			ArgumentNullException.ThrowIfNull(fromTargetId);
+			ArgumentException.ThrowIfNullOrWhiteSpace(fromAddressee);
 
 			AckId = ackId;
-			FromTargetClass = fromTargetClass;
-			FromTargetId = fromTargetId;
+			FromAddressee = fromAddressee;
+			FromAddresseeInstanceId = fromAddresseeInstanceId;
 		}
 
-		// Plan 7 of the Tell primitive roadmap: register this ack as a
-		// script-side ScriptTellAckStatement so the matcher can compare it
-		// against TellAckPatternNode entries in the Reaction's pattern.
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			object fromTargetIdValue = FromTargetId?.Execute();
-			patternAst.RegisterTellAckStatement(AckId, FromTargetClass, fromTargetIdValue, position++);
+			object fromInstanceValue = EvaluateExpr(FromAddresseeInstanceId);
+			patternAst.RegisterTellAckStatement(AckId, FromAddressee, fromInstanceValue, position++);
 		}
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			// Replay path: rebuild ack dedup state and re-emit pair elision if
-			// the live HandleAckEnvelope call was interrupted between writing
-			// the ack entry and emitting the elision marker. Idempotent.
+			// Replay path: rebuild ack dedup state and re-emit pair elision if the live
+			// HandleAckEnvelope call was interrupted between writing the ack entry and
+			// emitting the elision marker. Idempotent.
 			if (SymbolTable.RecoveringState)
 			{
 				SymbolTable.MarkTellEnvelopeIdAcked(AckId);
@@ -721,90 +487,79 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return;
 			}
 
-			// Live path: `tell ack` is never authored by user code. Acks
-			// enter the journal exclusively through the transport's
-			// RegisterAckHandler callback in ActorHandler.HandleAckEnvelope.
-			// A live execution here means a script wrote `tell ack ...`
-			// directly in a PerformCommand or a Reaction's
-			// .Causation.Continue(...) body — both are contract violations.
+			// Live path: `tell ack` is never authored by user code. Acks enter the
+			// journal exclusively through the transport's RegisterAckHandler callback
+			// in ActorHandler.HandleAckEnvelope.
 			throw new LanguageException("'tell ack' is journaled by the ack handler of the transport, not by user code. It cannot be issued from a script (PerformCommand, PerformQuery, or a Reaction's .Causation.Continue(...) body). Remove the 'tell ack' statement from the script.");
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("tell ack '");
-			resultado.Append(AckId);
-			resultado.Append("' from ");
-			resultado.Append(FromTargetClass);
-			resultado.Append("(");
-			FromTargetId.write(resultado, databaseType);
-			resultado.Append(")");
-			// Plan 9: trailing semicolon so journal replay re-parses cleanly.
-			resultado.Append(";");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("tell ack '");
+			result.Append(AckId);
+			result.Append("' from ");
+			result.Append(FromAddressee);
+			if (FromAddresseeInstanceId != null)
+			{
+				result.Append("(");
+				FromAddresseeInstanceId.write(result, databaseType);
+				result.Append(")");
+			}
+			result.Append(";");
 		}
 	}
 
-	// Form 4: `tell '<envelopeId>' not delivered, per '<witness>';`.
-	// Recorded in the journal of the origin actor (A) when the transport testifies
-	// — by declaration (failure callback) or by citation (recovery GetFateAsync) —
-	// that an issued tell will NOT be delivered (dead-letter / exhausted retries).
-	// It is the terminal NON-delivery verdict, the failure-side counterpart of
+	// Framework-emitted journal sentence (never user-authored):
+	//   tell '<id>' unacknowledged by <Addressee>;
+	// The terminal NON-acknowledgement verdict, the failure-side counterpart of
 	// `tell ack`: together they make the journal self-sufficient about the FATE of
-	// every issued tell (issued -> acked OR not-delivered-with-witness), not merely
-	// its issuance. Without it, a send lost to the crash window between journal
-	// commit and post-commit dispatch is journaled as issued yet silently never
-	// delivered, never acked, and unrecoverable.
-	//
-	// Like `tell ack`, it is journaled by the framework (the transport's failure
-	// handler / the recovery pass), never authored by user code. Plan 10 of the
-	// Tell primitive roadmap.
-	internal sealed class TellNotDeliveredStatement : TellStatement
+	// every issued tell. It is LOGICAL — A asserts the absence of an acknowledgement
+	// from the addressee, a thing A can truthfully say. Which transport testified
+	// (and why: dead-letter vs exhausted retries) is provenance for telemetry, never
+	// the journal. Recorded by the transport's failure handler / the recovery pass.
+	internal sealed class TellUnacknowledgedStatement : TellStatement
 	{
 		internal string EnvelopeIdLiteral { get; }
-		internal string WitnessLiteral { get; }
+		internal string Addressee { get; }
 
-		internal TellNotDeliveredStatement(SymbolTable symbolTable, string envelopeId, string witness)
-			: base(symbolTable, idLiteral: null, throughLiteral: null)
+		internal TellUnacknowledgedStatement(SymbolTable symbolTable, string envelopeId, string addressee)
+			: base(symbolTable)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
-			ArgumentException.ThrowIfNullOrWhiteSpace(witness);
+			ArgumentException.ThrowIfNullOrWhiteSpace(addressee);
 
 			EnvelopeIdLiteral = envelopeId;
-			WitnessLiteral = witness;
+			Addressee = addressee;
 		}
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			// Replay path: rebuild the TERMINAL not-delivered dedup state so a
-			// later recovery pass does not re-query the transport for an envelope
-			// whose fate the journal already records. Idempotent.
+			// Replay path: rebuild the TERMINAL not-acknowledged dedup state so a later
+			// recovery pass does not re-query the transport for an envelope whose fate
+			// the journal already records. Idempotent.
 			if (SymbolTable.RecoveringState)
 			{
 				SymbolTable.MarkTellEnvelopeIdNotDelivered(EnvelopeIdLiteral);
 				return;
 			}
 
-			// Live path: `tell ... not delivered` is never authored by user code.
-			// Non-delivery verdicts enter the journal exclusively through the
-			// transport's failure handler (ActorHandler.HandleTellFailure) or the
-			// post-rehydration recovery pass. A live execution here means a script
-			// wrote it directly — a contract violation, same discipline as `tell ack`.
-			throw new LanguageException("'tell ... not delivered' is journaled by the transport's failure handler / recovery pass, not by user code. It cannot be issued from a script (PerformCommand, PerformQuery, or a Reaction's .Causation.Continue(...) body). Remove the statement from the script.");
+			// Live path: never authored by user code — non-acknowledgement verdicts
+			// enter the journal exclusively through the transport's failure handler
+			// (ActorHandler.HandleTellFailure) or the post-rehydration recovery pass.
+			throw new LanguageException("'tell ... unacknowledged by' is journaled by the transport's failure handler / recovery pass, not by user code. It cannot be issued from a script (PerformCommand, PerformQuery, or a Reaction's .Causation.Continue(...) body). Remove the statement from the script.");
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("tell '");
-			resultado.Append(EnvelopeIdLiteral);
-			resultado.Append("' not delivered, per '");
-			resultado.Append(WitnessLiteral);
-			resultado.Append("'");
-			// Plan 9: trailing semicolon so journal replay re-parses cleanly.
-			resultado.Append(";");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("tell '");
+			result.Append(EnvelopeIdLiteral);
+			result.Append("' unacknowledged by ");
+			result.Append(Addressee);
+			result.Append(";");
 		}
 	}
 }

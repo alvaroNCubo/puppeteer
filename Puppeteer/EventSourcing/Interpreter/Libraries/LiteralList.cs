@@ -17,50 +17,50 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			var tipoDeLaLista = ComputeType();
-			if (tipoDeLaLista == typeof(List<int>))
+			var listType = ComputeType();
+			if (listType == typeof(List<int>))
 			{
 				List<int> res = new List<int>(elements.Length);
 				foreach (var e in elements) res.Add((int)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<string>))
+			else if (listType == typeof(List<string>))
 			{
 				List<string> res = new List<string>(elements.Length);
 				foreach (var e in elements) res.Add((string)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<DateTime>))
+			else if (listType == typeof(List<DateTime>))
 			{
 				List<DateTime> res = new List<DateTime>(elements.Length);
 				foreach (var e in elements) res.Add((DateTime)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<double>))
+			else if (listType == typeof(List<double>))
 			{
 				List<double> res = new List<double>(elements.Length);
 				foreach (var e in elements) res.Add((double)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<decimal>))
+			else if (listType == typeof(List<decimal>))
 			{
 				List<decimal> res = new List<decimal>(elements.Length);
 				foreach (var e in elements) res.Add((decimal)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<bool>))
+			else if (listType == typeof(List<bool>))
 			{
 				List<bool> res = new List<bool>(elements.Length);
 				foreach (var e in elements) res.Add((bool)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == typeof(List<object>))
+			else if (listType == typeof(List<object>))
 			{
 				List<object> res = new List<object>(elements.Length);
 				foreach (var e in elements) res.Add((object)e.Execute());
 				return res;
 			}
-			else if (tipoDeLaLista == null)
+			else if (listType == null)
 			{
 				List<object> res = new List<object>(elements.Length);
 				return res;
@@ -161,37 +161,37 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override Type ComputeType()
 		{
-			Type tipoDeLaLista = null;
+			Type listType = null;
 			foreach (AstExpression e in elements)
 			{
-				Type tipoDelElemento = e.ComputeType();
-				if (tipoDeLaLista != null && tipoDelElemento != null && tipoDeLaLista != tipoDelElemento)
-					throw new LanguageException($"Invalid element type. Element is a {tipoDelElemento} while List of {tipoDeLaLista}");
-				if (tipoDeLaLista == null) tipoDeLaLista = tipoDelElemento;
+				Type elementType = e.ComputeType();
+				if (listType != null && elementType != null && listType != elementType)
+					throw new LanguageException($"Invalid element type. Element is a {elementType} while List of {listType}");
+				if (listType == null) listType = elementType;
 			}
-			if (tipoDeLaLista == typeof(int)) return typeof(List<int>);
-			if (tipoDeLaLista == typeof(string)) return typeof(List<string>);
-			if (tipoDeLaLista == typeof(DateTime)) return typeof(List<DateTime>);
-			if (tipoDeLaLista == typeof(double)) return typeof(List<double>);
-			if (tipoDeLaLista == typeof(decimal)) return typeof(List<decimal>);
-			if (tipoDeLaLista == typeof(bool)) return typeof(List<bool>);
+			if (listType == typeof(int)) return typeof(List<int>);
+			if (listType == typeof(string)) return typeof(List<string>);
+			if (listType == typeof(DateTime)) return typeof(List<DateTime>);
+			if (listType == typeof(double)) return typeof(List<double>);
+			if (listType == typeof(decimal)) return typeof(List<decimal>);
+			if (listType == typeof(bool)) return typeof(List<bool>);
 
 			return typeof(List<object>);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append('{');
+			result.Append('{');
 			for (int i = 0; i < elements.Length; i++)
 			{
 				if (i > 0)
 				{
-					resultado.Append(',');
-					resultado.Append(' ');
+					result.Append(',');
+					result.Append(' ');
 				}
-				elements[i].write(resultado, databaseType);
+				elements[i].write(result, databaseType);
 			}
-			resultado.Append('}');
+			result.Append('}');
 		}
 	}
 }

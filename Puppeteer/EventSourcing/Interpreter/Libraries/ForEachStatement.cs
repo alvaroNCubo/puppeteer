@@ -9,31 +9,31 @@ using System.Text;
 
 namespace Puppeteer.EventSourcing.Interpreter.Libraries
 {
-	class ForStatement : Statement
+	class ForEachStatement : Statement
 	{
 		private readonly Id variable;
-		private readonly Id variableIndice;
-		private readonly bool soloIndice;
+		private readonly Id indexVariable;
+		private readonly bool indexOnly;
 		private readonly SymbolTable symbolTable;
 		private AstExpression expression;
 		private readonly Statement body;
 
-		internal ForStatement(SymbolTable symbolTable, Id variable, AstExpression expression, Statement body)
+		internal ForEachStatement(SymbolTable symbolTable, Id variable, AstExpression expression, Statement body)
 		{
 			this.symbolTable = symbolTable;
 			this.variable = variable;
 			this.expression = expression;
 			this.body = body;
-			this.variableIndice = null;
-			this.soloIndice = false;
+			this.indexVariable = null;
+			this.indexOnly = false;
 		}
 
-		internal ForStatement(SymbolTable symbolTable, Id variableIndice, Id variableElemento, bool soloIndice, AstExpression expression, Statement body)
+		internal ForEachStatement(SymbolTable symbolTable, Id indexVariable, Id variableElemento, bool indexOnly, AstExpression expression, Statement body)
 		{
 			this.symbolTable = symbolTable;
-			this.variableIndice = variableIndice;
+			this.indexVariable = indexVariable;
 			this.variable = variableElemento;
-			this.soloIndice = soloIndice;
+			this.indexOnly = indexOnly;
 			this.expression = expression;
 			this.body = body;
 		}
@@ -46,11 +46,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal Id VariableIndice
+		internal Id IndexVariable
 		{
 			get
 			{
-				return variableIndice;
+				return indexVariable;
 			}
 		}
 
@@ -64,39 +64,39 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			bool bodyEsUnBloque = this.body is BlockStatement;
-			if (bodyEsUnBloque && ((BlockStatement)this.body).IsEmpty)
+			bool bodyIsBlock = this.body is BlockStatement;
+			if (bodyIsBlock && ((BlockStatement)this.body).IsEmpty)
 			{
 				return;
 			}
 
 			Type elementType;
 			IEnumerator iterador;
-			var expresionEvaluada = expression.Execute();
-			if (expresionEvaluada is IEnumerable)
+			var evaluatedExpression = expression.Execute();
+			if (evaluatedExpression is IEnumerable)
 			{
-				var valoresDeLaExpresion = (expresionEvaluada as IEnumerable).GetEnumerator();
-				var expressionType = expresionEvaluada.GetType();
+				var expressionValues = (evaluatedExpression as IEnumerable).GetEnumerator();
+				var expressionType = evaluatedExpression.GetType();
 
-				int[] unArreglo = Array.Empty<int>();
+				int[] anArray = Array.Empty<int>();
 
-				if (valoresDeLaExpresion.GetType() == unArreglo.GetEnumerator().GetType())
+				if (expressionValues.GetType() == anArray.GetEnumerator().GetType())
 				{
 
 					elementType = expressionType.GetElementType();
 				}
 				else
 				{
-					elementType = valoresDeLaExpresion.GetType().GenericTypeArguments[0];
+					elementType = expressionValues.GetType().GenericTypeArguments[0];
 				}
 				if (typeof(object).IsAssignableFrom(elementType))
 				{
-					iterador = valoresDeLaExpresion;
+					iterador = expressionValues;
 				}
 				else
 				{
 					List<object> listaTemp = new List<object>();
-					foreach (var elemento in (expresionEvaluada as IEnumerable))
+					foreach (var elemento in (evaluatedExpression as IEnumerable))
 					{
 						listaTemp.Add(elemento);
 					}
@@ -105,42 +105,42 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else
 			{
-				throw new LanguageException("The value of the 'for' expression is neither a List nor an IEnumerable.");
+				throw new LanguageException("The value of the 'foreach' expression is neither a List nor an IEnumerable.");
 			}
 
-			output.OpenFor();
+			output.OpenForEach();
 
-			if (!bodyEsUnBloque)
+			if (!bodyIsBlock)
 			{
 				if (Program != null) Program.lastExecutedStatement = body;
 			}
 
-			int indiceCurrent = 0;
+			int currentIndex = 0;
 			while (iterador.MoveNext())
 			{
 				object element = iterador.Current;
-				output.BeginForMoveNext();
-				if (variableIndice != null)
+				output.BeginForEachMoveNext();
+				if (indexVariable != null)
 				{
-					variableIndice.Store(indiceCurrent, typeof(int));
+					indexVariable.Store(currentIndex, typeof(int));
 				}
-				if (!soloIndice)
+				if (!indexOnly)
 				{
 					variable.Store(element, elementType);
 				}
 				body.Execute(output);
-				output.EndForMoveNext();
-				indiceCurrent++;
+				output.EndForEachMoveNext();
+				currentIndex++;
 			}
 
-			output.CloseFor(soloIndice ? "_" : variable.Name);
+			output.CloseForEach(indexOnly ? "_" : variable.Name);
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
-			Expression expresionExp = this.expression.ExecuteExpression(parametersParam);
+			Expression expressionExp = this.expression.ExecuteExpression(parametersParam);
 
-			Type collectionType = expresionExp.Type;
+			Type collectionType = expressionExp.Type;
 
 			Type elementType;
 
@@ -150,9 +150,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				//IEnumerator<int> e = arr.GetEnumerator(); << Genera Unable to cast object of type 'SZArrayEnumerator'
 				//IEnumerator<int> e = ((IEnumerable<int>)arr).GetEnumerator(); << Solucion
 				elementType = collectionType.GetElementType();
-				var CastArregloType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
-				expresionExp = Expression.Convert(expresionExp, CastArregloType);
-				collectionType = CastArregloType;
+				var CastArrayType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
+				expressionExp = Expression.Convert(expressionExp, CastArrayType);
+				collectionType = CastArrayType;
 			}
 			else if (collectionType.IsGenericType)
 			{
@@ -172,12 +172,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				elementType = null;
 			}
 
-			if (elementType == null && !soloIndice)
+			if (elementType == null && !indexOnly)
 			{
 				this.variable.ForcedType = typeof(object);
 			}
 
-			string nuevaVariable = soloIndice ? "_for_iter_" : this.variable.Name;
+			string newVariable = indexOnly ? "_foreach_iter_" : this.variable.Name;
 
 			ParameterExpression varIterador;
 			Type iEnumeratorType;
@@ -186,7 +186,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Expression variableCreation;
 			ParameterExpression iteratorVarDeclaration;
 
-			if (!soloIndice)
+			if (!indexOnly)
 			{
 				if (this.variable.IsOriginalLValueDeclaration)
 				{
@@ -202,20 +202,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else
 			{
 				variableCreation = Expression.Empty();
-				iteratorVarDeclaration = Expression.Variable(typeof(object), "_for_iter_discard_");
+				iteratorVarDeclaration = Expression.Variable(typeof(object), "_foreach_iter_discard_");
 			}
 
 			if (elementType != null && collectionType.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>)))
 			{
 				// Use generic path only if the type implements IEnumerable<T>
 				iEnumeratorType = typeof(IEnumerator<>).MakeGenericType(new[] { elementType });
-				varIterador = Expression.Variable(iEnumeratorType, nuevaVariable);
+				varIterador = Expression.Variable(iEnumeratorType, newVariable);
 
 				var genericEnumerableType = typeof(IEnumerable<>).MakeGenericType(elementType);
 				MethodInfo getEnumeratorMethod = genericEnumerableType.GetMethod(nameof(IEnumerable.GetEnumerator), Array.Empty<Type>());
 
 				iterador = Expression.Call(
-					Expression.Convert(expresionExp, genericEnumerableType),
+					Expression.Convert(expressionExp, genericEnumerableType),
 					getEnumeratorMethod
 				);
 				iterador = Expression.Assign(varIterador, Expression.Convert(iterador, iEnumeratorType));
@@ -224,10 +224,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				// Fallback to non-generic
 				iEnumeratorType = typeof(IEnumerator);
-				varIterador = Expression.Variable(iEnumeratorType, nuevaVariable);
+				varIterador = Expression.Variable(iEnumeratorType, newVariable);
 
 				iterador = Expression.Call(
-					Expression.Convert(expresionExp, typeof(IEnumerable)),
+					Expression.Convert(expressionExp, typeof(IEnumerable)),
 					typeof(IEnumerable).GetMethod(nameof(IEnumerable.GetEnumerator), Array.Empty<Type>())
 				);
 				iterador = Expression.Assign(varIterador, iterador);
@@ -243,72 +243,72 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				typeof(IEnumerator).GetMethod(nameof(IEnumerator.MoveNext), Array.Empty<Type>())
 			);
 
-			Expression salidaExp = outputParam;
+			Expression outputExp = outputParam;
 
-			Expression salidaAbrirFor = Expression.Call(
-				salidaExp,
-				typeof(Output).GetMethod(nameof(Output.OpenFor), BindingFlags.Instance | BindingFlags.NonPublic)
+			Expression outputOpenFor = Expression.Call(
+				outputExp,
+				typeof(Output).GetMethod(nameof(Output.OpenForEach), BindingFlags.Instance | BindingFlags.NonPublic)
 			);
 
-			Expression inicioMoveNextDelFor = Expression.Call(
-				salidaExp,
-				typeof(Output).GetMethod(nameof(Output.BeginForMoveNext), BindingFlags.Instance | BindingFlags.NonPublic)
+			Expression forMoveNextStart = Expression.Call(
+				outputExp,
+				typeof(Output).GetMethod(nameof(Output.BeginForEachMoveNext), BindingFlags.Instance | BindingFlags.NonPublic)
 			);
 
-			var objetoField = typeof(VariableSymbol).GetField(
+			var objectField = typeof(VariableSymbol).GetField(
 				nameof(VariableSymbol.value),
 				BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly
 			);
 
 			Expression variableStore;
-			if (!soloIndice)
+			if (!indexOnly)
 			{
 				Expression varExp = this.variable.ExecuteExpression(parametersParam);
-				variableStore = Expression.Assign(Expression.Field(varExp, objetoField), Expression.Convert(currentExp, typeof(object)));
+				variableStore = Expression.Assign(Expression.Field(varExp, objectField), Expression.Convert(currentExp, typeof(object)));
 			}
 			else
 			{
 				variableStore = Expression.Empty();
 			}
 
-			Expression finMoveNextDelFor = Expression.Call(
+			Expression forMoveNextEnd = Expression.Call(
 				outputParam,
-				typeof(Output).GetMethod(nameof(Output.EndForMoveNext), BindingFlags.Instance | BindingFlags.NonPublic)
+				typeof(Output).GetMethod(nameof(Output.EndForEachMoveNext), BindingFlags.Instance | BindingFlags.NonPublic)
 			);
 
-			Expression indiceStore = Expression.Empty();
-			Expression indiceIncrement = Expression.Empty();
-			ParameterExpression indiceIteratorDeclaration = null;
+			Expression indexStore = Expression.Empty();
+			Expression indexIncrement = Expression.Empty();
+			ParameterExpression indexIteratorDeclaration = null;
 
-			if (variableIndice != null)
+			if (indexVariable != null)
 			{
-				Expression indiceCreation;
-				if (variableIndice.LValueStorageExpression != null)
+				Expression indexCreation;
+				if (indexVariable.LValueStorageExpression != null)
 				{
-					indiceCreation = Expression.Empty();
+					indexCreation = Expression.Empty();
 				}
-				else if (variableIndice.IsOriginalLValueDeclaration)
+				else if (indexVariable.IsOriginalLValueDeclaration)
 				{
-					indiceCreation = variableIndice.AllocateStorageExpression(parametersParam, useLValueReference: variableIndice.IsLValue);
+					indexCreation = indexVariable.AllocateStorageExpression(parametersParam, useLValueReference: indexVariable.IsLValue);
 				}
 				else
 				{
-					indiceCreation = Expression.Empty();
+					indexCreation = Expression.Empty();
 				}
 
-				indiceIteratorDeclaration = (ParameterExpression)variableIndice.LValueStorageExpression;
+				indexIteratorDeclaration = (ParameterExpression)indexVariable.LValueStorageExpression;
 
-				Expression indiceVarExp = variableIndice.ExecuteExpression(parametersParam);
-				indiceStore = Expression.Block(
-					indiceCreation,
-					Expression.Assign(Expression.Field(indiceVarExp, objetoField), Expression.Convert(Expression.Constant(0), typeof(object)))
+				Expression indexVarExp = indexVariable.ExecuteExpression(parametersParam);
+				indexStore = Expression.Block(
+					indexCreation,
+					Expression.Assign(Expression.Field(indexVarExp, objectField), Expression.Convert(Expression.Constant(0), typeof(object)))
 				);
 
-				indiceIncrement = Expression.Assign(
-					Expression.Field(indiceVarExp, objetoField),
+				indexIncrement = Expression.Assign(
+					Expression.Field(indexVarExp, objectField),
 					Expression.Convert(
 						Expression.Add(
-							Expression.Convert(Expression.Field(indiceVarExp, objetoField), typeof(int)),
+							Expression.Convert(Expression.Field(indexVarExp, objectField), typeof(int)),
 							Expression.Constant(1)
 						),
 						typeof(object)
@@ -318,39 +318,39 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			Expression cuerpoExp = this.body.ExecuteExpression(parametersParam, outputParam);
 
-			Expression bloqueCiclo = Expression.Block(
-				inicioMoveNextDelFor,
+			Expression loopBlock = Expression.Block(
+				forMoveNextStart,
 				variableStore,
 				cuerpoExp,
-				indiceIncrement,
-				finMoveNextDelFor
+				indexIncrement,
+				forMoveNextEnd
 			);
 
-			string cerrarForName = soloIndice ? "_" : this.variable.Name;
-			Expression salidaCerrarFor = Expression.Call(
-				salidaExp,
-				typeof(Output).GetMethod(nameof(Output.CloseFor), BindingFlags.Instance | BindingFlags.NonPublic),
+			string cerrarForName = indexOnly ? "_" : this.variable.Name;
+			Expression outputCloseFor = Expression.Call(
+				outputExp,
+				typeof(Output).GetMethod(nameof(Output.CloseForEach), BindingFlags.Instance | BindingFlags.NonPublic),
 				Expression.Constant(cerrarForName)
 			);
 
 			LabelTarget finCiclo = Expression.Label();
 
 			var blockVariables = new List<ParameterExpression> { varIterador, iteratorVarDeclaration };
-			if (indiceIteratorDeclaration != null)
-				blockVariables.Add(indiceIteratorDeclaration);
+			if (indexIteratorDeclaration != null)
+				blockVariables.Add(indexIteratorDeclaration);
 
-			var blockExpressions = new List<Expression> { variableCreation, indiceStore, iterador, salidaAbrirFor };
+			var blockExpressions = new List<Expression> { variableCreation, indexStore, iterador, outputOpenFor };
 			blockExpressions.Add(
 				Expression.Loop(
 					Expression.IfThenElse(
 						moveNext,
-						bloqueCiclo,
+						loopBlock,
 						Expression.Break(finCiclo)
 					),
 					finCiclo
 				)
 			);
-			blockExpressions.Add(salidaCerrarFor);
+			blockExpressions.Add(outputCloseFor);
 
 			Expression blockExpr = Expression.Block(
 				blockVariables,
@@ -389,15 +389,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else
 			{
-				throw new LanguageException($"A 'for' statement can only be executed when its expression is of type List, but found type '{collectionType.Name}'.");
+				throw new LanguageException($"A 'foreach' statement can only be executed when its expression is of type List, but found type '{collectionType.Name}'.");
 			}
 
-			if (variableIndice != null)
+			if (indexVariable != null)
 			{
-				variableIndice.ForcedType = typeof(int);
+				indexVariable.ForcedType = typeof(int);
 			}
 
-			if (!soloIndice && elementType != null)
+			if (!indexOnly && elementType != null)
 			{
 				this.variable.ForcedType = elementType;
 			}
@@ -412,12 +412,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		}
 
 		// B.3.1: include both loop variables (when present), iteration source,
-		// and body so two for-loops with different shapes hash distinctly.
+		// and body so two foreach-loops with different shapes hash distinctly.
 		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
 		{
-			hc.Add(nameof(ForStatement));
-			hc.Add(soloIndice ? 1 : 0);
-			if (variableIndice != null) { hc.Add(1); variableIndice.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
+			hc.Add(nameof(ForEachStatement));
+			hc.Add(indexOnly ? 1 : 0);
+			if (indexVariable != null) { hc.Add(1); indexVariable.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
 			if (variable != null) { hc.Add(1); variable.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
 			expression.AccumulatePromotionCandidateHash(ref hc);
 			body.AccumulatePromotionCandidateHash(ref hc);
@@ -429,35 +429,35 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				v.OnVisit(this);
 			}
-			if (variableIndice != null) variableIndice.Visit(v);
-			if (!soloIndice) variable.Visit(v);
+			if (indexVariable != null) indexVariable.Visit(v);
+			if (!indexOnly) variable.Visit(v);
 			expression.Visit(v);
 			body.Visit(v);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("For ( ");
-			if (variableIndice != null)
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("foreach ( ");
+			if (indexVariable != null)
 			{
-				resultado.Append(variableIndice.Name);
-				resultado.Append(", ");
-				resultado.Append(soloIndice ? "_" : variable.Name);
+				result.Append(indexVariable.Name);
+				result.Append(", ");
+				result.Append(indexOnly ? "_" : variable.Name);
 			}
 			else
 			{
-				resultado.Append(variable.Name);
+				result.Append(variable.Name);
 			}
-			resultado.Append(" : ");
-			expression.write(resultado, databaseType);
-			resultado.Append(" )\r");
+			result.Append(" in ");
+			expression.write(result, databaseType);
+			result.Append(" )\r");
 			if (!(body is BlockStatement))
 			{
 				tabs++;
 			}
-			body.Write(resultado, tabs, databaseType);
+			body.Write(result, tabs, databaseType);
 			if (!(body is BlockStatement))
 			{
 				tabs--;

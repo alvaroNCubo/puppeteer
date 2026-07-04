@@ -547,7 +547,7 @@ namespace Choreography.Formatters
 
 			// Last resort
 			OpenItemIfNeeded();
-			MethodInfo posiblePrint = type
+			MethodInfo possiblePrint = type
 				.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
 				.FirstOrDefault(m =>
 					m.Name.ToLower() == "print" &&
@@ -557,10 +557,10 @@ namespace Choreography.Formatters
 			sink.Append('<');
 			AppendEscapedTag(name);
 			sink.Append('>');
-			if (posiblePrint != null)
+			if (possiblePrint != null)
 			{
 				var tmp = new StringBuilder();
-				posiblePrint.Invoke(value, new object[] { tmp });
+				possiblePrint.Invoke(value, new object[] { tmp });
 				// Treat output as raw text; XML-escape it conservatively.
 				AppendEscapedText(tmp.ToString());
 			}

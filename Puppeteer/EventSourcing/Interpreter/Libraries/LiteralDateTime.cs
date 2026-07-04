@@ -34,11 +34,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			patternAst.RegisterLiteral(value, ComputeType(), position);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			bool esFecha = value.Hour == 0 && value.Minute == 0 && value.Second == 0;
-			string text = esFecha ? value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture) : value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
-			resultado.Append(text);
+			bool isDate = value.Hour == 0 && value.Minute == 0 && value.Second == 0;
+			string text = isDate ? value.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture) : value.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
+			result.Append(text);
 		}
 
 		internal override void Visit(ASTVisitor v)

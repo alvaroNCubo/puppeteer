@@ -112,6 +112,28 @@ namespace Puppeteer
 				_playbill, _playbillSchemaName, _playbillValues);
 		}
 
+		// Bind the ordered payload values carried by a received tell (envelope.Values)
+		// into this command, reusing the pool. The source holds the values; this copies
+		// value by value into the rented set — no new allocation beyond the pooled
+		// instance, and no parameter declarations re-derived from the script. A Dispatch
+		// handler writes: receiver.Using("sink.Apply(@token);").WithParameters(env.Values).PerformCommand();
+#if PUPPETEER_HIDE_INTERNALS
+		[DebuggerHidden]
+#endif
+		public ActorV2Invocation WithParameters(Parameters source)
+		{
+			ArgumentNullException.ThrowIfNull(source);
+
+			var parameters = _actor.Handler.ParametersPool.Rent(_script);
+			foreach (var p in source)
+			{
+				parameters[p.Name, p.ParameterType] = p.GetValue();
+			}
+
+			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false, parametersKeyed: true,
+				_playbill, _playbillSchemaName, _playbillValues);
+		}
+
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif

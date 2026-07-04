@@ -36,41 +36,41 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var type = ComputeType();
 			if (type == null)
 			{
-				Type tipo1 = e1.ComputeType();
-				Type tipo2 = e2.ComputeType();
-				throw new LanguageException($"Cannot divide a value of type '{tipo1.Name}' by a value of type '{tipo2.Name}'.");
+				Type type1 = e1.ComputeType();
+				Type type2 = e2.ComputeType();
+				throw new LanguageException($"Cannot divide a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 			}
 			ForcedType = type;
 		}
 
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			object objeto2 = e2.Execute();
+			object object1 = e1.Execute();
+			object object2 = e2.Execute();
 
-			Type tipo1 = objeto1.GetType();
-			Type tipo2 = objeto2.GetType();
+			Type type1 = object1.GetType();
+			Type type2 = object2.GetType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
-				return (int)objeto1 / (int)objeto2;
-			if (tipo1 == typeof(int) && tipo2 == typeof(double))
-				return Convert.ToDouble(objeto1) / (double)objeto2;
-			if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) / (decimal)objeto2;
-			if (tipo1 == typeof(double) && tipo2 == typeof(int))
-				return (double)objeto1 / Convert.ToDouble(objeto2);
-			if (tipo1 == typeof(double) && tipo2 == typeof(double))
-				return (double)objeto1 / (double)objeto2;
-			if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) / (decimal)objeto2;
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
-				return (decimal)objeto1 / Convert.ToDecimal(objeto2);
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
-				return (decimal)objeto1 / Convert.ToDecimal(objeto2);
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
-				return (decimal)objeto1 / (decimal)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(int))
+				return (int)object1 / (int)object2;
+			if (type1 == typeof(int) && type2 == typeof(double))
+				return Convert.ToDouble(object1) / (double)object2;
+			if (type1 == typeof(int) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) / (decimal)object2;
+			if (type1 == typeof(double) && type2 == typeof(int))
+				return (double)object1 / Convert.ToDouble(object2);
+			if (type1 == typeof(double) && type2 == typeof(double))
+				return (double)object1 / (double)object2;
+			if (type1 == typeof(double) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) / (decimal)object2;
+			if (type1 == typeof(decimal) && type2 == typeof(int))
+				return (decimal)object1 / Convert.ToDecimal(object2);
+			if (type1 == typeof(decimal) && type2 == typeof(double))
+				return (decimal)object1 / Convert.ToDecimal(object2);
+			if (type1 == typeof(decimal) && type2 == typeof(decimal))
+				return (decimal)object1 / (decimal)object2;
 
-			throw new LanguageException($"Cannot divide a value of type '{tipo1.Name}' by a value of type '{tipo2.Name}'.");
+			throw new LanguageException($"Cannot divide a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -84,44 +84,44 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Constant(result, PromotesTo(left.Type, right.Type));
 			}
 
-			var tipo1 = e1.ComputeType();
-			var tipo2 = e2.ComputeType();
+			var type1 = e1.ComputeType();
+			var type2 = e2.ComputeType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
+			if (type1 == typeof(int) && type2 == typeof(int))
 				return Expression.Divide(left, right);
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(double))
+			if (type1 == typeof(int) && type2 == typeof(double))
 				return Expression.Divide(Expression.Convert(left, typeof(double)), right);
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
+			if (type1 == typeof(int) && type2 == typeof(decimal))
 				return Expression.Divide(Expression.Convert(left, typeof(decimal)), right);
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(int))
+			if (type1 == typeof(double) && type2 == typeof(int))
 				return Expression.Divide(left, Expression.Convert(right, typeof(double)));
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(double))
+			if (type1 == typeof(double) && type2 == typeof(double))
 				return Expression.Divide(left, right);
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
+			if (type1 == typeof(double) && type2 == typeof(decimal))
 				return Expression.Divide(Expression.Convert(left, typeof(decimal)), right);
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
+			if (type1 == typeof(decimal) && type2 == typeof(int))
 				return Expression.Divide(left, Expression.Convert(right, typeof(decimal)));
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
+			if (type1 == typeof(decimal) && type2 == typeof(double))
 				return Expression.Divide(left, Expression.Convert(right, typeof(decimal)));
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
+			if (type1 == typeof(decimal) && type2 == typeof(decimal))
 				return Expression.Divide(left, right);
 
-			throw new LanguageException($"Cannot divide a value of type '{tipo1.Name}' by a value of type '{tipo2.Name}'.");
+			throw new LanguageException($"Cannot divide a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" / ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" / ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

@@ -10,7 +10,7 @@
 //
 // Excluded dispatch sites (control flow / arithmetic primitives):
 //   Id, Literal*, OpAdd/Subtract/Multiply/Divide/Cast/Equal/etc.,
-//   Parenthesis, Ternary, ForStatement, IfStatement.
+//   Parenthesis, Ternary, ForEachStatement, IfStatement.
 //
 // Public API; Increment() is called from inside Puppeteer.dll, Reset/Count
 // from the lab test assembly. Static + Interlocked is used (not ThreadStatic)

@@ -98,21 +98,27 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
 
 			// Phase 4 of the Action refactor: render the body at tabs=0 (canonical) and
 			// compose the full sentence via ComposeJournalText so the on-the-wire form
 			// matches exactly what ActorHandler emits to the journal at runtime — and
 			// what the parser reads back.
 			StringBuilder bodySb = new StringBuilder();
-			foreach (Statement source in body)
+			// Render the body under the authored scope so a parsed Define carrying
+			// developer prints round-trips back to the same sentence the runtime
+			// journaled (ComposeJournalText is fed Program.ConvertToAuthoredString).
+			using (AuthoredRenderScope.Enter())
 			{
-				source.Write(bodySb, 0, databaseType);
+				foreach (Statement source in body)
+				{
+					source.Write(bodySb, 0, databaseType);
+				}
 			}
-			resultado.Append(ComposeJournalText(actionId, parametersText, bodySb.ToString()));
+			result.Append(ComposeJournalText(actionId, parametersText, bodySb.ToString()));
 		}
 
 		// Phase 4 of the Action refactor (project_puppeteer_action_refactor_plan.md):

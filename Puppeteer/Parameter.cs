@@ -72,17 +72,17 @@ namespace Puppeteer
 #endif
 		internal static bool IsValidParameterName(string name)
 		{
-			bool esElPrimero = true;
+			bool isFirst = true;
 			foreach (char character in name)
 			{
 				if (char.IsLetter(character)) { }
 				else if (character == '_' || character == '#' || character == '@') { }
-				else if (char.IsDigit(character) && !esElPrimero) { }
+				else if (char.IsDigit(character) && !isFirst) { }
 				else
 				{
 					return false;
 				}
-				esElPrimero = false;
+				isFirst = false;
 			}
 			return true;
 		}
@@ -137,8 +137,8 @@ namespace Puppeteer
 					if (argumentType.IsArray)
 					{
 						var elementType = argumentType.GetElementType();
-						var CastArregloType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
-						instance.value = Convert.ChangeType(value, CastArregloType);
+						var CastArrayType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
+						instance.value = Convert.ChangeType(value, CastArrayType);
 					}
 					else
 					{
@@ -296,8 +296,8 @@ namespace Puppeteer
 			LValueStorageExpression = parameterDeclaration;
 
 			{
-				var objetoField = typeof(VariableSymbol).GetField(nameof(VariableSymbol.value), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-				var valueExpr = Expression.Field(parameterDeclaration, objetoField);
+				var objectField = typeof(VariableSymbol).GetField(nameof(VariableSymbol.value), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+				var valueExpr = Expression.Field(parameterDeclaration, objectField);
 				var convertedValueExpr = Expression.Convert(valueExpr, this.ParameterType);
 				RValueReferenceExpression = convertedValueExpr;
 			}

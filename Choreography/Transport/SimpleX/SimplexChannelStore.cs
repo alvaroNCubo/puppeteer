@@ -5,28 +5,28 @@ using Choreography.StageManager;
 
 namespace Choreography.Transport.SimpleX
 {
-    // Bug 19 (SMP) — Resume de un canal establecido tras process-death.
+    // Bug 19 (SMP) — Resume of an established channel after process-death.
     //
-    // El re-handshake in-band (bug 18) y el rejoin host-driven (RecallKnownPeers) presuponen
-    // poder reabrir Coordination tras la muerte del proceso. En PortableHttps basta re-bindear
-    // el listener; en SMP NO: una invitacion solo bootstrapea una vez (la queue queda KEY-secured
-    // tras el primer handshake) y la recipient key vive solo en memoria (_pending). Re-hostear la
-    // misma invitacion es imposible en SMP.
+    // The in-band re-handshake (bug 18) and the host-driven rejoin (RecallKnownPeers) assume
+    // Coordination can be reopened after process death. In PortableHttps it is enough to re-bind
+    // the listener; in SMP it is NOT: an invitation bootstraps only once (the queue becomes
+    // KEY-secured after the first handshake) and the recipient key lives only in memory (_pending).
+    // Re-hosting the same invitation is impossible in SMP.
     //
-    // La primitiva correcta para SMP es RESUME, no re-host: SMP es store-and-forward, asi que la
-    // queue del canal sobrevive en el server con los mensajes que el peer publico mientras el nodo
-    // estaba muerto. Si persistimos el estado COMPLETO de las dos queues del canal establecido
-    // (outbound = donde enviamos, inbound = donde recibimos, con todas sus keys), al revivir
-    // reconstruimos el SimplexChannel y re-SUBeamos el inbound — drenando lo encolado — SIN ningun
-    // handshake y de forma UNILATERAL (el peer no hace nada).
+    // The correct primitive for SMP is RESUME, not re-host: SMP is store-and-forward, so the
+    // channel's queue survives on the server with the messages the peer published while the node
+    // was dead. If we persist the COMPLETE state of the established channel's two queues
+    // (outbound = where we send, inbound = where we receive, with all their keys), on revival we
+    // rebuild the SimplexChannel and re-SUB the inbound — draining what was queued — WITHOUT any
+    // handshake and UNILATERALLY (the peer does nothing).
     //
-    // Este store persiste ese estado por (peerId, purpose) junto al StageStateDirectory, igual que
-    // TermStore/term.bin y peers.bin. Atomico (temp + rename).
+    // This store persists that state per (peerId, purpose) alongside the StageStateDirectory, just
+    // like TermStore/term.bin and peers.bin. Atomic (temp + rename).
     //
-    // NOTA DE SEGURIDAD: el archivo contiene las secret keys (sign + DH) de recepcion y envio del
-    // canal. Es material tan sensible como el journal cifrado / el ContactSecret; vive en el mismo
-    // StageStateDirectory bajo la misma frontera de confianza (el filesystem del device). Si el
-    // journal se cifra at-rest, este store deberia heredar el mismo tratamiento.
+    // SECURITY NOTE: the file contains the channel's secret keys (sign + DH) for both receiving and
+    // sending. It is material as sensitive as the encrypted journal / the ContactSecret; it lives in
+    // the same StageStateDirectory under the same trust boundary (the device filesystem). If the
+    // journal is encrypted at-rest, this store should inherit the same treatment.
     internal sealed class SimplexChannelStore
     {
         private const byte FormatVersion = 1;
@@ -44,8 +44,8 @@ namespace Choreography.Transport.SimpleX
         private string PathFor(PerformerId peer, ChannelPurpose purpose)
             => Path.Combine(directory, $"{peer.Value:N}-{(int)purpose}.smpch");
 
-        // Persiste el estado de un canal establecido. outbound = queue donde este nodo ENVIA;
-        // inbound = queue donde este nodo RECIBE. Idempotente: sobrescribe la entrada previa.
+        // Persists the state of an established channel. outbound = queue where this node SENDS;
+        // inbound = queue where this node RECEIVES. Idempotent: overwrites the previous entry.
         public void Save(PerformerId peer, ChannelPurpose purpose, SmpQueue outbound, SmpQueue inbound)
         {
             if (outbound == null) throw new ArgumentNullException(nameof(outbound));
@@ -70,8 +70,8 @@ namespace Choreography.Transport.SimpleX
             }
         }
 
-        // Reconstruye (outbound, inbound) de un canal previamente persistido. Devuelve false si no
-        // hay estado guardado (o esta corrupto: el resume es best-effort, no un invariante de safety).
+        // Rebuilds (outbound, inbound) from a previously persisted channel. Returns false if there
+        // is no saved state (or it is corrupt: resume is best-effort, not a safety invariant).
         public bool TryLoad(PerformerId peer, ChannelPurpose purpose, out SmpQueue outbound, out SmpQueue inbound)
         {
             outbound = null;
@@ -149,7 +149,7 @@ namespace Choreography.Transport.SimpleX
             return q;
         }
 
-        // byte[] anulable: [Int32 len] (-1 si null) + bytes.
+        // Nullable byte[]: [Int32 len] (-1 if null) + bytes.
         private static void WriteBytes(BinaryWriter w, byte[] value)
         {
             if (value == null) { w.Write(-1); return; }

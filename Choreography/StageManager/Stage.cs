@@ -375,11 +375,10 @@ namespace Choreography.StageManager
                              "Run on Android emulator or Linux for the real path.");
                 return new InMemoryTransport(Id, logger);
             }
-            // Bug 19 (SMP resume): el transport persiste el estado de cada canal establecido en
-            // StageStateDirectory para poder resumirlo tras un process-death. Si StageStateDirectory
-            // aun no esta seteado (ConfigureTransport antes que ConfigureStorage), el resume queda
-            // deshabilitado (el transport sigue funcionando) — para habilitarlo, configurar storage
-            // antes que transport.
+            // Bug 19 (SMP resume): the transport persists the state of each established channel in
+            // StageStateDirectory so it can be resumed after a process-death. If StageStateDirectory
+            // is not set yet (ConfigureTransport before ConfigureStorage), resume is disabled (the
+            // transport still works) — to enable it, configure storage before transport.
             return new Transport.SimpleX.SimplexTransport(Id,
                 url ?? throw new ArgumentNullException(nameof(url), "url is required for SimpleX transport"),
                 serverFingerprint,
@@ -453,14 +452,14 @@ namespace Choreography.StageManager
             return transport.WaitForConnectionAsync(invitation, ct);
         }
 
-        // Bug 19 (SMP) — Reabre un canal previamente establecido con un peer conocido tras un
-        // process-death, sin re-handshake. Pensado para que el host, al arrancar, recorra
-        // RecallKnownPeers() y resuma Coordination con cada peer (luego JoinCoordination); el
-        // DirectorAnnounce que llega por el canal resumido dispara term-first y, si hubo
-        // rotacion, el re-handshake in-band de bug 18 restaura Replication/Command.
+        // Bug 19 (SMP) — Reopens a previously established channel with a known peer after a
+        // process-death, without re-handshake. Intended so that the host, on startup, walks
+        // RecallKnownPeers() and resumes Coordination with each peer (then JoinCoordination); the
+        // DirectorAnnounce that arrives over the resumed channel triggers term-first and, if there
+        // was rotation, the in-band re-handshake from bug 18 restores Replication/Command.
         //
-        // Devuelve null si el transport no soporta resume (PortableHttps/InMemory: el rejoin se
-        // resuelve por re-host/pairing normal) o si no hay estado persistido para (peer, purpose).
+        // Returns null if the transport does not support resume (PortableHttps/InMemory: the rejoin
+        // is resolved by normal re-host/pairing) or if there is no persisted state for (peer, purpose).
         public Task<IStageChannel> ResumeChannelAsync(PerformerId peer, ChannelPurpose purpose, CancellationToken ct = default)
         {
             if (transport == null) throw new InvalidOperationException("Transport not configured");

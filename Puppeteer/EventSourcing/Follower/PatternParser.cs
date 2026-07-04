@@ -323,16 +323,14 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		// Plan 7 (b) of the Tell primitive roadmap: parse tell-shaped patterns.
-		// Two forms:
+		// Parse tell-shaped patterns, mirroring the assertive DSL. Two forms:
 		//
-		//   tell <TargetClass>(<targetParam>) <CommandName>(<commandParams>) [id <idParam>]
-		//   tell ack <ackIdParam> [from <FromTargetClass>(<fromTargetParam>)]
+		//   tell <Message> [with <withParams>] to <Addressee>[(<instanceParam>)] [once <onceParam>]
+		//   tell ack <ackIdParam> [from <Addressee>[(<instanceParam>)]]
 		//
-		// Saga verbs (start/step/compensate/close) and the through trailer are
-		// intentionally NOT recognised by Plan 7 (b) — saga matchers come with
-		// Plan 8 of the roadmap; through is speculative until a real use case
-		// motivates it (see feedback_dsl_pattern_priorities).
+		// Each <param> can be a wildcard (_), a variable bind ($name), a literal, or
+		// a typed variant. The addressee is a logical role; the transport is never
+		// named in a pattern (it is not in the journal to match against).
 		private ExpressionNode ParseTellPattern()
 		{
 			lexer.Accept(TokenType.tell);
@@ -344,57 +342,81 @@ namespace Puppeteer.EventSourcing.Follower
 				lexer.Accept(TokenType.id); // consume 'ack'
 				ParameterNode ackIdParameter = ParseParameter();
 
-				string fromTargetClass = null;
-				ParameterNode fromTargetParameter = null;
+				string fromAddressee = null;
+				ParameterNode fromInstanceParameter = null;
 				if (lexer.CurrentToken.Type == TokenType.id
 					&& lexer.CurrentLexeme().SequenceEqual("from".AsSpan()))
 				{
 					lexer.Accept(TokenType.id); // consume 'from'
 					if (lexer.CurrentToken.Type != TokenType.id)
 					{
-						throw new LanguageException($"Expected a target class identifier after 'from' in 'tell ack ... from <Class>(<param>)', but found '{lexer.CurrentLexeme()}'.");
+						throw new LanguageException($"Expected an addressee role identifier after 'from' in 'tell ack ... from <Addressee>', but found '{lexer.CurrentLexeme()}'.");
 					}
-					fromTargetClass = ParseIdentifier();
-					lexer.Accept(TokenType.lParen);
-					fromTargetParameter = ParseParameter();
-					lexer.Accept(TokenType.rParen);
+					fromAddressee = ParseIdentifier();
+					if (lexer.CurrentToken.Type == TokenType.lParen)
+					{
+						lexer.Accept(TokenType.lParen);
+						fromInstanceParameter = ParseParameter();
+						lexer.Accept(TokenType.rParen);
+					}
 				}
 
-				return new TellAckPatternNode(ackIdParameter, fromTargetClass, fromTargetParameter);
+				return new TellAckPatternNode(ackIdParameter, fromAddressee, fromInstanceParameter);
 			}
 
-			// Outbound `tell <Target>(<targetParam>) <Cmd>(<commandParams>) [id <idParam>]` form.
+			// Assertive `tell <Message> [with <params>] to <Addressee>[(<param>)] [once <param>]` form.
 			if (lexer.CurrentToken.Type != TokenType.id)
 			{
-				throw new LanguageException($"Expected a target class identifier or 'ack' after 'tell' in pattern, but found '{lexer.CurrentLexeme()}'.");
+				throw new LanguageException($"Expected a message name or 'ack' after 'tell' in pattern, but found '{lexer.CurrentLexeme()}'.");
 			}
-			string targetClass = ParseIdentifier();
-			lexer.Accept(TokenType.lParen);
-			ParameterNode targetParameter = ParseParameter();
-			lexer.Accept(TokenType.rParen);
+			string messageName = ParseIdentifier();
 
-			if (lexer.CurrentToken.Type != TokenType.id)
-			{
-				throw new LanguageException($"Expected a command name identifier after the target in 'tell <Target>(<param>) <Cmd>(...)', but found '{lexer.CurrentLexeme()}'.");
-			}
-			string commandName = ParseIdentifier();
-			lexer.Accept(TokenType.lParen);
-			List<ParameterNode> commandParameters = new List<ParameterNode>();
-			if (lexer.CurrentToken.Type != TokenType.rParen)
-			{
-				commandParameters = ParseParameterList();
-			}
-			lexer.Accept(TokenType.rParen);
-
-			ParameterNode idParameter = null;
+			List<ParameterNode> withParameters = new List<ParameterNode>();
 			if (lexer.CurrentToken.Type == TokenType.id
-				&& lexer.CurrentLexeme().SequenceEqual("id".AsSpan()))
+				&& lexer.CurrentLexeme().SequenceEqual("with".AsSpan()))
 			{
-				lexer.Accept(TokenType.id); // consume 'id'
-				idParameter = ParseParameter();
+				lexer.Accept(TokenType.id); // consume 'with'
+				while (true)
+				{
+					withParameters.Add(ParseParameter());
+					if (lexer.CurrentToken.Type == TokenType.comma)
+					{
+						lexer.Accept(TokenType.comma);
+						continue;
+					}
+					break;
+				}
 			}
 
-			return new TellPatternNode(targetClass, targetParameter, commandName, commandParameters, idParameter);
+			if (!(lexer.CurrentToken.Type == TokenType.id && lexer.CurrentLexeme().SequenceEqual("to".AsSpan())))
+			{
+				throw new LanguageException($"Expected 'to <Addressee>' after the message in 'tell <Message> ... to <Addressee>', but found '{lexer.CurrentLexeme()}'.");
+			}
+			lexer.Accept(TokenType.id); // consume 'to'
+
+			if (lexer.CurrentToken.Type != TokenType.id)
+			{
+				throw new LanguageException($"Expected an addressee role identifier after 'to' in 'tell <Message> ... to <Addressee>', but found '{lexer.CurrentLexeme()}'.");
+			}
+			string addressee = ParseIdentifier();
+
+			ParameterNode addresseeInstanceParameter = null;
+			if (lexer.CurrentToken.Type == TokenType.lParen)
+			{
+				lexer.Accept(TokenType.lParen);
+				addresseeInstanceParameter = ParseParameter();
+				lexer.Accept(TokenType.rParen);
+			}
+
+			ParameterNode onceParameter = null;
+			if (lexer.CurrentToken.Type == TokenType.id
+				&& lexer.CurrentLexeme().SequenceEqual("once".AsSpan()))
+			{
+				lexer.Accept(TokenType.id); // consume 'once'
+				onceParameter = ParseParameter();
+			}
+
+			return new TellPatternNode(messageName, withParameters, addressee, addresseeInstanceParameter, onceParameter);
 		}
 
 		// <assignment> ::= (<variable> | <wildcard> | <identifier>) [':' <type>] '=' <assignment-value> ';'

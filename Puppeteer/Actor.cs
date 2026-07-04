@@ -81,6 +81,28 @@ namespace Puppeteer
 
 		internal ActorHandler GetHandler() => Handler;
 
+		// PlainText-backend operations exposed publicly for the CLI's `elide` verb.
+		// The sacred-file invariant says the .txt is edited only through these
+		// surfaces; the framework's `DiaryStorageTxt` is internal, so the bridge
+		// here is the authoritative public path. Throws LanguageException if the
+		// actor is not configured with a PlainText backend.
+		public void PlainTextElide(System.Collections.Generic.IEnumerable<long> entryIds, bool keepBackup)
+		{
+			ArgumentNullException.ThrowIfNull(entryIds);
+			var storage = Handler.TryGetDiaryStorage();
+			if (!(storage is Puppeteer.EventSourcing.DB.DiaryStorageTxt txt))
+				throw new LanguageException("PlainTextElide is only valid for PlainText backends.");
+			txt.PhysicallyElideEntries(entryIds, keepBackup);
+		}
+
+		public System.Collections.Generic.IReadOnlySet<long> PlainTextElidedIds()
+		{
+			var storage = Handler.TryGetDiaryStorage();
+			if (!(storage is Puppeteer.EventSourcing.DB.DiaryStorageTxt txt))
+				throw new LanguageException("PlainTextElidedIds is only valid for PlainText backends.");
+			return txt.ElidedIds;
+		}
+
 		// Lab-only public path to the otherwise-internal storage configuration.
 		// Mirrors what `StageHook.InitializeStorage` does for the Choreography host;
 		// this overload exposes the same capability to lab tests without the

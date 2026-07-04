@@ -47,12 +47,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			expression.AccumulatePromotionCandidateHash(ref hc);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			expression.write(resultado, databaseType);
-			resultado.Append(";\r");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			expression.write(result, databaseType);
+			result.Append(";\r");
 		}
 
 		internal override void Visit(ASTVisitor v)

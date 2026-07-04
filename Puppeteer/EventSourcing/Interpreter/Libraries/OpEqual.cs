@@ -22,80 +22,80 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			e1.ValidateStatically();
 			e2.ValidateStatically();
 
-			var tipo1 = e1.ComputeType();
-			var tipo2 = e2.ComputeType();
+			var type1 = e1.ComputeType();
+			var type2 = e2.ComputeType();
 
 			// Supported primitive types
-			bool esPrimitivo(Type t) =>
+			bool isPrimitive(Type t) =>
 				t == typeof(int) || t == typeof(double) || t == typeof(decimal) ||
 				t == typeof(DateTime) || t == typeof(bool);
 
 			// Comparison between a primitive and object (in any order)
 			bool primitivoYObject =
-				(esPrimitivo(tipo1) && tipo2 == typeof(object)) ||
-				(esPrimitivo(tipo2) && tipo1 == typeof(object));
+				(isPrimitive(type1) && type2 == typeof(object)) ||
+				(isPrimitive(type2) && type1 == typeof(object));
 
 			// Comparison between primitive collections and object collections (in any order)
-			bool coleccionPrimitivoYObject = false;
-			var col1 = AstExpression.TypeOfCollection(tipo1);
-			var col2 = AstExpression.TypeOfCollection(tipo2);
+			bool primitiveAndObjectCollection = false;
+			var col1 = AstExpression.TypeOfCollection(type1);
+			var col2 = AstExpression.TypeOfCollection(type2);
 			if ((col1.IsArray || col1.IsGenericType) && (col2.IsArray || col2.IsGenericType))
 			{
-				var elem1 = AstExpression.TypeOfCollectionElement(tipo1);
-				var elem2 = AstExpression.TypeOfCollectionElement(tipo2);
-				coleccionPrimitivoYObject =
-					(esPrimitivo(elem1) && elem2 == typeof(object)) ||
-					(esPrimitivo(elem2) && elem1 == typeof(object));
+				var elem1 = AstExpression.TypeOfCollectionElement(type1);
+				var elem2 = AstExpression.TypeOfCollectionElement(type2);
+				primitiveAndObjectCollection =
+					(isPrimitive(elem1) && elem2 == typeof(object)) ||
+					(isPrimitive(elem2) && elem1 == typeof(object));
 			}
 			// Comparison between a collection and object (in any order)
-			bool coleccionYObject =
-				((col1.IsArray || col1.IsGenericType) && tipo2 == typeof(object)) ||
-				((col2.IsArray || col2.IsGenericType) && tipo1 == typeof(object));
+			bool objectCollection =
+				((col1.IsArray || col1.IsGenericType) && type2 == typeof(object)) ||
+				((col2.IsArray || col2.IsGenericType) && type1 == typeof(object));
 
 			// Allow comparison between compatible numeric types
-			bool ambosNumericos = (tipo1 == typeof(int) || tipo1 == typeof(double) || tipo1 == typeof(decimal))
-			&& (tipo2 == typeof(int) || tipo2 == typeof(double) || tipo2 == typeof(decimal));
+			bool ambosNumericos = (type1 == typeof(int) || type1 == typeof(double) || type1 == typeof(decimal))
+			&& (type2 == typeof(int) || type2 == typeof(double) || type2 == typeof(decimal));
 
 			// Allow comparison between strings
-			bool ambosString = tipo1 == typeof(string) && tipo2 == typeof(string);
+			bool ambosString = type1 == typeof(string) && type2 == typeof(string);
 
 			// Allow comparison between DateTime values
-			bool ambosDateTime = tipo1 == typeof(DateTime) && tipo2 == typeof(DateTime);
+			bool ambosDateTime = type1 == typeof(DateTime) && type2 == typeof(DateTime);
 
 			// Allow comparison between booleans
-			bool ambosBool = tipo1 == typeof(bool) && tipo2 == typeof(bool);
+			bool ambosBool = type1 == typeof(bool) && type2 == typeof(bool);
 
 			// Allow comparison between collections of the same element type or numeric collections
-			bool ambosColeccion = false;
+			bool bothCollections = false;
 			if ((col1.IsArray || col1.IsGenericType) && (col2.IsArray || col2.IsGenericType))
 			{
-				var elem1 = AstExpression.TypeOfCollectionElement(tipo1);
-				var elem2 = AstExpression.TypeOfCollectionElement(tipo2);
-				ambosColeccion = (elem1 == elem2) ||
+				var elem1 = AstExpression.TypeOfCollectionElement(type1);
+				var elem2 = AstExpression.TypeOfCollectionElement(type2);
+				bothCollections = (elem1 == elem2) ||
 				((elem1 == typeof(int) || elem1 == typeof(double) || elem1 == typeof(decimal)) &&
 				(elem2 == typeof(int) || elem2 == typeof(double) || elem2 == typeof(decimal)));
 			}
 
 			// Allow reference comparison for classes (except string and collections)
-			bool ambosReferencia = tipo1 == tipo2 && (tipo1.IsClass || tipo1.IsInterface)
-			&& tipo1 != typeof(string)
-			&& !typeof(System.Collections.IEnumerable).IsAssignableFrom(tipo1);
+			bool bothReference = type1 == type2 && (type1.IsClass || type1.IsInterface)
+			&& type1 != typeof(string)
+			&& !typeof(System.Collections.IEnumerable).IsAssignableFrom(type1);
 
 			// Allow comparison between object and class, class and object, object and object
-			bool objectYClase =
-			(tipo1 == typeof(object) && tipo2.IsClass && tipo2 != typeof(string) && !typeof(System.Collections.IEnumerable).IsAssignableFrom(tipo2)) ||
-			(tipo2 == typeof(object) && tipo1.IsClass && tipo1 != typeof(string) && !typeof(System.Collections.IEnumerable).IsAssignableFrom(tipo1)) ||
-			(tipo1 == typeof(object) && tipo2 == typeof(object));
+			bool objectAndClass =
+			(type1 == typeof(object) && type2.IsClass && type2 != typeof(string) && !typeof(System.Collections.IEnumerable).IsAssignableFrom(type2)) ||
+			(type2 == typeof(object) && type1.IsClass && type1 != typeof(string) && !typeof(System.Collections.IEnumerable).IsAssignableFrom(type1)) ||
+			(type1 == typeof(object) && type2 == typeof(object));
 
 			// Special case: nullable parameter == null
 			bool nullableParamVsNull =
 				(e1 is LiteralNull && e2 is Id id2n && id2n.IsNullableParameter) ||
 				(e2 is LiteralNull && e1 is Id id1n && id1n.IsNullableParameter);
 
-			if (!(ambosNumericos || ambosString || ambosDateTime || ambosBool || ambosColeccion || ambosReferencia || objectYClase
-				|| primitivoYObject || coleccionPrimitivoYObject || coleccionYObject || nullableParamVsNull))
+			if (!(ambosNumericos || ambosString || ambosDateTime || ambosBool || bothCollections || bothReference || objectAndClass
+				|| primitivoYObject || primitiveAndObjectCollection || objectCollection || nullableParamVsNull))
 			{
-				throw new LanguageException($"Cannot compare types '{tipo1}' and '{tipo2}' with '=='.");
+				throw new LanguageException($"Cannot compare types '{type1}' and '{type2}' with '=='.");
 			}
 
 			ForcedType = typeof(bool);
@@ -103,80 +103,80 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			object objeto2 = e2.Execute();
+			object object1 = e1.Execute();
+			object object2 = e2.Execute();
 
-			if (objeto1 == objeto2) return true;
+			if (object1 == object2) return true;
 
-			Type tipo1 = objeto1 == null ? null : objeto1.GetType();
-			Type tipo2 = objeto2 == null ? null : objeto2.GetType();
+			Type type1 = object1 == null ? null : object1.GetType();
+			Type type2 = object2 == null ? null : object2.GetType();
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(int))
-				return (int)objeto1 == (int)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(int))
+				return (int)object1 == (int)object2;
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(double))
-				return Convert.ToDouble(objeto1) == (double)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(double))
+				return Convert.ToDouble(object1) == (double)object2;
 
-			if (tipo1 == typeof(int) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) == (decimal)objeto2;
+			if (type1 == typeof(int) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) == (decimal)object2;
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(int))
-				return (double)objeto1 == Convert.ToDouble(objeto2);
+			if (type1 == typeof(double) && type2 == typeof(int))
+				return (double)object1 == Convert.ToDouble(object2);
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(double))
-				return (double)objeto1 == (double)objeto2;
+			if (type1 == typeof(double) && type2 == typeof(double))
+				return (double)object1 == (double)object2;
 
-			if (tipo1 == typeof(double) && tipo2 == typeof(decimal))
-				return Convert.ToDecimal(objeto1) == (decimal)objeto2;
+			if (type1 == typeof(double) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) == (decimal)object2;
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(int))
-				return (decimal)objeto1 == Convert.ToDecimal(objeto2);
+			if (type1 == typeof(decimal) && type2 == typeof(int))
+				return (decimal)object1 == Convert.ToDecimal(object2);
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(double))
-				return (decimal)objeto1 == Convert.ToDecimal(objeto2);
+			if (type1 == typeof(decimal) && type2 == typeof(double))
+				return (decimal)object1 == Convert.ToDecimal(object2);
 
-			if (tipo1 == typeof(decimal) && tipo2 == typeof(decimal))
-				return (decimal)objeto1 == (decimal)objeto2;
+			if (type1 == typeof(decimal) && type2 == typeof(decimal))
+				return (decimal)object1 == (decimal)object2;
 
-			if (tipo1 == typeof(string) && tipo2 == typeof(string))
-				return (string)objeto1 == (string)objeto2;
+			if (type1 == typeof(string) && type2 == typeof(string))
+				return (string)object1 == (string)object2;
 
-			if (tipo1 == typeof(DateTime) && tipo2 == typeof(DateTime))
-				return (DateTime)objeto1 == (DateTime)objeto2;
+			if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
+				return (DateTime)object1 == (DateTime)object2;
 
-			if (tipo1 == typeof(bool) && tipo2 == typeof(bool))
-				return (bool)objeto1 == (bool)objeto2;
+			if (type1 == typeof(bool) && type2 == typeof(bool))
+				return (bool)object1 == (bool)object2;
 
 			// Numeric collection handling with conversion
-			var colType1 = AstExpression.TypeOfCollection(tipo1);
-			var colType2 = AstExpression.TypeOfCollection(tipo2);
+			var colType1 = AstExpression.TypeOfCollection(type1);
+			var colType2 = AstExpression.TypeOfCollection(type2);
 			if ((colType1.IsArray || colType1.IsGenericType) && (colType2.IsArray || colType2.IsGenericType))
 			{
-				Type elemType1 = AstExpression.TypeOfCollectionElement(tipo1);
-				Type elemType2 = AstExpression.TypeOfCollectionElement(tipo2);
+				Type elemType1 = AstExpression.TypeOfCollectionElement(type1);
+				Type elemType2 = AstExpression.TypeOfCollectionElement(type2);
 
 				// If both are numeric (int, double, decimal), compare element-by-element with conversion
 				if (IsNumericType(elemType1) && IsNumericType(elemType2))
 				{
-					return SequenceCompareNumeric(ToObjectEnumerable(objeto1), ToObjectEnumerable(objeto2));
+					return SequenceCompareNumeric(ToObjectEnumerable(object1), ToObjectEnumerable(object2));
 				}
 				// If they are the same type, use the original comparer
 				if (elemType1 == elemType2)
 				{
 					if (elemType1 == typeof(int))
-						return SequenceCompare<int>((IEnumerable<int>)objeto1, (IEnumerable<int>)objeto2);
+						return SequenceCompare<int>((IEnumerable<int>)object1, (IEnumerable<int>)object2);
 					else if (elemType1 == typeof(string))
-						return SequenceCompare<string>((IEnumerable<string>)objeto1, (IEnumerable<string>)objeto2);
+						return SequenceCompare<string>((IEnumerable<string>)object1, (IEnumerable<string>)object2);
 					else if (elemType1 == typeof(double))
-						return SequenceCompare<double>((IEnumerable<double>)objeto1, (IEnumerable<double>)objeto2);
+						return SequenceCompare<double>((IEnumerable<double>)object1, (IEnumerable<double>)object2);
 					else if (elemType1 == typeof(bool))
-						return SequenceCompare<bool>((IEnumerable<bool>)objeto1, (IEnumerable<bool>)objeto2);
+						return SequenceCompare<bool>((IEnumerable<bool>)object1, (IEnumerable<bool>)object2);
 					else if (elemType1 == typeof(decimal))
-						return SequenceCompare<decimal>((IEnumerable<decimal>)objeto1, (IEnumerable<decimal>)objeto2);
+						return SequenceCompare<decimal>((IEnumerable<decimal>)object1, (IEnumerable<decimal>)object2);
 					else if (elemType1 == typeof(DateTime))
-						return SequenceCompare<DateTime>((IEnumerable<DateTime>)objeto1, (IEnumerable<DateTime>)objeto2);
+						return SequenceCompare<DateTime>((IEnumerable<DateTime>)object1, (IEnumerable<DateTime>)object2);
 					else
-						return SequenceCompare<object>((IEnumerable<object>)objeto1, (IEnumerable<object>)objeto2);
+						return SequenceCompare<object>((IEnumerable<object>)object1, (IEnumerable<object>)object2);
 				}
 				else
 				{
@@ -191,34 +191,34 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// Both are collections (one array and one generic collection, or both generic collections)
 				if ((colType1.IsArray || colType1.IsGenericType) && (colType2.IsArray || colType2.IsGenericType))
 				{
-					Type elemType1 = AstExpression.TypeOfCollectionElement(tipo1);
-					Type elemType2 = AstExpression.TypeOfCollectionElement(tipo2);
+					Type elemType1 = AstExpression.TypeOfCollectionElement(type1);
+					Type elemType2 = AstExpression.TypeOfCollectionElement(type2);
 
 					// If both are numeric (int, double, decimal), compare element-by-element with conversion
 					if (IsNumericType(elemType1) && IsNumericType(elemType2))
 					{
 						// Convert both to IEnumerable<object>
-						IEnumerable<object> enum1 = ToObjectEnumerable(objeto1);
-						IEnumerable<object> enum2 = ToObjectEnumerable(objeto2);
+						IEnumerable<object> enum1 = ToObjectEnumerable(object1);
+						IEnumerable<object> enum2 = ToObjectEnumerable(object2);
 						return SequenceCompareNumeric(enum1, enum2);
 					}
 					// If they are the same type, use the original comparer
 					if (elemType1 == elemType2)
 					{
 						if (elemType1 == typeof(int))
-							return SequenceCompare<int>(ToTypedEnumerable<int>(objeto1), ToTypedEnumerable<int>(objeto2));
+							return SequenceCompare<int>(ToTypedEnumerable<int>(object1), ToTypedEnumerable<int>(object2));
 						else if (elemType1 == typeof(string))
-							return SequenceCompare<string>(ToTypedEnumerable<string>(objeto1), ToTypedEnumerable<string>(objeto2));
+							return SequenceCompare<string>(ToTypedEnumerable<string>(object1), ToTypedEnumerable<string>(object2));
 						else if (elemType1 == typeof(double))
-							return SequenceCompare<double>(ToTypedEnumerable<double>(objeto1), ToTypedEnumerable<double>(objeto2));
+							return SequenceCompare<double>(ToTypedEnumerable<double>(object1), ToTypedEnumerable<double>(object2));
 						else if (elemType1 == typeof(bool))
-							return SequenceCompare<bool>(ToTypedEnumerable<bool>(objeto1), ToTypedEnumerable<bool>(objeto2));
+							return SequenceCompare<bool>(ToTypedEnumerable<bool>(object1), ToTypedEnumerable<bool>(object2));
 						else if (elemType1 == typeof(decimal))
-							return SequenceCompare<decimal>(ToTypedEnumerable<decimal>(objeto1), ToTypedEnumerable<decimal>(objeto2));
+							return SequenceCompare<decimal>(ToTypedEnumerable<decimal>(object1), ToTypedEnumerable<decimal>(object2));
 						else if (elemType1 == typeof(DateTime))
-							return SequenceCompare<DateTime>(ToTypedEnumerable<DateTime>(objeto1), ToTypedEnumerable<DateTime>(objeto2));
+							return SequenceCompare<DateTime>(ToTypedEnumerable<DateTime>(object1), ToTypedEnumerable<DateTime>(object2));
 						else
-							return SequenceCompare<object>(ToObjectEnumerable(objeto1), ToObjectEnumerable(objeto2));
+							return SequenceCompare<object>(ToObjectEnumerable(object1), ToObjectEnumerable(object2));
 					}
 					else
 					{
@@ -229,7 +229,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return false;
 			}
 
-			return (objeto2 != null && objeto2.Equals(objeto1)) || (objeto1 != null && objeto1.Equals(objeto2));
+			return (object2 != null && object2.Equals(object1)) || (object1 != null && object1.Equals(object2));
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -246,11 +246,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				if (paramId != null)
 				{
 					var paramDecl = paramId.Parameter.ParameterDeclarationExpression();
-					var objetoField = typeof(VariableSymbol).GetField(
+					var objectField = typeof(VariableSymbol).GetField(
 						nameof(VariableSymbol.value),
 						System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
-					var rawObjeto = Expression.Field(paramDecl, objetoField);
-					return Expression.Equal(rawObjeto, Expression.Constant(null, typeof(object)));
+					var rawObject = Expression.Field(paramDecl, objectField);
+					return Expression.Equal(rawObject, Expression.Constant(null, typeof(object)));
 				}
 			}
 
@@ -556,11 +556,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" == ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" == ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

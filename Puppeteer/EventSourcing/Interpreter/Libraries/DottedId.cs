@@ -300,29 +300,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return Expression.Empty();
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append(id.Name);
-			resultado.Append('.');
+			result.Append(id.Name);
+			result.Append('.');
 
 			if (Property() != null)
 			{
-				resultado.Append(Property());
+				result.Append(Property());
 			}
 			else
 			{
 				AstExpression[] arguments = this.Arguments();
-				resultado.Append(Method());
-				resultado.Append('(');
+				result.Append(Method());
+				result.Append('(');
 				for (int i = 0; i < arguments.Length; i++)
 				{
 					if (i > 0)
 					{
-						resultado.Append(", ");
+						result.Append(", ");
 					}
-					arguments[i].write(resultado, databaseType);
+					arguments[i].write(result, databaseType);
 				}
-				resultado.Append(')');
+				result.Append(')');
 
 			}
 		}

@@ -219,7 +219,17 @@ namespace Puppeteer.EventSourcing.Follower
 					eventData = actionEvent;
 				}
 
-				reaction.ReplayEvent(eventData);
+				try
+				{
+					reaction.ReplayEvent(eventData);
+				}
+				catch (Exception ex)
+				{
+					// A single faulting event must not kill the push loop (that would stall
+					// every later event and re-throw on restart). Record the fault, advance
+					// past the entry, and keep draining.
+					reaction.OnPushEventFaulted(decodedEntryId, ex);
+				}
 			}
 		}
 	}

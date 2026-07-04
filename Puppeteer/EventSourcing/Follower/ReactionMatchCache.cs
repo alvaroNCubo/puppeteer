@@ -110,7 +110,7 @@ namespace Puppeteer.EventSourcing.Follower
 			hc.Add(RuntimeHelpers.GetHashCode(pattern));
 			// Program identity is canonical for ActionEvents: the ActorHandler
 			// already stores one CommandCacheEntry per ActionId, and the
-			// Reaction's local LRU (cachedProgramas[ActionId]) reuses a single
+			// Reaction's local LRU (cachedPrograms[ActionId]) reuses a single
 			// Program reference across every event with that ActionId. So the
 			// Program reference's identity hash IS the canonical key — no
 			// structural walk needed, no textual hash, no recomputed digest.

@@ -33,9 +33,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			patternAst.RegisterLiteral(null, ComputeType(), position);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append("Null");
+			result.Append("Null");
 		}
 
 		internal override void Visit(ASTVisitor v)

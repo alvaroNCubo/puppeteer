@@ -8,40 +8,40 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	class ParserValidation
 	{
 
-		internal static void validacionDeMetodo(Type clazz, string methodName, Type[] signature)
+		internal static void methodValidation(Type clazz, string methodName, Type[] signature)
 		{
-			bool existeElNombreDelMetodoEnLaClase = existeELNombreDelMetodoEnLaClase(clazz, methodName);
-			if (!existeElNombreDelMetodoEnLaClase)
+			bool methodExists = methodNameExistsInClass(clazz, methodName);
+			if (!methodExists)
 			{
 				throw new LanguageException($"Function '{methodName}' is not defined on values of type '{clazz.Name}'. Please verify the function name and that it belongs to this type.", "", 1, 1);
 			}
 			else
 			{
-				bool existeAlMenosUnMetodoConEseNombreYConLaMisMaCantidadDeArgumentos = existeAlMenosUnMetodoConLaMismaCantidadArgumentos(clazz, methodName, signature);
-				if (existeAlMenosUnMetodoConEseNombreYConLaMisMaCantidadDeArgumentos)
+				bool atLeastOneMethodWithSameNameAndArgCount = atLeastOneMethodWithSameArgCount(clazz, methodName, signature);
+				if (atLeastOneMethodWithSameNameAndArgCount)
 				{
-					validaErrorEnMetodoConMismaCantidadDeArgumentos(clazz, methodName, signature);
+					validateErrorInMethodWithSameArgCount(clazz, methodName, signature);
 				}
 				else
 				{
-					validaErrorEnMetodoConDiferenteCantidadDeArgumentos(clazz, methodName, signature);
+					validateErrorInMethodWithDifferentArgCount(clazz, methodName, signature);
 				}
 			}
 		}
 
-		private static void validaErrorEnMetodoConDiferenteCantidadDeArgumentos(Type clazz, string methodName, Type[] signature)
+		private static void validateErrorInMethodWithDifferentArgCount(Type clazz, string methodName, Type[] signature)
 		{
-			List<MethodInfo> metodosEncontrados = obtenerMetodosDiferenteTamanno(clazz, methodName);
+			List<MethodInfo> foundMethods = getDifferentSizeMethods(clazz, methodName);
 
-			throw new LanguageException($"Function '{methodName}' is being called with the wrong number of arguments for type '{clazz.Name}'. {obtenerEncabezadosDeMetodosSugeridos(metodosEncontrados)}", "", 1, 1);
+			throw new LanguageException($"Function '{methodName}' is being called with the wrong number of arguments for type '{clazz.Name}'. {getSuggestedMethodHeaders(foundMethods)}", "", 1, 1);
 		}
 
-		private static string obtenerEncabezadosDeMetodosSugeridos(List<MethodInfo> metodosEncontrados)
+		private static string getSuggestedMethodHeaders(List<MethodInfo> foundMethods)
 		{
-			StringBuilder encabezados = new StringBuilder();
-			encabezados.Append("Suggested overloads:");
+			StringBuilder headers = new StringBuilder();
+			headers.Append("Suggested overloads:");
 
-			foreach (MethodInfo method in metodosEncontrados)
+			foreach (MethodInfo method in foundMethods)
 			{
 				string arguments = "";
 				foreach (ParameterInfo type in method.GetParameters())
@@ -52,83 +52,83 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					arguments = arguments.Substring(0, arguments.Length - 2);
 				}
-				encabezados.Append(string.Format(" {0}({1}); ", method.Name, arguments));
+				headers.Append(string.Format(" {0}({1}); ", method.Name, arguments));
 			}
-			return encabezados.ToString();
+			return headers.ToString();
 		}
 
-		private static void validaErrorEnMetodoConMismaCantidadDeArgumentos(Type claseDelObjeto, string methodName, Type[] signature)
+		private static void validateErrorInMethodWithSameArgCount(Type objectClass, string methodName, Type[] signature)
 		{
-			Dictionary<int, MethodInfo> pesosDeMetodosPorErrores = new Dictionary<int, MethodInfo>();
+			Dictionary<int, MethodInfo> methodWeightsByErrors = new Dictionary<int, MethodInfo>();
 
-			List<MethodInfo> metodosEncontrados = obtenerMetodosMismoTamanno(claseDelObjeto, methodName, signature);
+			List<MethodInfo> foundMethods = getSameSizeMethods(objectClass, methodName, signature);
 
-			foreach (MethodInfo method in metodosEncontrados)
+			foreach (MethodInfo method in foundMethods)
 			{
-				ParameterInfo[] firmaEsperadaTemp = method.GetParameters();
+				ParameterInfo[] expectedSignatureTemp = method.GetParameters();
 
-				int cantidadErrores = pesosDeMetodosPorErrores.Count;
+				int errorCount = methodWeightsByErrors.Count;
 				for (int i = 0; i < signature.Length; i++)
 				{
-					Type miClase = signature[i];
-					ParameterInfo claseEsperada = firmaEsperadaTemp[i];
+					Type myClass = signature[i];
+					ParameterInfo expectedClass = expectedSignatureTemp[i];
 
-					bool sonCompatibles = miClase.IsAssignableFrom(claseEsperada.ParameterType);
+					bool areCompatible = myClass.IsAssignableFrom(expectedClass.ParameterType);
 
-					if (!sonCompatibles &&
-						miClase.IsGenericType && claseEsperada.ParameterType.IsGenericType &&
-						miClase.GetGenericArguments()[0] == claseEsperada.ParameterType.GetGenericArguments()[0])
+					if (!areCompatible &&
+						myClass.IsGenericType && expectedClass.ParameterType.IsGenericType &&
+						myClass.GetGenericArguments()[0] == expectedClass.ParameterType.GetGenericArguments()[0])
 					{
-						sonCompatibles = true;
+						areCompatible = true;
 					}
-					if (!sonCompatibles)
+					if (!areCompatible)
 					{
-						cantidadErrores++;
+						errorCount++;
 					}
 				}
-				pesosDeMetodosPorErrores[cantidadErrores] = method;
+				methodWeightsByErrors[errorCount] = method;
 			}
 
-			List<int> keys = new List<int>(pesosDeMetodosPorErrores.Keys);
+			List<int> keys = new List<int>(methodWeightsByErrors.Keys);
 			keys.Sort();
-			int metodoConMenosCantidadDeErrores = obtenerKeyMenor(keys);
+			int methodWithFewestErrors = getSmallestKey(keys);
 
-			StringBuilder mensajeDeError = new StringBuilder();
+			StringBuilder errorMessage = new StringBuilder();
 			foreach (int key in keys)
 			{
-				MethodInfo method = pesosDeMetodosPorErrores[key];
-				ParameterInfo[] firmaEsperadaTemp = method.GetParameters();
+				MethodInfo method = methodWeightsByErrors[key];
+				ParameterInfo[] expectedSignatureTemp = method.GetParameters();
 
-				if (key == metodoConMenosCantidadDeErrores)
+				if (key == methodWithFewestErrors)
 				{
 					for (int i = 0; i < signature.Length; i++)
 					{
-						Type miClase = signature[i];
-						Type claseEsperada = firmaEsperadaTemp[i].ParameterType;
+						Type myClass = signature[i];
+						Type expectedClass = expectedSignatureTemp[i].ParameterType;
 
-						bool sonCompatibles = miClase.IsAssignableFrom(claseEsperada);
+						bool areCompatible = myClass.IsAssignableFrom(expectedClass);
 
-						if (!sonCompatibles &&
-							miClase.IsGenericType && claseEsperada.IsGenericType &&
-							miClase.GetGenericArguments()[0] == claseEsperada.GetGenericArguments()[0])
+						if (!areCompatible &&
+							myClass.IsGenericType && expectedClass.IsGenericType &&
+							myClass.GetGenericArguments()[0] == expectedClass.GetGenericArguments()[0])
 						{
-							sonCompatibles = true;
+							areCompatible = true;
 						}
-						if (!sonCompatibles)
+						if (!areCompatible)
 						{
-							mensajeDeError.Append($"Function '{methodName}' is being called with a value of type '{miClase.Name}' for parameter #{i + 1}, but the expected type is '{claseEsperada.Name}'. Please correct it.");
+							errorMessage.Append($"Function '{methodName}' is being called with a value of type '{myClass.Name}' for parameter #{i + 1}, but the expected type is '{expectedClass.Name}'. Please correct it.");
 						}
 					}
 				}
 				else
 				{
-					mensajeDeError.Append("\n").Append($"Suggested overload: {obtenerEncabezadoMetodoSugerido(method)}");
+					errorMessage.Append("\n").Append($"Suggested overload: {getSuggestedMethodHeader(method)}");
 				}
 			}
-			throw new LanguageException(mensajeDeError.ToString(), "", 1, 1);
+			throw new LanguageException(errorMessage.ToString(), "", 1, 1);
 		}
 
-		private static int obtenerKeyMenor(List<int> keys)
+		private static int getSmallestKey(List<int> keys)
 		{
 			int lessThan = 0;
 			foreach (int k in keys)
@@ -141,7 +141,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return lessThan;
 		}
 
-		private static string obtenerEncabezadoMetodoSugerido(MethodInfo method)
+		private static string getSuggestedMethodHeader(MethodInfo method)
 		{
 			string arguments = "";
 			foreach (ParameterInfo type in method.GetParameters())
@@ -153,47 +153,47 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return string.Format(" {0}({1})", method.Name, arguments);
 		}
 
-		private static List<MethodInfo> obtenerMetodosMismoTamanno(Type clazz, string methodName, Type[] signature)
+		private static List<MethodInfo> getSameSizeMethods(Type clazz, string methodName, Type[] signature)
 		{
-			List<MethodInfo> metodosEncontrados = new List<MethodInfo>();
+			List<MethodInfo> foundMethods = new List<MethodInfo>();
 			foreach (MethodInfo method in clazz.GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
 			{
-				bool esElMismoNombre = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
-				if (esElMismoNombre)
+				bool isSameName = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
+				if (isSameName)
 				{
-					bool poseenLaMismaCantidadDeArgumentos = method.GetParameters().Length == signature.Length;
-					if (poseenLaMismaCantidadDeArgumentos)
+					bool haveSameArgCount = method.GetParameters().Length == signature.Length;
+					if (haveSameArgCount)
 					{
-						metodosEncontrados.Add(method);
+						foundMethods.Add(method);
 					}
 				}
 			}
-			return metodosEncontrados;
+			return foundMethods;
 		}
 
-		private static List<MethodInfo> obtenerMetodosDiferenteTamanno(Type clazz, string methodName)
+		private static List<MethodInfo> getDifferentSizeMethods(Type clazz, string methodName)
 		{
-			List<MethodInfo> metodosEncontrados = new List<MethodInfo>();
+			List<MethodInfo> foundMethods = new List<MethodInfo>();
 			foreach (MethodInfo method in clazz.GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
 			{
-				bool esElMismoNombre = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
-				if (esElMismoNombre)
+				bool isSameName = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
+				if (isSameName)
 				{
-					metodosEncontrados.Add(method);
+					foundMethods.Add(method);
 				}
 			}
-			return metodosEncontrados;
+			return foundMethods;
 		}
 
-		private static bool existeAlMenosUnMetodoConLaMismaCantidadArgumentos(Type clazz, string methodName, Type[] signature)
+		private static bool atLeastOneMethodWithSameArgCount(Type clazz, string methodName, Type[] signature)
 		{
 			foreach (MethodInfo method in clazz.GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
 			{
-				bool esElMismoNombre = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
-				if (esElMismoNombre)
+				bool isSameName = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
+				if (isSameName)
 				{
-					bool poseenLaMismaCantidadDeArgumentos = method.GetParameters().Length == signature.Length;
-					if (poseenLaMismaCantidadDeArgumentos)
+					bool haveSameArgCount = method.GetParameters().Length == signature.Length;
+					if (haveSameArgCount)
 					{
 						return true;
 					}
@@ -202,12 +202,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return false;
 		}
 
-		private static bool existeELNombreDelMetodoEnLaClase(Type clazz, string methodName)
+		private static bool methodNameExistsInClass(Type clazz, string methodName)
 		{
 			foreach (MethodInfo method in clazz.GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
 			{
-				bool esElMismoNombre = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
-				if (esElMismoNombre)
+				bool isSameName = string.Equals(method.Name, methodName, StringComparison.OrdinalIgnoreCase);
+				if (isSameName)
 				{
 					return true;
 				}

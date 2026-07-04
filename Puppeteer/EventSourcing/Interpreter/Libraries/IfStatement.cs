@@ -31,9 +31,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			object valorDeLaExpresion = expression.Execute();
-			bool cumpleCondicion = (bool)valorDeLaExpresion;
-			if (cumpleCondicion)
+			object expressionValue = expression.Execute();
+			bool conditionMet = (bool)expressionValue;
+			if (conditionMet)
 			{
 				if (!(ifBranchStatement is BlockStatement))
 				{
@@ -55,10 +55,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
-			Expression resultado = null;
+			Expression result = null;
 			if (elseBranchStatement != null)
 			{
-				resultado = Expression.IfThenElse(
+				result = Expression.IfThenElse(
 					expression.ExecuteExpression(parametersParam),
 					ifBranchStatement.ExecuteExpression(parametersParam, outputParam),
 					elseBranchStatement.ExecuteExpression(parametersParam, outputParam)
@@ -66,18 +66,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (ifBranchStatement != null)
 			{
-				resultado = Expression.IfThen(
+				result = Expression.IfThen(
 					expression.ExecuteExpression(parametersParam),
 					ifBranchStatement.ExecuteExpression(parametersParam, outputParam)
 				);
 			}
 			else
 			{
-				resultado = Expression.IsTrue(
+				result = Expression.IsTrue(
 					expression.ExecuteExpression(parametersParam)
 				);
 			}
-			return resultado;
+			return result;
 		}
 
 		internal override void ValidateStatically()
@@ -123,33 +123,33 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (elseBranchStatement != null) elseBranchStatement.Visit(v);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("If (");
-			expression.write(resultado, databaseType);
-			resultado.Append(")\r");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("If (");
+			expression.write(result, databaseType);
+			result.Append(")\r");
 
 			if (!(ifBranchStatement is BlockStatement))
 			{
 				tabs++;
 			}
-			ifBranchStatement.Write(resultado, tabs, databaseType);
+			ifBranchStatement.Write(result, tabs, databaseType);
 			if (!(ifBranchStatement is BlockStatement))
 			{
 				tabs--;
 			}
 
-			if (elseBranchStatement != null && !(elseBranchStatement.FueFiltrado))
+			if (elseBranchStatement != null && !(elseBranchStatement.WasFiltered))
 			{
-				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-				resultado.Append("Else\r");
+				if (tabs > 0) result.Append(GenerateTabs(tabs));
+				result.Append("Else\r");
 				if (!(elseBranchStatement is BlockStatement))
 				{
 					tabs++;
 				}
-				elseBranchStatement.Write(resultado, tabs, databaseType);
+				elseBranchStatement.Write(result, tabs, databaseType);
 				if (!(elseBranchStatement is BlockStatement))
 				{
 					tabs--;

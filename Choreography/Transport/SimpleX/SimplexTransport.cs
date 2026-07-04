@@ -59,8 +59,8 @@ namespace Choreography.Transport.SimpleX
         private SmpClient _client;
         private readonly ConcurrentDictionary<string, PendingInvitation> _pending = new();
         private readonly SemaphoreSlim _connectLock = new(1, 1);
-        // Bug 19 (SMP resume): null si no se configuro un directorio de persistencia (los canales
-        // siguen funcionando, solo que no son resumibles tras process-death).
+        // Bug 19 (SMP resume): null if no persistence directory was configured (the channels
+        // still work, they just are not resumable after a process-death).
         private readonly SimplexChannelStore _channelStore;
 
         internal IPuppeteerLogger Logger => _logger;
@@ -205,8 +205,8 @@ namespace Choreography.Transport.SimpleX
                 invitation.InviterId, invitation.Purpose, _logger);
             await channel.StartAsync(CancellationToken.None);
 
-            // Bug 19 (SMP resume): persistir el estado del canal establecido para poder
-            // resumirlo tras un process-death (re-SUB unilateral, sin re-handshake).
+            // Bug 19 (SMP resume): persist the established channel's state so it can be
+            // resumed after a process-death (unilateral re-SUB, without re-handshake).
             _channelStore?.Save(invitation.InviterId, invitation.Purpose, forwardQueue, reverseQueue);
 
             return channel;
@@ -285,21 +285,21 @@ namespace Choreography.Transport.SimpleX
                 envelope.PerformerId, pending.Purpose, _logger);
             await channel.StartAsync(ct);
 
-            // Bug 19 (SMP resume): persistir el estado del canal establecido para poder
-            // resumirlo tras un process-death (re-SUB unilateral, sin re-handshake).
+            // Bug 19 (SMP resume): persist the established channel's state so it can be
+            // resumed after a process-death (unilateral re-SUB, without re-handshake).
             _channelStore?.Save(envelope.PerformerId, pending.Purpose, reverseQueue, forwardQueue);
 
             return channel;
         }
 
-        // Bug 19 (SMP resume) — Reabre un canal previamente establecido tras un process-death,
-        // SIN handshake. SMP es store-and-forward: la queue del canal sobrevive en el server con
-        // lo que el peer publico mientras este nodo estaba muerto. Reconstruimos las dos queues
-        // desde el estado persistido (Save al establecer el canal), reconectamos al server y
-        // levantamos un SimplexChannel; su StartAsync re-SUBea el inbound y drena lo encolado.
+        // Bug 19 (SMP resume) — Reopens a previously established channel after a process-death,
+        // WITHOUT handshake. SMP is store-and-forward: the channel's queue survives on the server
+        // with whatever the peer published while this node was dead. We rebuild the two queues
+        // from the persisted state (Save on channel establishment), reconnect to the server and
+        // bring up a SimplexChannel; its StartAsync re-SUBs the inbound and drains what was queued.
         //
-        // Es UNILATERAL: el peer no participa (sigue publicando a la misma queue). Devuelve null si
-        // no hay estado persistido para (peer, purpose) — el caller decide el fallback.
+        // It is UNILATERAL: the peer does not participate (it keeps publishing to the same queue).
+        // Returns null if there is no persisted state for (peer, purpose) — the caller decides the fallback.
         public async Task<IStageChannel> ResumeChannelAsync(PerformerId peer, ChannelPurpose purpose, CancellationToken ct)
         {
             if (_channelStore == null) return null;
@@ -351,9 +351,9 @@ namespace Choreography.Transport.SimpleX
             return SmpCrypto.ExtractMsgBodyFromRcvMsgBody(rcvMsgBody);
         }
 
-        // Cierra la conexion al SMP server. Tras esto el server deja de ver una subscripcion
-        // de este nodo, asi que los mensajes que el peer publique se encolan (store-and-forward)
-        // hasta que un ResumeChannelAsync re-SUBee la queue desde el estado persistido.
+        // Closes the connection to the SMP server. After this the server no longer sees a
+        // subscription from this node, so the messages the peer publishes are queued (store-and-forward)
+        // until a ResumeChannelAsync re-SUBs the queue from the persisted state.
         public async ValueTask DisposeAsync()
         {
             if (_client != null) await _client.DisposeAsync();

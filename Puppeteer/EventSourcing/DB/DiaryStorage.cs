@@ -338,7 +338,7 @@ namespace Puppeteer.EventSourcing.DB
 			throw new NotImplementedException($"{GetType().Name} has not adopted ReadReactionCheckpoints yet (Materialize v2 Fase 3).");
 		}
 
-		protected internal abstract MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin);
+		protected internal abstract MemoryStream Archive(DateTime startDate, DateTime endDate);
 		protected internal abstract IEnumerable<string> ListActorNames(string name);
 		protected internal abstract void Trim(DateTime trimmedDown);
 
@@ -364,43 +364,43 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal abstract void ChangePrimaryKey();
 
-		private const double CANTIDAD_DE_DIAS_CON_APORTE_MINIMO = 3;
+		private const double DAYS_WITH_MINIMUM_CONTRIBUTION = 3;
 
 
-		protected static int CalcularMaximoDeActoresACargar(IEnumerable<int> acumuladoPorDia, double minimumContributionPercent)
+		protected static int CalculateMaxActorsToLoad(IEnumerable<int> accumulatedPerDay, double minimumContributionPercent)
 		{
-			if (acumuladoPorDia == null) throw new ArgumentException(nameof(acumuladoPorDia));
+			if (accumulatedPerDay == null) throw new ArgumentException(nameof(accumulatedPerDay));
 			if (minimumContributionPercent < 0 && minimumContributionPercent > 100) throw new ArgumentException(nameof(minimumContributionPercent));
 
-			var actoresAcumulados = 0;
-			var acumuladoDeDiasConAporteMinimo = 0;
-			double porcentajeTotalDelDia = 0;
+			var accumulatedActors = 0;
+			var daysWithMinimumContribution = 0;
+			double dayTotalPercent = 0;
 
 
-			foreach (var acumuladoDiaActual in acumuladoPorDia)
+			foreach (var currentDayAccumulated in accumulatedPerDay)
 			{
-				actoresAcumulados += acumuladoDiaActual;
-				porcentajeTotalDelDia = ((double)acumuladoDiaActual / actoresAcumulados) * 100;
+				accumulatedActors += currentDayAccumulated;
+				dayTotalPercent = ((double)currentDayAccumulated / accumulatedActors) * 100;
 
 				/*
-				acumuladoDeDiasConAporteMinimo = (porcentajeTotalDelDia < PORCENTAJE_MINIMO_DE_APORTE) ? acumuladoDeDiasConAporteMinimo + 1 : 0
+				daysWithMinimumContribution = (dayTotalPercent < minimumContributionPercent) ? daysWithMinimumContribution + 1 : 0
 				*/
 
-				if (porcentajeTotalDelDia < minimumContributionPercent)
+				if (dayTotalPercent < minimumContributionPercent)
 				{
-					acumuladoDeDiasConAporteMinimo++;
+					daysWithMinimumContribution++;
 				}
 				else
 				{
-					acumuladoDeDiasConAporteMinimo = 0;
+					daysWithMinimumContribution = 0;
 				}
 
-				if (acumuladoDeDiasConAporteMinimo >= CANTIDAD_DE_DIAS_CON_APORTE_MINIMO)
+				if (daysWithMinimumContribution >= DAYS_WITH_MINIMUM_CONTRIBUTION)
 				{
 					break;
 				}
 			}
-			return actoresAcumulados;
+			return accumulatedActors;
 		}
 
 		protected void SaveTempFileToZip(ZipArchive archive, string fileName)

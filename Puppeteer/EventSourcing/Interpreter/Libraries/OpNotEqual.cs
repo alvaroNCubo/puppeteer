@@ -26,9 +26,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			catch
 			{
-				var tipo1 = e1.ComputeType();
-				var tipo2 = e2.ComputeType();
-				throw new LanguageException($"Cannot compare types '{tipo1}' and '{tipo2}' with '!='.");
+				var type1 = e1.ComputeType();
+				var type2 = e2.ComputeType();
+				throw new LanguageException($"Cannot compare types '{type1}' and '{type2}' with '!='.");
 			}
 		}
 
@@ -54,11 +54,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return Expression.Not(innerExpression);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" != ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" != ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

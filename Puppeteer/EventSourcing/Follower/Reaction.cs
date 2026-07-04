@@ -173,7 +173,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// - Implements LRU (Least Recently Used) with a 100-entry cap.
 		// - Each entry contains: (parsed Program, lastAccessTick for LRU).
 		// Purpose: avoid re-parsing the same script for every ActionEventData.
-		private Dictionary<int, (Program program, int lastAccessTick)> cachedProgramas;
+		private Dictionary<int, (Program program, int lastAccessTick)> cachedPrograms;
 		private int cacheAccessTick = 0;
 		private const int MAX_CACHE_SIZE = 100;
 
@@ -191,6 +191,15 @@ namespace Puppeteer.EventSourcing.Follower
 		private int argumentsDeserializationErrors = 0; // Errors deserializing Arguments (events skipped).
 		private int parseErrors = 0;                    // Parsing or validation errors (events skipped).
 
+		// Last reference-resolution failure for an ActionEventData (message + ActionId).
+		// SolveActionReferences swallows the exception so matching can proceed, but the
+		// cause was previously only visible via Debug output — invisible in a release
+		// leader, where this failure is exactly what leaves an observed action's
+		// @parameters unresolved. Captured here (and routed to the actor Logger) so the
+		// cause is diagnosable in production, not only under a debugger.
+		private string lastResolutionErrorMessage = null;
+		private int lastResolutionErrorActionId = 0;
+
 		private ActorReactions actorReactions;
 		private readonly EventDataPool pushEventDataPool = new EventDataPool(32);
 
@@ -198,7 +207,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// AST, initial Parameters signature, expose data JSON). Negative
 		// caching included: failed matches are stored with Matched=false so
 		// repeated events with identical inputs skip the matcher entirely.
-		// Single-threaded access assumed (consistent with cachedProgramas
+		// Single-threaded access assumed (consistent with cachedPrograms
 		// above); the cache lives on the Reaction so multiple Patterns of
 		// the same Reaction share the dictionary while remaining
 		// distinguishable via the Pattern reference in the key.
@@ -264,6 +273,10 @@ namespace Puppeteer.EventSourcing.Follower
 		public long ActionIdNotFoundErrors         => actionIdNotFoundErrors;
 		public long ArgumentsDeserializationErrors => argumentsDeserializationErrors;
 		public long ParseErrors                    => parseErrors;
+		// Human-readable description of the most recent reference-resolution failure
+		// (or null if none), so an operator can see WHY an observed action's
+		// @parameters failed to resolve without attaching a debugger.
+		public string LastResolutionError          => lastResolutionErrorMessage == null ? null : $"ActionId={lastResolutionErrorActionId}: {lastResolutionErrorMessage}";
 		public TimeSpan ParameterRegistrationTime  => parameterRegistrationTime.Elapsed;
 		public DateTime LastActionAt               { get; private set; }
 
@@ -777,7 +790,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			matchTree = new MatchTree(ActorHandler, reactionAction, hydrationMode, untilSeekIndex, checkpointVector, diaryStorage, reactionId, forEachSpec: forEachSpec);
 			symbolTable = new SymbolTable();
-			cachedProgramas = new Dictionary<int, (Program program, int lastAccessTick)>();
+			cachedPrograms = new Dictionary<int, (Program program, int lastAccessTick)>();
 
 			// Resume optimization (checkpoint redesign, steps 2-4 — notes/reactions-checkpoint-policy.md).
 			// For coverage the resume is NOT from genesis: it is governed by the closed-frontier (local
@@ -809,6 +822,26 @@ namespace Puppeteer.EventSourcing.Follower
 			// A single shared instance per Reaction.Execute (Temporal is stateless).
 			symbolTable.SetVariable("time", new Temporal(), typeof(Temporal));
 
+			// Seed the reaction's fresh symbol table with the actor's GLOBAL TYPES. An
+			// observed action body may reference actor globals (e.g. a receiver chain like
+			// company.Sales.CurrentStore.Sale(...)). Those globals live in the actor's own
+			// symbol table (built as the actor executed). This reaction table is otherwise
+			// populated only from the events THIS reaction replays; if it resumes from a
+			// checkpoint past the events that created a global, the global is unknown here,
+			// its type falls back to Object, and SolveActionReferences -> ValidateStatically
+			// fails to resolve the body — swallowed — so the action's @parameters never bind
+			// and the match is lost (the "resolves on rehydration-from-genesis but not on a
+			// mid-journal resume" asymmetry). Seeding TYPES (not values — matching is static)
+			// makes resolution independent of the resume point. Events replayed during
+			// catch-up still refine these entries (SetVariable with a concrete value).
+			foreach (var globalSymbol in actorHandler.SymbolTable.EnumerateGlobalSymbols())
+			{
+				if (globalSymbol != null && globalSymbol.type != null && !symbolTable.HasVariable(globalSymbol.name))
+				{
+					symbolTable.SetVariable(globalSymbol.name, null, globalSymbol.type);
+				}
+			}
+
 			// Per-Reaction Parser pool. Created AFTER symbolTable so the pool's
 			// constructor binds to the SymbolTable that holds 'time' and the
 			// other Reaction-local globals. actorHandler.ParsersPool cannot be
@@ -834,6 +867,8 @@ namespace Puppeteer.EventSourcing.Follower
 			actionIdNotFoundErrors = 0;
 			argumentsDeserializationErrors = 0;
 			parseErrors = 0;
+			lastResolutionErrorMessage = null;
+			lastResolutionErrorActionId = 0;
 
 			// Reset Phase A counters so each Execute() starts from zero.
 			// Equivalent in scope to ResetCounters() but happens automatically
@@ -883,7 +918,7 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"  Cache hits:              {cacheHits}");
 			System.Diagnostics.Debug.WriteLine($"  Cache misses:            {cacheMisses}");
 			System.Diagnostics.Debug.WriteLine($"  Hit ratio:               {(cacheHits + cacheMisses > 0 ? (cacheHits * 100.0 / (cacheHits + cacheMisses)).ToString("F2") : "N/A")}%");
-			System.Diagnostics.Debug.WriteLine($"  Final cache size:        {cachedProgramas.Count}/{MAX_CACHE_SIZE}");
+			System.Diagnostics.Debug.WriteLine($"  Final cache size:        {cachedPrograms.Count}/{MAX_CACHE_SIZE}");
 			System.Diagnostics.Debug.WriteLine($"  Parameters registered:   {parametersRegistered}");
 			System.Diagnostics.Debug.WriteLine($"  Registration time:       {parameterRegistrationTime.ElapsedMilliseconds}ms");
 			System.Diagnostics.Debug.WriteLine($"==================================");
@@ -926,7 +961,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			// Step 9: clean up resources (incomplete nodes, pools, etc.).
 			matchTree.Clear();
-			ClearProgramaCache();
+			ClearProgramCache();
 
 			// Notify observability subscribers (e.g. PerformanceTracer) of graceful stop.
 			// They snapshot ActionEventsProcessed/CacheHits/etc. to emit a final Span.
@@ -1017,9 +1052,29 @@ namespace Puppeteer.EventSourcing.Follower
 		internal void SetProgramAction(string script, string when)
 		{
 			EnsureNoActionConfigured();
+			EnsureNoTellInProgramPlane(script);
 			this.scriptForCmd = script;
 			this.scriptForChk = when;  // null when no `when:` was supplied
 			this.actionType = ReactionActionType.Program;
+		}
+
+		// Build-time guard for the Program plane. `.Program.Emit(...)` runs read-only
+		// against the actor's libraries: it journals no entry and dispatches no
+		// envelope, so a cross-actor `tell` placed here would never reach a hearer.
+		// A `tell` is the leaf verb of the Causation plane. Reject it at definition
+		// time with an actionable message instead of letting the read-only executor
+		// fail later with the generic "'tell' is not valid in PerformQuery" — the
+		// author must move the statement to `.Causation.Continue(...)`.
+		private void EnsureNoTellInProgramPlane(string script)
+		{
+			if (Lexer.SourceContainsToken(script, TokenType.tell))
+			{
+				throw new LanguageException(
+					$"Reaction '{name}': a 'tell' cannot live in the Program plane. "
+					+ ".Program.Emit(...) runs read-only against the actor's libraries (it journals no entry "
+					+ "and dispatches no envelope), so a cross-actor 'tell' placed there is never delivered. "
+					+ "Cross-actor causation is the Causation plane: move it to .Causation.Continue(\"tell ...\").");
+			}
 		}
 
 		internal void SetCausationAction(string script)
@@ -1109,12 +1164,12 @@ namespace Puppeteer.EventSourcing.Follower
 			return this;
 		}
 
-		internal void ExecuteAction(Parameters matchedParameters, long triggeringEntryId)
+		internal void ExecuteAction(Parameters matchedParameters, long triggeringEntryId, DateTime occurredAt)
 		{
 			switch (actionType)
 			{
 				case ReactionActionType.Program:
-					ExecuteProgram(matchedParameters, triggeringEntryId);
+					ExecuteProgram(matchedParameters, triggeringEntryId, occurredAt);
 					break;
 
 				case ReactionActionType.Causation:
@@ -1143,7 +1198,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// The optional `when:` check is folded in here (replaces the old
 		// EmitWithCheck branch): if scriptForChk is set, PerformChk runs
 		// first and the script is only run when the check returns OK.
-		private void ExecuteProgram(Parameters matchedParameters, long triggeringEntryId)
+		private void ExecuteProgram(Parameters matchedParameters, long triggeringEntryId, DateTime occurredAt)
 		{
 			Parameters parameters = actorHandler.ParametersPool.Rent();
 			try
@@ -1170,7 +1225,24 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				actorHandler.PerformEmit(this.scriptForCmd, parameters);
+				string emitted = actorHandler.PerformEmit(this.scriptForCmd, parameters);
+
+				// Push channel (Paper 9 / OutputTarget): if a sink is configured and
+				// the projection is non-empty, deliver it. This is the EPHEMERAL
+				// channel. The Reaction owns the metadata the transport needs and
+				// PerformEmit cannot: the two clocks of the triggering event
+				// (EntryId = logical, OccurredAt = wall) for delivery-IVM
+				// (dedup/resync/staleness), and the match bindings (e.g.
+				// empleado='juan') from which the transport composes its routing/group
+				// keys. The sink receives the immutable document only — never the
+				// pooled Output buffer. PerformEmit already released the read lock, so
+				// this hand-off does not stall other readers.
+				IOutputSink sink = actorHandler.OutputTarget;
+				if (sink != null && !string.IsNullOrEmpty(emitted))
+				{
+					var push = new PushDocument(emitted, this.name, triggeringEntryId, occurredAt, SnapshotBindings(matchedParameters));
+					sink.Push(in push);
+				}
 
 				var cb = LabInstrumentation.OnReactionEmit;
 				if (cb != null) cb(triggeringEntryId, this.scriptForCmd, HashParameters8(matchedParameters));
@@ -1180,6 +1252,24 @@ namespace Puppeteer.EventSourcing.Follower
 				actorHandler.ParametersPool.Return(parameters);
 				_configureParameters = null;
 			}
+		}
+
+		// Snapshot the match captures into an immutable name→value map for the
+		// PushDocument. Mirrors RecordCompleteMatch's filter (exclude the
+		// well-known non-domain parameters Now/Ip/User) so the bindings reflect
+		// domain captures only — the dimensions a transport would route by.
+		private static IReadOnlyDictionary<string, object> SnapshotBindings(Parameters matchedParameters)
+		{
+			var bindings = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+			if (matchedParameters != null)
+			{
+				foreach (var p in matchedParameters)
+				{
+					if (p.Name == "Now" || p.Name == "Ip" || p.Name == "User") continue;
+					bindings[p.Name ?? string.Empty] = p.GetValue();
+				}
+			}
+			return bindings;
 		}
 
 		// Causation plane runtime: lift InReactionAction so the script's
@@ -1363,7 +1453,7 @@ namespace Puppeteer.EventSourcing.Follower
 			if (eventData is ActionEventData actionData)
 			{
 				// Check whether the Program is already in our local cache.
-				bool isFirstTime = !cachedProgramas.ContainsKey(actionData.ActionId);
+				bool isFirstTime = !cachedPrograms.ContainsKey(actionData.ActionId);
 
 				if (isFirstTime)
 				{
@@ -1379,7 +1469,7 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 
 				// Get the cached Program to pass it into pattern matching.
-				if (cachedProgramas.TryGetValue(actionData.ActionId, out var entry))
+				if (cachedPrograms.TryGetValue(actionData.ActionId, out var entry))
 				{
 					cachedProgram = entry.program;
 					// Canonical: same Program reference is reused across every event
@@ -1454,7 +1544,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 
 			// Check whether it is already cached.
-			if (cachedProgramas.ContainsKey(actionData.ActionId))
+			if (cachedPrograms.ContainsKey(actionData.ActionId))
 			{
 				cacheHits++;
 				System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] ActionId={actionData.ActionId} already cached (hit #{cacheHits}), skipping");
@@ -1507,22 +1597,29 @@ namespace Puppeteer.EventSourcing.Follower
 					System.Diagnostics.Debug.WriteLine($"  - {param.Name} : {param.ParameterType.Name} [{modifierStr}] = {valueStr}");
 				}
 
-				// Load parameters into the program and resolve references.
-				program.LoadArguments(eventParameters);
+				// Load parameters into the program and resolve references. Do NOT recompute
+				// Eval parameters here: the Reaction is a static matcher, not the transactional
+				// writer. Their value was computed at command time and is already loaded into
+				// eventParameters from the journaled arguments blob. Re-executing the eval
+				// expression on this observer path (with a type-only, value-less seeded symbol
+				// table) dereferences a null global and throws a NullReferenceException, which
+				// SolveActionReferences swallows — leaving the action unresolved so the match
+				// (and its tell) never fires on the live push, only on a full batch replay.
+				program.LoadArguments(eventParameters, recomputeEvalParameters: false);
 				program.SolveReferences(eventParameters, withStaticValidation: true);
 
 				// Store the Program with its Parameters in the cache.
 				// IMPORTANT: Parameters stays bound to the Program and is NOT returned to the pool.
 				// If the cache is full, evict the least recently used entry.
-				if (cachedProgramas.Count >= MAX_CACHE_SIZE)
+				if (cachedPrograms.Count >= MAX_CACHE_SIZE)
 				{
-					int lruActionId = cachedProgramas.OrderBy(kvp => kvp.Value.lastAccessTick).First().Key;
-					cachedProgramas.Remove(lruActionId);
+					int lruActionId = cachedPrograms.OrderBy(kvp => kvp.Value.lastAccessTick).First().Key;
+					cachedPrograms.Remove(lruActionId);
 					System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] Cache full, evicted ActionId={lruActionId} (LRU)");
 				}
 
 				cacheAccessTick++;
-				cachedProgramas[actionData.ActionId] = (program, cacheAccessTick);
+				cachedPrograms[actionData.ActionId] = (program, cacheAccessTick);
 
 				// Count parameters for metrics.
 				// Playbill final refactor: IsNow is no longer filtered — every parameter is a user parameter.
@@ -1534,13 +1631,13 @@ namespace Puppeteer.EventSourcing.Follower
 				parametersRegistered += userParamCount;
 				parameterRegistrationTime.Stop();
 
-				System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] Cached ActionId={actionData.ActionId} with {userParamCount} parameters (cache size: {cachedProgramas.Count}/{MAX_CACHE_SIZE}, miss #{cacheMisses})");
+				System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] Cached ActionId={actionData.ActionId} with {userParamCount} parameters (cache size: {cachedPrograms.Count}/{MAX_CACHE_SIZE}, miss #{cacheMisses})");
 
 				// Extract global variable declarations and add them to the symbol table.
-				var declaraciones = program.Declaraciones;
-				if (declaraciones != null)
+				var declarations = program.Declarations;
+				if (declarations != null)
 				{
-					foreach (var id in declaraciones)
+					foreach (var id in declarations)
 					{
 						if (id.IsGlobalVariable && id.ForcedType != null)
 						{
@@ -1554,16 +1651,38 @@ namespace Puppeteer.EventSourcing.Follower
 			catch (Exception ex)
 			{
 				// Classify the error type and update metrics (Commit G).
+				string phase;
 				if (ex.Message.Contains("LoadArguments") || ex.Message.Contains("Parameter structure mismatch"))
 				{
 					argumentsDeserializationErrors++;
-					System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] ERROR (Commit G): Arguments deserialization failed for ActionId={actionData.ActionId}: {ex.Message} (total errors: {argumentsDeserializationErrors})");
+					phase = "Arguments deserialization";
 				}
 				else
 				{
 					parseErrors++;
-					System.Diagnostics.Debug.WriteLine($"[SolveActionReferences] ERROR (Commit G): Parse/Validation failed for ActionId={actionData.ActionId}: {ex.Message} (total errors: {parseErrors})");
+					phase = "Parse/Validation";
 				}
+
+				// Swallowing keeps matching alive, but the cause must remain diagnosable:
+				// this is precisely the failure that leaves an observed action's @parameters
+				// unresolved (they then reach the matcher without a bound value). Debug-only
+				// output is invisible in a release leader, so capture the message and route
+				// it through the actor Logger.
+				RecordResolutionError(actionData.ActionId, $"{phase} failed in SolveActionReferences: {ex.Message}", ex);
+			}
+		}
+
+		// Capture the most recent reference-resolution failure and surface it through the
+		// actor Logger (Debug output alone is a no-op in release builds).
+		private void RecordResolutionError(int actionId, string message, Exception ex)
+		{
+			lastResolutionErrorActionId = actionId;
+			lastResolutionErrorMessage = message;
+			System.Diagnostics.Debug.WriteLine($"[Reaction '{Name}'] {message} (ActionId={actionId})");
+			IPuppeteerLogger logger = actorHandler?.Logger;
+			if (logger != null)
+			{
+				logger.Error($"[Reaction '{Name}'] {message} (ActionId={actionId}). The observed action's @parameters may reach the matcher unresolved.", ex);
 			}
 		}
 
@@ -1581,7 +1700,7 @@ namespace Puppeteer.EventSourcing.Follower
 		private void SolveActionParameters(ActionEventData actionData)
 		{
 			// Get the cached Program and update its access timestamp.
-			if (!cachedProgramas.TryGetValue(actionData.ActionId, out var cacheEntry))
+			if (!cachedPrograms.TryGetValue(actionData.ActionId, out var cacheEntry))
 			{
 				System.Diagnostics.Debug.WriteLine($"[SolveActionParameters] WARNING: ActionId={actionData.ActionId} not in cache");
 				return;
@@ -1589,7 +1708,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			// Update lastAccessTick for LRU (Commit E).
 			cacheAccessTick++;
-			cachedProgramas[actionData.ActionId] = (cacheEntry.program, cacheAccessTick);
+			cachedPrograms[actionData.ActionId] = (cacheEntry.program, cacheAccessTick);
 			cacheHits++;
 
 			try
@@ -1616,7 +1735,7 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				// Classify the error type (Commit G).
 				argumentsDeserializationErrors++;
-				System.Diagnostics.Debug.WriteLine($"[SolveActionParameters] ERROR (Commit G): LoadArguments failed for ActionId={actionData.ActionId}: {ex.Message} (total errors: {argumentsDeserializationErrors})");
+				RecordResolutionError(actionData.ActionId, $"LoadArguments failed in SolveActionParameters: {ex.Message}", ex);
 			}
 		}
 
@@ -1754,9 +1873,9 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(program);
 
-			var declaraciones = program.Declaraciones;
-			if (declaraciones == null) return;
-			foreach (var id in declaraciones)
+			var declarations = program.Declarations;
+			if (declarations == null) return;
+			foreach (var id in declarations)
 			{
 				if (id.IsGlobalVariable && id.ForcedType != null)
 				{
@@ -1806,12 +1925,12 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
-		private void ClearProgramaCache()
+		private void ClearProgramCache()
 		{
-			if (cachedProgramas != null)
+			if (cachedPrograms != null)
 			{
-				cachedProgramas.Clear();
-				cachedProgramas = null;
+				cachedPrograms.Clear();
+				cachedPrograms = null;
 			}
 		}
 
@@ -1829,9 +1948,9 @@ namespace Puppeteer.EventSourcing.Follower
 		//    - SEMANTIC DUALITY is preserved: @param is the identifier, not its literal value.
 		//
 		// Example ActionEventData:
-		//   Cached script: "cliente.Pagar(@currency);"
+		//   Cached script: "obj.DoSomething(@currency);"
 		//   Arguments:     "currency=200.75"
-		//   Returned script: "cliente.Pagar(@currency);" (NOT expanded to 200.75)
+		//   Returned script: "obj.DoSomething(@currency);" (NOT expanded to 200.75)
 		//
 		// Pattern matching registers @currency in SymbolTable with type+value,
 		// allowing matches both by identifier (@currency) and by type (decimal).
@@ -1922,6 +2041,24 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 
 			lastProcessedEntryId = eventData.EntryId;
+		}
+
+		// Push-loop resilience: a single event whose match throws must NOT permanently
+		// kill a live Cue/Job push loop (ReplayEvent has no internal catch, and it
+		// advances lastProcessedEntryId only after the match, so an uncaught throw both
+		// faults the loop Task and leaves the cursor behind — the event becomes a poison
+		// that re-throws on every restart). The push loop calls this on a faulted event:
+		// it records the fault and advances the cursor past the entry so the loop stays
+		// alive and keeps making progress on later events.
+		internal void OnPushEventFaulted(long entryId, Exception ex)
+		{
+			IPuppeteerLogger logger = actorHandler?.Logger;
+			if (logger != null)
+			{
+				logger.Error($"[Reaction '{Name}'] push event EntryId={entryId} faulted during matching; skipping it to keep the reaction live.", ex);
+			}
+			System.Diagnostics.Debug.WriteLine($"[Reaction '{Name}'] push event EntryId={entryId} faulted during matching: {ex.Message}");
+			if (entryId > lastProcessedEntryId) lastProcessedEntryId = entryId;
 		}
 
 		void DB.IActorEventJournalClient.ReplayEvent(DB.EventData eventData)

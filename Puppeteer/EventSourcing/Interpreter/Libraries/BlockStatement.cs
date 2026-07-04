@@ -21,7 +21,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			this.symbolTable = symbolTable;
 		}
 
-		internal Statement[] Comandos
+		internal Statement[] Commands
 		{
 			get
 			{
@@ -55,19 +55,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				if (cmd is NullStatement) continue;
 
-				if (cmd is NewInstanceStatement nuevaInstanciaCmd)
+				if (cmd is NewInstanceStatement newInstanceCmd)
 				{
-					if (nuevaInstanciaCmd.LValue is Id id && !id.IsParameter && id.IsOriginalLValueDeclaration)
+					if (newInstanceCmd.LValue is Id id && !id.IsParameter && id.IsOriginalLValueDeclaration)
 					{
-						Expression allocateLocalStorageExpr = nuevaInstanciaCmd.AllocateLocalStorageExpression(parametersParam);
+						Expression allocateLocalStorageExpr = newInstanceCmd.AllocateLocalStorageExpression(parametersParam);
 						expressions.Add(allocateLocalStorageExpr);
 					}
-					else if (nuevaInstanciaCmd.LValue is DottedId idConPunto)
+					else if (newInstanceCmd.LValue is DottedId dottedId)
 					{
-						nuevaInstanciaCmd.AllocateLocalStorageExpression(parametersParam);
+						newInstanceCmd.AllocateLocalStorageExpression(parametersParam);
 					}
 
-					ParameterExpression localVarDeclarationExpr = (ParameterExpression)nuevaInstanciaCmd.LocalStorageExpression;
+					ParameterExpression localVarDeclarationExpr = (ParameterExpression)newInstanceCmd.LocalStorageExpression;
 					if (localVarDeclarationExpr != null) localVars.Add(localVarDeclarationExpr);
 
 				}
@@ -111,19 +111,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("{\r");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("{\r");
 			tabs++;
 			foreach (Statement source in statements)
 			{
-				source.Write(resultado, tabs, databaseType);
+				source.Write(result, tabs, databaseType);
 			}
 			tabs--;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("}\r");
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("}\r");
 		}
 
 		internal override void Visit(ASTVisitor v)

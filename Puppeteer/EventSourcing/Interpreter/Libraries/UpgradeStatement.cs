@@ -89,13 +89,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			Expression bodyExpr = body.ExecuteExpression(parametersParam, outputParam);
 
-			Expression resultado = Expression.IfThenElse(
+			Expression result = Expression.IfThenElse(
 				isAppliedCall,
 				validateCall,
 				Expression.Block(bodyExpr, markCall)
 			);
 
-			return resultado;
+			return result;
 		}
 
 		internal override void ValidateStatically()
@@ -117,19 +117,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			body.Visit(v);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-			resultado.Append("upgrade('");
-			resultado.Append(upgradeName);
-			resultado.Append("')\r");
+			if (WasFiltered) return;
+			if (tabs > 0) result.Append(GenerateTabs(tabs));
+			result.Append("upgrade('");
+			result.Append(upgradeName);
+			result.Append("')\r");
 
 			if (!(body is BlockStatement))
 			{
 				tabs++;
 			}
-			body.Write(resultado, tabs, databaseType);
+			body.Write(result, tabs, databaseType);
 			if (!(body is BlockStatement))
 			{
 				tabs--;

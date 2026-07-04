@@ -43,19 +43,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (lValue is DottedId reference)
 			{
 				object value = reference.GetTarget();
-				object valorDeLaExpresionDerecha = rValue.Execute();
+				object rightExpressionValue = rValue.Execute();
 
 				FieldInfo fieldInfo = FindField();
 				if (fieldInfo != null)
 				{
-					fieldInfo.SetValue(value, TypeConversion.ImplicitCast(valorDeLaExpresionDerecha, fieldInfo.FieldType));
+					fieldInfo.SetValue(value, TypeConversion.ImplicitCast(rightExpressionValue, fieldInfo.FieldType));
 					return;
 				}
 
 				PropertyInfo propertyInfo = FindProperty();
 				if (propertyInfo != null)
 				{
-					propertyInfo.SetValue(value, TypeConversion.ImplicitCast(valorDeLaExpresionDerecha, propertyInfo.PropertyType));
+					propertyInfo.SetValue(value, TypeConversion.ImplicitCast(rightExpressionValue, propertyInfo.PropertyType));
 					return;
 				}
 				throw new LanguageException($"Type of variable '{reference.Id()}' does not have a property named '{reference.Property()}'.");
@@ -66,12 +66,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (lValue is SubscriptAstExpression subscript)
 			{
-				object valorDeLaExpresionDerecha = rValue.Execute();
-				subscript.ExecuteAssignment(valorDeLaExpresionDerecha);
+				object rightExpressionValue = rValue.Execute();
+				subscript.ExecuteAssignment(rightExpressionValue);
 			}
 			else
 			{
-				object valorDeLaExpresionDerecha = rValue.Execute();
+				object rightExpressionValue = rValue.Execute();
 				// Pass the DECLARED type of the rValue, not the concrete runtime one. The
 				// declared type is the one the ForcedType setter would have fixed during
 				// ValidateStatically; if the concrete one is stored in symbol.type, a
@@ -82,20 +82,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// PerformCmd skips ValidateStatically (e.g. it contains Eval); the
 				// runtime value stays inspectable via symbol.value.GetType().
 				Type rightExpressionType = rValue.ComputeType();
-				if (rightExpressionType == null && valorDeLaExpresionDerecha != null)
+				if (rightExpressionType == null && rightExpressionValue != null)
 				{
-					rightExpressionType = valorDeLaExpresionDerecha.GetType();
+					rightExpressionType = rightExpressionValue.GetType();
 				}
-				string nuevaVariable = ((Id)lValue).Name;
-				((Id)lValue).Store(valorDeLaExpresionDerecha, rightExpressionType);
+				string newVariable = ((Id)lValue).Name;
+				((Id)lValue).Store(rightExpressionValue, rightExpressionType);
 			}
 		}
 
 		internal Expression AllocateLocalStorageExpression(ParameterExpression parametersParam)
 		{
-			if (lValue is DottedId referenciaIdConPunto)
+			if (lValue is DottedId dottedReferenceId)
 			{
-				return referenciaIdConPunto.AllocateStorageExpression(parametersParam);
+				return dottedReferenceId.AllocateStorageExpression(parametersParam);
 			}
 			else if (lValue is ChainedDotAccess)
 			{
@@ -105,9 +105,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return Expression.Empty();
 			}
-			else if (lValue is Id referenciaId)
+			else if (lValue is Id referenceId)
 			{
-				return referenciaId.AllocateStorageExpression(parametersParam, useLValueReference: referenciaId.IsLValue);
+				return referenceId.AllocateStorageExpression(parametersParam, useLValueReference: referenceId.IsLValue);
 			}
 			else
 			{
@@ -148,10 +148,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				// value = reference.GetTarget();
 				var instanceExpr = reference.GetTargetExpression(parametersParam);
-				// valorDeLaExpresionDerecha = rValue.ExecuteExpression();
-				var valorDerechaExpr = rValue.ExecuteExpression(parametersParam);
+				// rightExpressionValue = rValue.ExecuteExpression();
+				var rightExprValue = rValue.ExecuteExpression(parametersParam);
 
-				// Buscar FieldInfo
+				// Look up FieldInfo
 				var fieldInfo = FindFieldExpression(parametersParam);
 				if (fieldInfo != null)
 				{
@@ -161,25 +161,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					);
 					var castedValue = Expression.Call(
 						implicitCastMethod,
-						Expression.Convert(valorDerechaExpr, typeof(object)),
+						Expression.Convert(rightExprValue, typeof(object)),
 						Expression.Constant(fieldInfo.FieldType, typeof(Type))
 					);
 					var fieldExpr = Expression.Field(Expression.Convert(instanceExpr, fieldInfo.DeclaringType), fieldInfo);
 					return Expression.Assign(fieldExpr, Expression.Convert(castedValue, fieldInfo.FieldType));
 				}
 
-				// Buscar PropertyInfo
+				// Look up PropertyInfo
 				var propertyInfo = FindPropertyExpression(parametersParam);
 				if (propertyInfo != null)
 				{
-					// Expression: Expression.Assign(Expression.Property(instanceExpr, propertyInfo), valorDerechaExpr)
+					// Expression: Expression.Assign(Expression.Property(instanceExpr, propertyInfo), rightExprValue)
 					var implicitCastMethod = typeof(TypeConversion).GetMethod(
 						nameof(TypeConversion.ImplicitCast),
 						BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public
 					);
 					var castedValue = Expression.Call(
 						implicitCastMethod,
-						Expression.Convert(valorDerechaExpr, typeof(object)),
+						Expression.Convert(rightExprValue, typeof(object)),
 						Expression.Constant(propertyInfo.PropertyType, typeof(Type))
 					);
 					var propertyExpr = Expression.Property(Expression.Convert(instanceExpr, propertyInfo.DeclaringType), propertyInfo);
@@ -194,75 +194,89 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (lValue is SubscriptAstExpression subscript)
 			{
-				var valorDerechaExpr = rValue.ExecuteExpression(parametersParam);
-				return subscript.ExecuteAssignmentExpression(parametersParam, valorDerechaExpr);
+				var rightExprValue = rValue.ExecuteExpression(parametersParam);
+				return subscript.ExecuteAssignmentExpression(parametersParam, rightExprValue);
 			}
 			else
 			{
-				var valorDerechaExpr = rValue.ExecuteExpression(parametersParam);
 				var id = (Id)lValue;
 
-				var objetoField = typeof(VariableSymbol).GetField(
+				// Compile the LValue storage BEFORE the rValue. For a self-referential
+				// assignment whose target global appears for the first time in the
+				// program on the RHS (e.g. `X = X + @value;`), the RHS's rvalue
+				// occurrence would otherwise be the "first allocation" of the global and
+				// carry the symbol-table init `Assign(symbolVar, entryCall)` (see
+				// Id.AllocateGlobalStorageExpression). That init would then be embedded in
+				// `rightExprValue`, which this block evaluates LAST (inside assignObject),
+				// while `assignReferenceId` reads the same `symbolVar` FIRST — dereferencing
+				// an uninitialized (null) VariableSymbol and throwing NullReferenceException
+				// inside the compiled lambda. Allocating the LValue first makes its
+				// occurrence the first allocation, so the init block becomes the source of
+				// `assignReferenceId` and `symbolVar` is initialized exactly where it is read.
+				var lValueStorage = id.ExecuteExpression(parametersParam);
+				var rightExprValue = rValue.ExecuteExpression(parametersParam);
+
+				var objectField = typeof(VariableSymbol).GetField(
 					nameof(VariableSymbol.value),
 					BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly
 				);
 
-				var tipoField = typeof(VariableSymbol).GetField(
+				var typeField = typeof(VariableSymbol).GetField(
 					nameof(VariableSymbol.type),
 					BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly
 				);
 
 				var referenceRValueVar = Expression.Variable(typeof(VariableSymbol), $"referenceRValueVar");
-				var assignReferenceId = Expression.Assign(referenceRValueVar, id.ExecuteExpression(parametersParam));
+				var assignReferenceId = Expression.Assign(referenceRValueVar, lValueStorage);
 
-				var assignObjeto = Expression.Assign(
-					Expression.Field(referenceRValueVar, objetoField),
-					Expression.Convert(valorDerechaExpr, typeof(object))
+				var assignObject = Expression.Assign(
+					Expression.Field(referenceRValueVar, objectField),
+					Expression.Convert(rightExprValue, typeof(object))
 				);
-				var assignTipo = Expression.Assign(
-					Expression.Field(referenceRValueVar, tipoField),
+				var assignType = Expression.Assign(
+					Expression.Field(referenceRValueVar, typeField),
 					Expression.Constant(id.ForcedType)
 				);
 				var block = Expression.Block(
 					new[] { referenceRValueVar },
 					assignReferenceId,
-					assignTipo,
+					assignType,
 
-					assignObjeto
+					assignObject
 				);
 				return block;
 			}
 		}
 
-		private string TipoLValue(Type type)
+		private string LValueType(Type type)
 		{
-			string tipoVariable;
+			string variableType;
 			if (type == typeof(bool))
 			{
-				tipoVariable = "bool";
+				variableType = "bool";
 			}
 			else if (type == typeof(double))
 			{
-				tipoVariable = "double";
+				variableType = "double";
 			}
 			else if (type == typeof(int))
 			{
-				tipoVariable = "int";
+				variableType = "int";
 			}
 			else if (type == typeof(string))
 			{
-				tipoVariable = "string";
+				variableType = "string";
 			}
 			else if (type == typeof(DateTime))
 			{
-				tipoVariable = "DateTime";
+				variableType = "DateTime";
 			}
 			else
 			{
-				tipoVariable = type.FullName;
+				variableType = type.FullName;
 			}
 
-			return tipoVariable;
+			return variableType;
 		}
 
 		internal override void ValidateStatically()
@@ -420,16 +434,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
+			if (WasFiltered) return;
 			if (lValue != null && rValue != null)
 			{
-				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-				lValue.write(resultado, databaseType);
-				resultado.Append(" = ");
-				rValue.write(resultado, databaseType);
-				resultado.Append(";\r");
+				if (tabs > 0) result.Append(GenerateTabs(tabs));
+				lValue.write(result, databaseType);
+				result.Append(" = ");
+				rValue.write(result, databaseType);
+				result.Append(";\r");
 			}
 		}
 
@@ -596,19 +610,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private ParameterInfo[] RemoveValueFromSetter(ParameterInfo[] parameters)
 		{
-			List<ParameterInfo> resultado = null;
+			List<ParameterInfo> result = null;
 			if (parameters != null)
 			{
-				resultado = new List<ParameterInfo>(parameters.Length);
-				foreach (var parametro in parameters)
+				result = new List<ParameterInfo>(parameters.Length);
+				foreach (var parameter in parameters)
 				{
-					if (parametro.Name != "value")
+					if (parameter.Name != "value")
 					{
-						resultado.Add(parametro);
+						result.Add(parameter);
 					}
 				}
 			}
-			return resultado.ToArray();
+			return result.ToArray();
 		}
 
 		internal override void Visit(ASTVisitor v)

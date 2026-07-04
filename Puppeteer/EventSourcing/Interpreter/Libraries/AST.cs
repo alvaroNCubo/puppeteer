@@ -79,9 +79,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 			}
 
-			internal override void OnVisit(AST nodo)
+			internal override void OnVisit(AST node)
 			{
-				if (seen.Add(nodo)) list.Add(nodo);
+				if (seen.Add(node)) list.Add(node);
 			}
 
 			internal List<AST> GetAll()

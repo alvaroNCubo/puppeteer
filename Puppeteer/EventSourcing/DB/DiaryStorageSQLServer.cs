@@ -59,7 +59,7 @@ namespace Puppeteer.EventSourcing.DB
 			materializationCheckpointStorage = new MaterializationCheckpointStorageSQLServer(eventJournalClient, connectionString);
 		}
 
-		private bool ExisteTabla(string tableName)
+		private bool TableExists(string tableName)
 		{
 			bool existe = false;
 			string sql = $@"
@@ -75,8 +75,8 @@ namespace Puppeteer.EventSourcing.DB
 					connection.Open();
 					using (SqlCommand command = new SqlCommand(sql, connection))
 					{
-						var resultado = (int)command.ExecuteScalar();
-						existe = resultado == 1;
+						var result = (int)command.ExecuteScalar();
+						existe = result == 1;
 					}
 				}
 				catch
@@ -107,8 +107,8 @@ namespace Puppeteer.EventSourcing.DB
 					await connection.OpenAsync();
 					using (SqlCommand command = new SqlCommand(sql, connection))
 					{
-						var resultado = (int)await command.ExecuteScalarAsync();
-						existe = resultado == 1;
+						var result = (int)await command.ExecuteScalarAsync();
+						existe = result == 1;
 					}
 				}
 				catch
@@ -363,10 +363,10 @@ namespace Puppeteer.EventSourcing.DB
 			EventJournalClient.IsNew = CreateDiary(Name);
 
 			bool canContinueReplay = false;
-			long ultimoId = afterEntryId;
+			long lastId = afterEntryId;
 			long delta = 0;
-			bool salir = false;
-			int cantidadDeLeaderInitialization = 0;
+			bool shouldExit = false;
+			int leaderInitializationCount = 0;
 
 			// Forward replay: events in ascending id order.
 			string orderByClause = "ORDER BY d.id ASC";
@@ -383,7 +383,7 @@ namespace Puppeteer.EventSourcing.DB
 					string sqlCount = $@"
 						SELECT Count_Big(*) Cantidad
 						FROM {base.Name} d WITH (NOLOCK)
-						WHERE d.[Skip] = 0 AND d.id > {ultimoId}";
+						WHERE d.[Skip] = 0 AND d.id > {lastId}";
 					// Lab note: switched from COUNT(*) (INT) to COUNT_BIG(*)
 					// (BIGINT) so reader.GetInt64 doesn't throw InvalidCastException
 					// under SQL Edge (which returns INT strictly for COUNT(*));
@@ -393,8 +393,8 @@ namespace Puppeteer.EventSourcing.DB
 					using (SqlDataReader reader = command.ExecuteReader())
 					{
 						reader.Read();
-						long totalDeRegistros = reader.GetInt64(0);
-						EventJournalClient.BeginJournalReplay(totalDeRegistros);
+						long totalRecords = reader.GetInt64(0);
+						EventJournalClient.BeginJournalReplay(totalRecords);
 						reader.Close();
 					}
 				}
@@ -408,7 +408,7 @@ namespace Puppeteer.EventSourcing.DB
 			{
 				long entryId = 0;
 
-				while (!salir && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+				while (!shouldExit && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
 				{
 					// Phase 5 of the Action refactor: legacy LoadActionsWithExitStatus
 					// (pre-load the _ACTION lateral table) is dropped. Define entries
@@ -423,11 +423,11 @@ namespace Puppeteer.EventSourcing.DB
 						? $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments, ed.ExposeJson
 							FROM {base.Name} d WITH (NOLOCK)
 							LEFT JOIN ExposeData ed WITH (NOLOCK) ON d.id = ed.DiaryId
-							WHERE d.[Skip] = 0 AND d.id > {ultimoId}
+							WHERE d.[Skip] = 0 AND d.id > {lastId}
 							{orderByClause}"
 						: $@"SELECT d.Id, d.OccurredAt, d.Script, d.Action, d.Arguments
 							FROM {base.Name} d WITH (NOLOCK)
-							WHERE d.[Skip] = 0 AND d.id > {ultimoId}
+							WHERE d.[Skip] = 0 AND d.id > {lastId}
 							{orderByClause}";
 
 
@@ -522,25 +522,25 @@ namespace Puppeteer.EventSourcing.DB
 						}
 					}
 
-					delta = ultimoId - entryId;
-					ultimoId = entryId;
+					delta = lastId - entryId;
+					lastId = entryId;
 					if (delta == 0)
 					{
 						const bool AT_LEAST_IS_NECESSARY_ONE_MORE_TIME = false;
-						if (cantidadDeLeaderInitialization < 1)
+						if (leaderInitializationCount < 1)
 						{
 							EventJournalClient.EndJournalReplay(forcedToEnd: !canContinueReplay);
-							salir = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
-							cantidadDeLeaderInitialization++;
+							shouldExit = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
+							leaderInitializationCount++;
 						}
 						else
 						{
-							salir = delta == 0;
+							shouldExit = delta == 0;
 						}
 					}
 					else
 					{
-						salir = delta == 0;
+						shouldExit = delta == 0;
 					}
 				}
 			}
@@ -553,7 +553,7 @@ namespace Puppeteer.EventSourcing.DB
 				Logger.Error($"RehydrateFromEvent failure on actor '{base.Name}'. type:{e.GetType()} error:{e.Message}", e);
 			}
 
-			return ultimoId;
+			return lastId;
 		}
 
 		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
@@ -729,7 +729,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception("Error al escribir en SQLServer el Script en el Diary: [" + sqlCommand + "]. " + e.Message);
+							throw new Exception("Error writing in SQLServer the Script to the Diary: [" + sqlCommand + "]. " + e.Message);
 						}
 					}
 					catch (Exception e)
@@ -809,7 +809,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception("Error al escribir en SQLServer el Script en el Diary: [" + sqlCommand + "]. " + e.Message);
+							throw new Exception("Error writing in SQLServer the Script to the Diary: [" + sqlCommand + "]. " + e.Message);
 						}
 					}
 					catch (Exception e)
@@ -890,7 +890,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Define entry en SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
+							throw new Exception($"Error writing Define entry in SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
 						}
 					}
 					finally
@@ -954,7 +954,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Define entry async en SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
+							throw new Exception($"Error writing Define entry async in SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
 						}
 					}
 					finally
@@ -1021,7 +1021,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Invocation entry en SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
+							throw new Exception($"Error writing Invocation entry in SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
 						}
 					}
 					finally
@@ -1085,7 +1085,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Invocation entry async en SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
+							throw new Exception($"Error writing Invocation entry async in SQLServer (actionId={actionId}, entryId={entryId}). {e.Message}");
 						}
 					}
 					finally
@@ -1163,7 +1163,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Define+Invocation atomic en SQLServer (actionId={actionId}, defineEntryId={defineEntryId}, invocationEntryId={invocationEntryId}). {e.Message}");
+							throw new Exception($"Error writing Define+Invocation atomic in SQLServer (actionId={actionId}, defineEntryId={defineEntryId}, invocationEntryId={invocationEntryId}). {e.Message}");
 						}
 					}
 					finally
@@ -1238,7 +1238,7 @@ namespace Puppeteer.EventSourcing.DB
 						}
 						else
 						{
-							throw new Exception($"Error al escribir Define+Invocation atomic async en SQLServer (actionId={actionId}, defineEntryId={defineEntryId}, invocationEntryId={invocationEntryId}). {e.Message}");
+							throw new Exception($"Error writing Define+Invocation atomic async in SQLServer (actionId={actionId}, defineEntryId={defineEntryId}, invocationEntryId={invocationEntryId}). {e.Message}");
 						}
 					}
 					finally
@@ -1300,7 +1300,7 @@ namespace Puppeteer.EventSourcing.DB
 			}
 		}
 
-		protected internal override MemoryStream Archive(DateTime fechaInicio, DateTime fechaFin)
+		protected internal override MemoryStream Archive(DateTime startDate, DateTime endDate)
 		{
 
 			IEnumerable<string> actorsNames = ListActorNames(Name);
@@ -1326,8 +1326,8 @@ namespace Puppeteer.EventSourcing.DB
 						msDairyPeriodRangeToExport = new MemoryStream();
 						swDairyPeriodRangeToExport = new StreamWriter(msDairyPeriodRangeToExport, Encoding.UTF8);
 
-						var fileName = aName + "-" + fechaFin.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
-						string sql = "SELECT OccurredAt, Script, Skip, Id FROM " + aName + " WITH (nolock) WHERE OccurredAt >= '" + fechaInicio + "' AND OccurredAt < '" + fechaFin + "' AND Skip = 1 ORDER BY id";
+						var fileName = aName + "-" + endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "_bak.sql";
+						string sql = "SELECT OccurredAt, Script, Skip, Id FROM " + aName + " WITH (nolock) WHERE OccurredAt >= '" + startDate + "' AND OccurredAt < '" + endDate + "' AND Skip = 1 ORDER BY id";
 						using (SqlCommand command = new SqlCommand(sql, connection))
 						using (SqlDataReader reader = command.ExecuteReader())
 						{
@@ -1399,12 +1399,12 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			List<string> actors = new List<string>();
 
-			var existActor = ExisteTabla(name);
+			var existActor = TableExists(name);
 			if (existActor && name != "general")
 			{
 				actors.Add(name);
 			}
-			else if (ExisteTabla("general"))
+			else if (TableExists("general"))
 			{
 				using (SqlConnection connection = new SqlConnection(ConnectionString))
 				{
@@ -1469,7 +1469,7 @@ namespace Puppeteer.EventSourcing.DB
 
 							sql.Clear();
 
-							if (!ExisteTabla(aName))
+							if (!TableExists(aName))
 							{
 								CreateDiary(aName);
 							}
@@ -1507,7 +1507,7 @@ namespace Puppeteer.EventSourcing.DB
 				{
 					Logger.Error($@"sql:{sql} type:{e.GetType()} error:{e.Message}", e);
 
-					throw new Exception("Error al escribir en SQLServer el Script en el Diary: [" + sql + "]. " + e.Message);
+					throw new Exception("Error writing in SQLServer the Script to the Diary: [" + sql + "]. " + e.Message);
 				}
 				finally
 				{

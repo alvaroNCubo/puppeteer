@@ -15,27 +15,27 @@ namespace Puppeteer.EventSourcing.Interpreter
 
         private readonly DomainLibraries libraries;
 
-        private static readonly Dictionary<string, Type> tiposPrimitivos = new Dictionary<string, Type>();
+        private static readonly Dictionary<string, Type> primitiveTypes = new Dictionary<string, Type>();
         private static NumberFormatInfo customFormat;
         private string source;
 
         // Upgrade names seen in the current Program during parsing.
         // Reset at the start of ParseProgram. Detects static duplicates in the same script.
-        private readonly HashSet<string> upgradeNamesEnPrograma = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> upgradeNamesInProgram = new HashSet<string>(StringComparer.Ordinal);
 
         // Set to true if the parse of the current Program creates an OpEval or EvalStatement.
         // Reset at the start of ParseProgram; carried into Program.HasEval so that
         // ValidateStatically does not have to walk the AST looking for evals.
-        private bool hasEvalEnPrograma;
+        private bool hasEvalInProgram;
 
 		static Parser()
 		{
-			tiposPrimitivos["int"] = typeof(int);
-			tiposPrimitivos["string"] = typeof(string);
-			tiposPrimitivos["bool"] = typeof(bool);
-			tiposPrimitivos["double"] = typeof(double);
-			tiposPrimitivos["datetime"] = typeof(DateTime);
-			tiposPrimitivos["decimal"] = typeof(decimal);
+			primitiveTypes["int"] = typeof(int);
+			primitiveTypes["string"] = typeof(string);
+			primitiveTypes["bool"] = typeof(bool);
+			primitiveTypes["double"] = typeof(double);
+			primitiveTypes["datetime"] = typeof(DateTime);
+			primitiveTypes["decimal"] = typeof(decimal);
 			CultureInfo original = CultureInfo.GetCultureInfo("en-US");
 			customFormat = (NumberFormatInfo)original.NumberFormat.Clone();
 			customFormat.NumberDecimalSeparator = ".";
@@ -65,10 +65,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal Program ParseEval(int[] currLevel, bool isQuery, bool isCheck)
 		{
-			bool anteriorEsEval = symbolTable.InEvalMode;
+			bool previousIsEval = symbolTable.InEvalMode;
 			symbolTable.InEvalMode = true;
 			Program result = ParseProgram(currLevel, isQuery, isCheck);
-			symbolTable.InEvalMode = anteriorEsEval;
+			symbolTable.InEvalMode = previousIsEval;
 			return result;
 		}
 
@@ -80,8 +80,8 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private Program ParseProgram(int[] currLevel, bool isQuery, bool isCheck)
 		{
-            upgradeNamesEnPrograma.Clear();
-            hasEvalEnPrograma = false;
+            upgradeNamesInProgram.Clear();
+            hasEvalInProgram = false;
             List<Statement> statements = new List<Statement>();
             while (lexer.CurrentToken.Type != TokenType.eof)
 			{
@@ -104,13 +104,13 @@ namespace Puppeteer.EventSourcing.Interpreter
                 }
             }
 			lexer.Accept(TokenType.eof);
-			Program programaResultante = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
-			programaResultante.HasEval = hasEvalEnPrograma;
+			Program resultingProgram = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
+			resultingProgram.HasEval = hasEvalInProgram;
 			// Lever 1 of the Now optimization: precompute (once per parse, outside the
 			// hot path) whether the program references the SYSTEM Now parameter. Conservative with
 			// HasEval: an Eval may synthesize the reference and it is not visible to the static scan.
-			programaResultante.ReferencesNow = hasEvalEnPrograma || programaResultante.ScriptReferencesSystemNow();
-			return programaResultante;
+			resultingProgram.ReferencesNow = hasEvalInProgram || resultingProgram.ScriptReferencesSystemNow();
+			return resultingProgram;
 		}
 
 		private void ParseWhitespace()
@@ -148,8 +148,8 @@ namespace Puppeteer.EventSourcing.Interpreter
 				case TokenType.IF:
 					result = ParseIfStatement(currLevel, ref blockNumber, isQuery, isCheck);
 					break;
-                case TokenType.FOR:
-                    result = ParseForStatement(currLevel, ref blockNumber, isQuery, isQuery);
+                case TokenType.FOREACH:
+                    result = ParseForEachStatement(currLevel, ref blockNumber, isQuery, isQuery);
                     break;
                 case TokenType.upgrade:
                     result = ParseUpgradeStatement(currLevel, isQuery, isCheck);
@@ -239,31 +239,31 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private Statement ParseIfStatement(int[] currLevel, ref int blockNumber, bool isQuery, bool isCheck)
 		{
-			Statement resultado;
+			Statement result;
 			lexer.Accept();
 			lexer.Accept(TokenType.lParen);
 			AstExpression exp = ParseLogicalExpression(currLevel);
 			lexer.Accept(TokenType.rParen);
 
             int newBlockNumber = 0;
-			Statement comandosDelIF = ParseStatement(IncLevel(currLevel, ++blockNumber), isQuery, isCheck, ref newBlockNumber);
+			Statement ifCommands = ParseStatement(IncLevel(currLevel, ++blockNumber), isQuery, isCheck, ref newBlockNumber);
 
 			if (lexer.CurrentToken.Type == TokenType.ELSE)
 			{
 				lexer.Accept();
 				Statement elseBranchStatement = ParseStatement(IncLevel(currLevel, ++blockNumber), isQuery, isCheck, ref newBlockNumber);
-				resultado = new IfStatement(symbolTable, exp, comandosDelIF, elseBranchStatement);
+				result = new IfStatement(symbolTable, exp, ifCommands, elseBranchStatement);
 			}
 			else
 			{
-				resultado = new IfStatement(symbolTable, exp, comandosDelIF);
+				result = new IfStatement(symbolTable, exp, ifCommands);
 			}
-			return resultado;
+			return result;
 		}
 
 		private Statement ParseCheckStatement(int[] currLevel, bool isQuery, bool isCheck)
 		{
-			Statement resultado;
+			Statement result;
 			AstExpression reason;
 			
 			lexer.Accept(TokenType.check);
@@ -281,19 +281,19 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(exp, new Error(reason));
+				result = new CheckStatement(exp, new Error(reason));
 			}
 			else if (value.Equals("INFORMATION".AsSpan(), StringComparison.OrdinalIgnoreCase))
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(exp, new Information(reason));
+				result = new CheckStatement(exp, new Information(reason));
 			}
 			else if (value.Equals("WARNING".AsSpan(), StringComparison.OrdinalIgnoreCase))
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(exp, new Warning(reason));
+				result = new CheckStatement(exp, new Warning(reason));
 			}
 			else
 			{
@@ -301,12 +301,12 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 			lexer.Accept(TokenType.semicolon);
 
-			return resultado;
+			return result;
 		}
 
 		private Statement ParseNotifyStatement(int[] currLevel, bool isQuery, bool isCheck)
 		{
-			Statement resultado;
+			Statement result;
 			AstExpression reason;
 
 			lexer.Accept(TokenType.notify);
@@ -320,19 +320,19 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(LiteralBoolean.LiteralFalse, new Error(reason));
+				result = new CheckStatement(LiteralBoolean.LiteralFalse, new Error(reason));
 			}
 			else if (value.Equals("INFORMATION".AsSpan(), StringComparison.OrdinalIgnoreCase))
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(LiteralBoolean.LiteralFalse, new Information(reason));
+				result = new CheckStatement(LiteralBoolean.LiteralFalse, new Information(reason));
 			}
 			else if (value.Equals("WARNING".AsSpan(), StringComparison.OrdinalIgnoreCase))
 			{
 				lexer.Accept();
 				reason = ParseExpression(currLevel);
-				resultado = new CheckStatement(LiteralBoolean.LiteralFalse, new Warning(reason));
+				result = new CheckStatement(LiteralBoolean.LiteralFalse, new Warning(reason));
 			}
 			else
 			{
@@ -341,29 +341,29 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 			lexer.Accept(TokenType.semicolon);
 			
-			return resultado;
+			return result;
 		}
 
-		private Statement ParseForStatement(int[] currLevel, ref int blockNumber, bool isQuery, bool isCheck)
+		private Statement ParseForEachStatement(int[] currLevel, ref int blockNumber, bool isQuery, bool isCheck)
         {
             currLevel = IncLevel(currLevel, ++blockNumber);
-            Statement resultado;
-            lexer.Accept(TokenType.FOR);
+            Statement result;
+            lexer.Accept(TokenType.FOREACH);
             lexer.Accept(TokenType.lParen);
             Id id = (Id) ParseId(currLevel);
 
-            Id idIndice = null;
+            Id indexId = null;
             Id idElemento = null;
-            bool soloIndice = false;
+            bool indexOnly = false;
 
             if (lexer.CurrentToken.Type == TokenType.comma)
             {
                 lexer.Accept(TokenType.comma);
-                idIndice = id;
+                indexId = id;
                 if (lexer.CurrentToken.Type == TokenType.wildcard)
                 {
                     lexer.Accept(TokenType.wildcard);
-                    soloIndice = true;
+                    indexOnly = true;
                     idElemento = null;
                 }
                 else
@@ -372,34 +372,34 @@ namespace Puppeteer.EventSourcing.Interpreter
                 }
             }
 
-            // Accept both ':' and 'in' (syntactic sugar)
-            if (lexer.CurrentToken.Type == TokenType.colon)
-            {
-                lexer.Accept(TokenType.colon);
-            }
-            else if (lexer.CurrentToken.Type == TokenType.IN)
+            // Accept both 'in' (canonical) and ':' (deprecated alias)
+            if (lexer.CurrentToken.Type == TokenType.IN)
             {
                 lexer.Accept(TokenType.IN);
             }
+            else if (lexer.CurrentToken.Type == TokenType.colon)
+            {
+                lexer.Accept(TokenType.colon);
+            }
             else
             {
-                throw new LanguageException($"Expected ':' or 'in' in 'for' loop at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"Expected 'in' or ':' in 'foreach' loop at line {Row()}, column {Column()}, but found '{lexer.CurrentToken.Type}'.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
 
             AstExpression exp = ParseExpression(currLevel);
             lexer.Accept(TokenType.rParen);
             int newBlockNumber = 0;
-            Statement forBodyStatement = ParseStatement(IncLevel(currLevel, ++blockNumber), isQuery, isCheck, ref newBlockNumber);
+            Statement foreachBody = ParseStatement(IncLevel(currLevel, ++blockNumber), isQuery, isCheck, ref newBlockNumber);
 
-            if (idIndice != null)
+            if (indexId != null)
             {
-                resultado = new ForStatement(symbolTable, idIndice, idElemento, soloIndice, exp, forBodyStatement);
+                result = new ForEachStatement(symbolTable, indexId, idElemento, indexOnly, exp, foreachBody);
             }
             else
             {
-                resultado = new ForStatement(symbolTable, id, exp, forBodyStatement);
+                result = new ForEachStatement(symbolTable, id, exp, foreachBody);
             }
-            return resultado;
+            return result;
         }
 
         private Statement ParseUpgradeStatement(int[] currLevel, bool isQuery, bool isCheck)
@@ -426,7 +426,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 throw new LanguageException($"The 'upgrade' name cannot be empty (at line {Row()}, column {Column()}).");
             }
 
-            if (!upgradeNamesEnPrograma.Add(upgradeName))
+            if (!upgradeNamesInProgram.Add(upgradeName))
             {
                 throw new LanguageException($"'upgrade' name '{upgradeName}' appears twice in the same script. Each 'upgrade' must have a unique name within the Program.");
             }
@@ -594,25 +594,23 @@ namespace Puppeteer.EventSourcing.Interpreter
         }
 
         // ============================================================
-        // Tell statement — Plan 2 of the Tell primitive roadmap.
+        // Tell statement — a directed assertive speech act.
         // Grammar:
-        //   tellStatement := TELL ( ackForm | notDeliveredForm | targetForm ) SEMICOLON
-        //   ackForm          := "ack" stringLit "from" id LPAREN exprList RPAREN
-        //   notDeliveredForm := stringLit "not" "delivered" COMMA "per" stringLit
-        //   targetForm       := id [LPAREN exprList RPAREN] action trailers
-        //   action           := commandCall | sagaVerb commandCall
-        //   sagaVerb         := "start" | "step" | "compensate" | "close"
-        //   commandCall      := id LPAREN exprList RPAREN
-        //   trailers         := (idTrailer | throughTrailer)*
-        //   idTrailer        := "id" stringLit
-        //   throughTrailer   := "through" stringLit
+        //   tellStatement := TELL ( ackForm | unackForm | assertiveForm ) SEMICOLON
+        //   ackForm       := "ack" stringLit "from" id [LPAREN expr RPAREN]
+        //   unackForm     := stringLit "unacknowledged" "by" id
+        //   assertiveForm := id [ "with" exprList ] "to" id [LPAREN expr RPAREN] [ "once" stringLit ]
         //
-        // Saga verbs require a target with id in parens (`tell <SagaActor>(<sagaId>)`).
-        // The non-delivery form (Plan 10) starts with a stringLit (the envelope
-        // id), which disambiguates it from the ack form ("ack" lexeme) and the
-        // target form (target class id). 'ack', 'from', 'id', 'through', 'not',
-        // 'delivered', 'per' and the saga verbs are contextual keywords
+        // <Message> (the assertive's id) is the SENDER's own vocabulary, validated as
+        // a message name — NOT as a method on the addressee. There is no coupling to
+        // the receiver's API: the message is defined on first use (its typed signature
+        // deduced from the `with` payload). <Addressee> is a logical role resolved by
+        // the runtime binding table; the DSL never names the transport. 'ack', 'from',
+        // 'with', 'to', 'once', 'unacknowledged', 'by' are contextual keywords
         // (TokenType.id with matching lexeme), the same pattern as 'where' and 'list'.
+        // The ack and unacknowledged forms are framework-emitted (rejected if
+        // user-authored at runtime); they begin with "ack" / a stringLit so they
+        // disambiguate from the assertive form (which begins with the message id).
         // ============================================================
         private Statement ParseTellStatement(int[] currLevel, bool isQuery, bool isCheck)
         {
@@ -623,86 +621,100 @@ namespace Puppeteer.EventSourcing.Interpreter
 
             lexer.Accept(TokenType.tell);
 
-            // Form: tell ack 'tell-id' from Target(id)
+            // Form: tell ack '<id>' from <Addressee>[(<instanceId>)]
             if (lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("ack"))
             {
-                Statement ackResult = ParseTellAckBody();
+                Statement ackResult = ParseTellAckBody(currLevel);
                 lexer.Accept(TokenType.semicolon);
                 return ackResult;
             }
 
-            // Form: tell 'envelope-id' not delivered, per 'witness'  (Plan 10)
+            // Form: tell '<id>' unacknowledged by <Addressee>
             if (lexer.CurrentToken.Type == TokenType.stringLit)
             {
-                Statement notDeliveredResult = ParseTellNotDeliveredBody();
+                Statement unackResult = ParseTellUnacknowledgedBody();
                 lexer.Accept(TokenType.semicolon);
-                return notDeliveredResult;
+                return unackResult;
             }
 
-            // Form: tell <Target>[(<id>)] [sagaVerb] <Command>(<args>) [trailers]
+            // Form: tell <Message> [with <args>] to <Addressee>[(<id>)] [once '<id>']
             if (lexer.CurrentToken.Type != TokenType.id)
             {
-                throw new LanguageException($"'tell' must be followed by an actor target identifier or 'ack', but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"'tell' must be followed by a message name, 'ack', or a quoted envelope id, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
 
-            string targetClass = lexer.CurrentLexeme().ToString();
-            int targetClassRow = Row();
-            int targetClassColumn = Column();
+            string messageName = lexer.CurrentLexeme().ToString();
             lexer.Accept(TokenType.id);
 
-            ValidateTellTargetClass(targetClass, targetClassRow, targetClassColumn);
+            AstExpression[] withArgs = Array.Empty<AstExpression>();
+            if (lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("with"))
+            {
+                lexer.Accept(TokenType.id); // consume 'with'
+                withArgs = ParseWithArguments(currLevel);
+            }
 
-            AstExpression targetId = null;
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("to")))
+            {
+                throw new LanguageException($"'tell <Message>' must be followed by 'to <Addressee>' (optionally after a 'with' payload), but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            lexer.Accept(TokenType.id); // consume 'to'
+
+            if (lexer.CurrentToken.Type != TokenType.id)
+            {
+                throw new LanguageException($"'tell ... to' must be followed by an addressee role identifier, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+            }
+            string addressee = lexer.CurrentLexeme().ToString();
+            lexer.Accept(TokenType.id);
+
+            AstExpression addresseeInstanceId = null;
             if (lexer.CurrentToken.Type == TokenType.lParen)
             {
                 lexer.Accept(TokenType.lParen);
-                AstExpression[] targetIdArgs = ParseArguments(currLevel);
-                if (targetIdArgs.Length != 1)
+                AstExpression[] instanceArgs = ParseArguments(currLevel);
+                if (instanceArgs.Length != 1)
                 {
-                    throw new LanguageException($"'tell' target id must be a single expression in parens, but got {targetIdArgs.Length} expressions at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                    throw new LanguageException($"'tell ... to <Addressee>(...)' instance id must be a single expression in parens, but got {instanceArgs.Length} expressions at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
                 }
-                targetId = targetIdArgs[0];
+                addresseeInstanceId = instanceArgs[0];
                 lexer.Accept(TokenType.rParen);
             }
 
-            // Detect optional saga verb. Saga always requires a target id.
-            SagaVerb? sagaVerb = TryReadSagaVerb();
-
-            if (sagaVerb.HasValue && targetId == null)
+            string onceLiteral = null;
+            if (lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("once"))
             {
-                throw new LanguageException($"saga '{SagaVerbLexeme(sagaVerb.Value)}' requires a target id in parens — for example: tell {targetClass}(<sagaId>) {SagaVerbLexeme(sagaVerb.Value)} <Command>(...) (at line {Row()}, column {Column()}).", lexer.CurrentLexeme().ToString(), Row(), Column());
+                lexer.Accept(TokenType.id); // consume 'once'
+                if (lexer.CurrentToken.Type != TokenType.stringLit)
+                {
+                    throw new LanguageException($"'tell ... once' requires a string literal, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                }
+                onceLiteral = lexer.CurrentLexeme().ToString();
+                lexer.Accept(TokenType.stringLit);
             }
-
-            if (sagaVerb.HasValue)
-            {
-                lexer.Accept(TokenType.id); // consume the saga verb keyword
-            }
-
-            if (lexer.CurrentToken.Type != TokenType.id)
-            {
-                throw new LanguageException($"'tell' expects a command name after the target, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
-            }
-
-            string commandName = lexer.CurrentLexeme().ToString();
-            lexer.Accept(TokenType.id);
-
-            lexer.Accept(TokenType.lParen);
-            AstExpression[] commandArgs = ParseArguments(currLevel);
-            lexer.Accept(TokenType.rParen);
-
-            (string idLiteral, string throughLiteral) = ParseTellTrailers();
 
             lexer.Accept(TokenType.semicolon);
 
-            if (sagaVerb.HasValue)
-            {
-                return new TellSagaStatement(symbolTable, targetClass, targetId, sagaVerb.Value, commandName, commandArgs, idLiteral, throughLiteral);
-            }
-
-            return new BasicTellStatement(symbolTable, targetClass, targetId, commandName, commandArgs, idLiteral, throughLiteral);
+            return new AssertiveTellStatement(symbolTable, messageName, withArgs, addressee, addresseeInstanceId, onceLiteral);
         }
 
-        private Statement ParseTellAckBody()
+        // Parse the comma-separated `with` payload, terminated by the 'to' keyword.
+        private AstExpression[] ParseWithArguments(int[] currLevel)
+        {
+            List<AstExpression> args = new List<AstExpression>();
+            while (true)
+            {
+                AstExpression arg = ParseLogicalExpression(currLevel);
+                args.Add(arg);
+                if (lexer.CurrentToken.Type == TokenType.comma)
+                {
+                    lexer.Accept(TokenType.comma);
+                    continue;
+                }
+                break;
+            }
+            return args.ToArray();
+        }
+
+        private Statement ParseTellAckBody(int[] currLevel)
         {
             // Already at the lexeme "ack" (TokenType.id).
             lexer.Accept(TokenType.id); // consume 'ack'
@@ -723,143 +735,62 @@ namespace Puppeteer.EventSourcing.Interpreter
 
             if (lexer.CurrentToken.Type != TokenType.id)
             {
-                throw new LanguageException($"'tell ack ... from' must be followed by an actor target identifier, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"'tell ack ... from' must be followed by an addressee role identifier, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
 
-            string fromTargetClass = lexer.CurrentLexeme().ToString();
-            int fromTargetRow = Row();
-            int fromTargetColumn = Column();
+            string fromAddressee = lexer.CurrentLexeme().ToString();
             lexer.Accept(TokenType.id);
 
-            ValidateTellTargetClass(fromTargetClass, fromTargetRow, fromTargetColumn);
-
-            lexer.Accept(TokenType.lParen);
-            AstExpression[] fromIdArgs = ParseArguments(new int[0]);
-            if (fromIdArgs.Length != 1)
+            AstExpression fromInstanceId = null;
+            if (lexer.CurrentToken.Type == TokenType.lParen)
             {
-                throw new LanguageException($"'tell ack' target id must be a single expression in parens, but got {fromIdArgs.Length} expressions at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                lexer.Accept(TokenType.lParen);
+                AstExpression[] fromIdArgs = ParseArguments(currLevel);
+                if (fromIdArgs.Length != 1)
+                {
+                    throw new LanguageException($"'tell ack ... from <Addressee>(...)' instance id must be a single expression in parens, but got {fromIdArgs.Length} expressions at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                }
+                fromInstanceId = fromIdArgs[0];
+                lexer.Accept(TokenType.rParen);
             }
-            lexer.Accept(TokenType.rParen);
 
-            return new TellAckStatement(symbolTable, ackId, fromTargetClass, fromIdArgs[0]);
+            return new TellAckStatement(symbolTable, ackId, fromAddressee, fromInstanceId);
         }
 
-        // Plan 10: parse `'<envelopeId>' not delivered, per '<witness>'`. Entered
-        // with the current token positioned at the envelope-id string literal. The
-        // contextual keywords 'not', 'delivered' and 'per' lex as TokenType.id; the
-        // separator is a comma token.
-        private Statement ParseTellNotDeliveredBody()
+        // Parse `'<envelopeId>' unacknowledged by <Addressee>`. Entered with the
+        // current token positioned at the envelope-id string literal. The contextual
+        // keywords 'unacknowledged' and 'by' lex as TokenType.id.
+        private Statement ParseTellUnacknowledgedBody()
         {
             // Already at the envelope id string literal.
             string envelopeId = lexer.CurrentLexeme().ToString();
             lexer.Accept(TokenType.stringLit);
 
-            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("not")))
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("unacknowledged")))
             {
-                throw new LanguageException($"'tell '<id>'' must be followed by 'not delivered', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"'tell '<id>'' must be followed by 'unacknowledged by', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
-            lexer.Accept(TokenType.id); // consume 'not'
+            lexer.Accept(TokenType.id); // consume 'unacknowledged'
 
-            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("delivered")))
+            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("by")))
             {
-                throw new LanguageException($"'tell '<id>' not' must be followed by 'delivered', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"'tell '<id>' unacknowledged' must be followed by 'by', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
-            lexer.Accept(TokenType.id); // consume 'delivered'
+            lexer.Accept(TokenType.id); // consume 'by'
 
-            lexer.Accept(TokenType.comma);
-
-            if (!(lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("per")))
+            if (lexer.CurrentToken.Type != TokenType.id)
             {
-                throw new LanguageException($"'tell '<id>' not delivered,' must be followed by 'per', but found '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                throw new LanguageException($"'tell '<id>' unacknowledged by' must be followed by an addressee role identifier, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
-            lexer.Accept(TokenType.id); // consume 'per'
+            string addressee = lexer.CurrentLexeme().ToString();
+            lexer.Accept(TokenType.id);
 
-            if (lexer.CurrentToken.Type != TokenType.stringLit)
-            {
-                throw new LanguageException($"'tell ... not delivered, per' requires a string literal witness, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
-            }
-            string witness = lexer.CurrentLexeme().ToString();
-            lexer.Accept(TokenType.stringLit);
-
-            return new TellNotDeliveredStatement(symbolTable, envelopeId, witness);
-        }
-
-        private SagaVerb? TryReadSagaVerb()
-        {
-            if (lexer.CurrentToken.Type != TokenType.id) return null;
-            if (LexemeEqualsIgnoreCase("start")) return SagaVerb.Start;
-            if (LexemeEqualsIgnoreCase("step")) return SagaVerb.Step;
-            if (LexemeEqualsIgnoreCase("compensate")) return SagaVerb.Compensate;
-            if (LexemeEqualsIgnoreCase("close")) return SagaVerb.Close;
-            return null;
-        }
-
-        private static string SagaVerbLexeme(SagaVerb verb)
-        {
-            return TellSagaStatement.VerbToken(verb);
-        }
-
-        private (string idLiteral, string throughLiteral) ParseTellTrailers()
-        {
-            string idLiteral = null;
-            string throughLiteral = null;
-
-            while (lexer.CurrentToken.Type == TokenType.id)
-            {
-                if (LexemeEqualsIgnoreCase("id"))
-                {
-                    if (idLiteral != null)
-                    {
-                        throw new LanguageException($"'tell' cannot have more than one 'id' trailer (at line {Row()}, column {Column()}).", lexer.CurrentLexeme().ToString(), Row(), Column());
-                    }
-                    lexer.Accept(TokenType.id); // consume 'id'
-                    if (lexer.CurrentToken.Type != TokenType.stringLit)
-                    {
-                        throw new LanguageException($"'tell ... id' requires a string literal, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
-                    }
-                    idLiteral = lexer.CurrentLexeme().ToString();
-                    lexer.Accept(TokenType.stringLit);
-                }
-                else if (LexemeEqualsIgnoreCase("through"))
-                {
-                    if (throughLiteral != null)
-                    {
-                        throw new LanguageException($"'tell' cannot have more than one 'through' trailer (at line {Row()}, column {Column()}).", lexer.CurrentLexeme().ToString(), Row(), Column());
-                    }
-                    lexer.Accept(TokenType.id); // consume 'through'
-                    if (lexer.CurrentToken.Type != TokenType.stringLit)
-                    {
-                        throw new LanguageException($"'tell ... through' requires a string literal, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
-                    }
-                    throughLiteral = lexer.CurrentLexeme().ToString();
-                    lexer.Accept(TokenType.stringLit);
-                }
-                else
-                {
-                    break;
-                }
-            }
-
-            return (idLiteral, throughLiteral);
+            return new TellUnacknowledgedStatement(symbolTable, envelopeId, addressee);
         }
 
         private bool LexemeEqualsIgnoreCase(string keyword)
         {
             return lexer.CurrentLexeme().Equals(keyword.AsSpan(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        // Plan 3: parse-time validation that the actor target class exists in the loaded
-        // domain libraries. Applies to BasicTellStatement.TargetClass, TellSagaStatement.SagaActor
-        // and TellAckStatement.FromTargetClass. Command signature validation is intentionally
-        // out of scope — Plan 5 resolves arg types when wiring the transport, and validating
-        // signatures here would require resolving expression types in parse-time without
-        // execution context. Coherent with feedback_dsl_pattern_priorities (no speculation).
-        private void ValidateTellTargetClass(string targetClass, int row, int column)
-        {
-            if (!libraries.Knows(targetClass))
-            {
-                throw new LanguageException($"'tell' target class '{targetClass}' is not known to the loaded domain libraries (at line {row}, column {column}). Either declare the class in a domain library, or pass the assembly explicitly when constructing the actor.", targetClass, row, column);
-            }
         }
 
         private Statement ParseLineCommentStatement()
@@ -875,19 +806,19 @@ namespace Puppeteer.EventSourcing.Interpreter
 			{
 				throw new LanguageException($"Global variable declarations are not allowed in queries (at line {Row()}, column {Column()}).");
 			}
-			Statement resultado;
+			Statement result;
 			AstExpression dot = ParseDotChain(currLevel);
-			bool esUnComandoCreate = lexer.CurrentToken.Type == TokenType.assign;
-			if (esUnComandoCreate)
+			bool isCreateCommand = lexer.CurrentToken.Type == TokenType.assign;
+			if (isCreateCommand)
 			{
-				resultado = ParseCreateStatement(dot, currLevel, isQuery, isCheck);
+				result = ParseCreateStatement(dot, currLevel, isQuery, isCheck);
 			}
 			else
 			{
-				resultado = ParseCallStatement(dot, currLevel);
+				result = ParseCallStatement(dot, currLevel);
 			}
 			lexer.Accept(TokenType.semicolon);
-			return resultado;
+			return result;
 		}
 
 		private Statement ParseBlock(int[] currLevel, bool isQuery, bool isCheck)
@@ -1100,13 +1031,13 @@ namespace Puppeteer.EventSourcing.Interpreter
             AstExpression exp = ParseExpression(currLevel);
             lexer.Accept(TokenType.rParen);
             lexer.Accept(TokenType.semicolon);
-            hasEvalEnPrograma = true;
+            hasEvalInProgram = true;
             return new EvalStatement(this.libraries, symbolTable, exp, currLevel, isQuery, isCheck);
         }
 
         private AstExpression ParseDotChain(int[] currLevel)
 		{
-			AstExpression resultado = ParseId(currLevel);
+			AstExpression result = ParseId(currLevel);
 			TokenType type = lexer.CurrentToken.Type;
 			while (true)
 			{
@@ -1119,14 +1050,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 						if (lexer.CurrentToken.Type != TokenType.lParen)
 						{
-							if (resultado is Id id)
-								resultado = new DottedId(libraries, symbolTable, id, method);
-							else if (resultado is DotAccess dot)
-								resultado = new ChainedDotAccess(dot, method);
-							else if (resultado is NewInstance instance)
-								resultado = new ChainedDotAccess(instance, method);
+							if (result is Id id)
+								result = new DottedId(libraries, symbolTable, id, method);
+							else if (result is DotAccess dot)
+								result = new ChainedDotAccess(dot, method);
+							else if (result is NewInstance instance)
+								result = new ChainedDotAccess(instance, method);
 							else
-								throw new LanguageException($"Cannot apply the dot operator ('.') to type '{resultado.GetType().Name}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+								throw new LanguageException($"Cannot apply the dot operator ('.') to type '{result.GetType().Name}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
 						}
 						else
 						{
@@ -1134,7 +1065,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 							var args = ParseArguments(currLevel);
 							lexer.Accept(TokenType.rParen);
 
-							if (resultado is Id id)
+							if (result is Id id)
 							{
 								// Optional 'in' clause to disambiguate the namespace homonymy of a
 								// static method call 'Clase.Metodo(args) in Namespace.Sub'. Same parser
@@ -1142,14 +1073,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 								// receiver is an Id (a potential class); DottedId validates that it
 								// actually resolves to a class and not to a variable.
 								string staticNamespace = ParseOptionalInNamespace();
-								resultado = new DottedId(libraries, symbolTable, id, method, args, staticNamespace);
+								result = new DottedId(libraries, symbolTable, id, method, args, staticNamespace);
 							}
-							else if (resultado is DotAccess dot)
-								resultado = new ChainedDotAccess(dot, method, args);
-							else if (resultado is NewInstance instance)
-								resultado = new ChainedDotAccess(instance, method, args);
+							else if (result is DotAccess dot)
+								result = new ChainedDotAccess(dot, method, args);
+							else if (result is NewInstance instance)
+								result = new ChainedDotAccess(instance, method, args);
 							else
-								throw new LanguageException($"Cannot apply the dot operator ('.') to type '{resultado.GetType().Name}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+								throw new LanguageException($"Cannot apply the dot operator ('.') to type '{result.GetType().Name}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
 						}
 						break;
 				case TokenType.lBracket:
@@ -1162,20 +1093,20 @@ namespace Puppeteer.EventSourcing.Interpreter
 						subscriptIndices.Add(ParseLogicalExpression(currLevel));
 					}
 					lexer.Accept(TokenType.rBracket);
-					resultado = new SubscriptAstExpression(resultado, subscriptIndices.ToArray());
+					result = new SubscriptAstExpression(result, subscriptIndices.ToArray());
 					break;
 				case TokenType.lParen:
 					lexer.Accept();
-					var clazz = (Id) resultado;
+					var clazz = (Id) result;
 					var arguments = ParseArguments(currLevel);
 					lexer.Accept(TokenType.rParen);
 
-					string nombreNamespace = ParseOptionalInNamespace();
+					string namespaceName = ParseOptionalInNamespace();
 
-					resultado = new NewInstance(libraries, symbolTable, clazz, arguments, nombreNamespace);
+					result = new NewInstance(libraries, symbolTable, clazz, arguments, namespaceName);
 					break;
 					default:
-						return resultado;
+						return result;
 				}
 				type = lexer.CurrentToken.Type;
 			}
@@ -1215,25 +1146,25 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private AstExpression[] ParseArguments(int[] currLevel)
 		{
-			bool salir = false;
-			bool siguienteCierraParentesis = lexer.CurrentToken.Type == TokenType.rParen;
-			if (siguienteCierraParentesis)
+			bool shouldExit = false;
+			bool nextClosesParen = lexer.CurrentToken.Type == TokenType.rParen;
+			if (nextClosesParen)
 			{
-				salir = true;
+				shouldExit = true;
 			}
 
 			List<AstExpression> arguments = new List<AstExpression>();
-			while (!salir)
+			while (!shouldExit)
 			{
 				AstExpression argument = ParseLogicalExpression(currLevel);
 				arguments.Add(argument);
-				bool siguienteEsUnaComa = lexer.CurrentToken.Type == TokenType.comma;
-				siguienteCierraParentesis = lexer.CurrentToken.Type == TokenType.rParen;
-				if (siguienteCierraParentesis)
+				bool nextIsComma = lexer.CurrentToken.Type == TokenType.comma;
+				nextClosesParen = lexer.CurrentToken.Type == TokenType.rParen;
+				if (nextClosesParen)
 				{
-					salir = true;
+					shouldExit = true;
 				}
-				else if (siguienteEsUnaComa)
+				else if (nextIsComma)
 				{
 					lexer.Accept();
 				}
@@ -1250,25 +1181,25 @@ namespace Puppeteer.EventSourcing.Interpreter
         private AstExpression ParseList(int[] currLevel)
         {
             lexer.Accept(TokenType.begin);
-            bool salir = false;
-            bool siguienteCierraLista = lexer.CurrentToken.Type == TokenType.end;
-            if (siguienteCierraLista)
+            bool shouldExit = false;
+            bool nextClosesList = lexer.CurrentToken.Type == TokenType.end;
+            if (nextClosesList)
             {
-                salir = true;
+                shouldExit = true;
             }
 
             List<AstExpression> elementos = new List<AstExpression>();
-            while (!salir)
+            while (!shouldExit)
             {
                 AstExpression argument = ParseLogicalExpression(currLevel);
                 elementos.Add(argument);
-                bool siguienteEsUnaComa = lexer.CurrentToken.Type == TokenType.comma;
-                siguienteCierraLista = lexer.CurrentToken.Type == TokenType.end;
-                if (siguienteCierraLista)
+                bool nextIsComma = lexer.CurrentToken.Type == TokenType.comma;
+                nextClosesList = lexer.CurrentToken.Type == TokenType.end;
+                if (nextClosesList)
                 {
-                    salir = true;
+                    shouldExit = true;
                 }
-                else if (siguienteEsUnaComa)
+                else if (nextIsComma)
                 {
                     lexer.Accept();
                 }
@@ -1292,23 +1223,23 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private AstExpression ParseExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseRelationalExpression(currLevel);
-			return resultado;
+			AstExpression result = ParseRelationalExpression(currLevel);
+			return result;
 		}
 
         private AstExpression ParseDate()
 		{
             DateTime date = ParseDateValidation(lexer);
-			AstExpression resultado;
+			AstExpression result;
 			if (lexer.CurrentToken.Type == TokenType.time)
 			{
-				resultado = ParseDateTime(ref date);
+				result = ParseDateTime(ref date);
 			}
             else
             {
-				resultado = new LiteralDateTime(date);
+				result = new LiteralDateTime(date);
 			}
-			return resultado;
+			return result;
 		}
 
         private DateTime ParseDateValidation(Lexer lexer)
@@ -1317,16 +1248,16 @@ namespace Puppeteer.EventSourcing.Interpreter
             {
                 throw new LanguageException($"Expected a date literal at line {Row()}, column {Column()}, but found token '{lexer.CurrentToken.Type}'. Please verify the date format (MM/dd/yyyy).", lexer.CurrentLexeme().ToString(), Row(), Column());
             }
-            DateTime resultado = DateTime.Parse(lexer.CurrentLexeme(), CultureInfo.InvariantCulture);
+            DateTime result = DateTime.Parse(lexer.CurrentLexeme(), CultureInfo.InvariantCulture);
 			lexer.Accept(TokenType.date);
-            return resultado;
+            return result;
         }
 
         private AstExpression ParseDateTime(ref DateTime date)
 		{
 			DateTime dateTime = ParseDateTimeValidation(ref date, lexer);
-			AstExpression resultado = new LiteralDateTime(dateTime);
-			return resultado;
+			AstExpression result = new LiteralDateTime(dateTime);
+			return result;
 		}
 
         private DateTime ParseDateTimeValidation(ref DateTime date, Lexer lexer)
@@ -1343,9 +1274,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 			buffer[10] = ' ';
 			timeSpan.CopyTo(buffer.Slice(11));
 
-			DateTime resultado = DateTime.Parse(buffer.Slice(0, 11 + timeSpan.Length), CultureInfo.InvariantCulture);
+			DateTime result = DateTime.Parse(buffer.Slice(0, 11 + timeSpan.Length), CultureInfo.InvariantCulture);
 			lexer.Accept(TokenType.time);
-            return resultado;
+            return result;
         }
 
 
@@ -1358,132 +1289,132 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private AstExpression ParseLogicalExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseOrExpression(currLevel);
+			AstExpression result = ParseOrExpression(currLevel);
 
 			if (lexer.CurrentToken.Type == TokenType.question)
 			{
 				lexer.Accept();
-				AstExpression siVerdadero = ParseLogicalExpression(currLevel);
+				AstExpression ifTrue = ParseLogicalExpression(currLevel);
 				lexer.Accept(TokenType.colon);
-				AstExpression siFalso = ParseLogicalExpression(currLevel);
-				resultado = new TernaryAstExpression(resultado, siVerdadero, siFalso);
+				AstExpression ifFalse = ParseLogicalExpression(currLevel);
+				result = new TernaryAstExpression(result, ifTrue, ifFalse);
 			}
 
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseOrExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseAndExpression(currLevel);
+			AstExpression result = ParseAndExpression(currLevel);
 			while (lexer.CurrentToken.Type == TokenType.logicalOr)
 			{
 				lexer.Accept();
-				AstExpression derecho = ParseAndExpression(currLevel);
-				resultado = new OpOr(resultado, derecho);
+				AstExpression right = ParseAndExpression(currLevel);
+				result = new OpOr(result, right);
 			}
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseAndExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseExpression(currLevel);
+			AstExpression result = ParseExpression(currLevel);
 			while (lexer.CurrentToken.Type == TokenType.logicalAnd)
 			{
 				lexer.Accept();
-				AstExpression derecho = ParseExpression(currLevel);
-				resultado = new OpAnd(resultado, derecho);
+				AstExpression right = ParseExpression(currLevel);
+				result = new OpAnd(result, right);
 			}
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseRelationalExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseAdditiveExpression(currLevel);
+			AstExpression result = ParseAdditiveExpression(currLevel);
 
-			bool siguienteOperadorRelacional = IsRelationalOperator();
-			if (siguienteOperadorRelacional)
+			bool nextRelationalOperator = IsRelationalOperator();
+			if (nextRelationalOperator)
 			{
 				TokenType type = lexer.CurrentToken.Type;
 				lexer.Accept();
-				AstExpression segundoObjeto = ParseAdditiveExpression(currLevel);
+				AstExpression secondObject = ParseAdditiveExpression(currLevel);
 
 				switch (type)
 				{
 					case TokenType.equality:
-						resultado = new OpEqual(resultado, segundoObjeto);
+						result = new OpEqual(result, secondObject);
 						break;
 
 					case TokenType.inequality:
-						resultado = new OpNotEqual(resultado, segundoObjeto);
+						result = new OpNotEqual(result, secondObject);
 						break;
 
 					case TokenType.lessThan:
-						resultado = new OpLessThan(resultado, segundoObjeto);
+						result = new OpLessThan(result, secondObject);
 						break;
 
 					case TokenType.greaterThan:
-						resultado = new OpGreaterThan(resultado, segundoObjeto);
+						result = new OpGreaterThan(result, secondObject);
 						break;
 
 					case TokenType.lessOrEqual:
-						resultado = new OpLessOrEqual(resultado, segundoObjeto);
+						result = new OpLessOrEqual(result, secondObject);
 						break;
 
 					case TokenType.greaterOrEqual:
-						resultado = new OpGreaterOrEqual(resultado, segundoObjeto);
+						result = new OpGreaterOrEqual(result, secondObject);
 						break;
 					default:
 						break;
 				}
 			}
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseMultiplicativeExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseAtomicExpression(currLevel);
+			AstExpression result = ParseAtomicExpression(currLevel);
 			while (lexer.CurrentToken.Type == TokenType.multiplication || lexer.CurrentToken.Type == TokenType.division)
 			{
 				TokenType type = lexer.CurrentToken.Type;
 				lexer.Accept();
-				AstExpression segundoObjeto = ParseAtomicExpression(currLevel);
+				AstExpression secondObject = ParseAtomicExpression(currLevel);
 				switch (type)
 				{
 					case TokenType.multiplication:
-						resultado = new OpMultiply(resultado, segundoObjeto);
+						result = new OpMultiply(result, secondObject);
 						break;
 					case TokenType.division:
-						resultado = new OpDivide(resultado, segundoObjeto);
+						result = new OpDivide(result, secondObject);
 						break;
 				}
 			}
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseAdditiveExpression(int[] currLevel)
 		{
-			AstExpression resultado = ParseMultiplicativeExpression(currLevel);
+			AstExpression result = ParseMultiplicativeExpression(currLevel);
 			while (lexer.CurrentToken.Type == TokenType.plus || lexer.CurrentToken.Type == TokenType.minus)
 			{
 				TokenType type = lexer.CurrentToken.Type;
 				lexer.Accept();
-				AstExpression segundoObjeto = ParseMultiplicativeExpression(currLevel);
+				AstExpression secondObject = ParseMultiplicativeExpression(currLevel);
 				switch (type)
 				{
 					case TokenType.plus:
-						resultado = new OpAdd(resultado, segundoObjeto);
+						result = new OpAdd(result, secondObject);
 						break;
 					case TokenType.minus:
-						resultado = new OpSubtract(resultado, segundoObjeto);
+						result = new OpSubtract(result, secondObject);
 						break;
 				}
 			}
-			return resultado;
+			return result;
 		}
 
 		private bool IsLiteral()
 		{
-			bool resultado = false;
+			bool result = false;
 			TokenType literalType = lexer.CurrentToken.Type;
 			switch (literalType)
 			{
@@ -1495,15 +1426,15 @@ namespace Puppeteer.EventSourcing.Interpreter
 				case TokenType.date:
 				case TokenType.boolFalse:
 				case TokenType.boolTrue:
-					resultado = true;
+					result = true;
 					break;
 			}
-			return resultado;
+			return result;
 		}
 
 		private bool IsAtomicExpression()
         {
-            bool resultado = false;
+            bool result = false;
             TokenType type = lexer.CurrentToken.Type;
             switch (type)
             {
@@ -1521,33 +1452,33 @@ namespace Puppeteer.EventSourcing.Interpreter
                 case TokenType.date:
                 case TokenType.boolFalse:
                 case TokenType.boolTrue:
-                    resultado = true;
+                    result = true;
                     break;
             }
-            return resultado;
+            return result;
         }
 
         private AstExpression ParseAtomicExpression(int[] currLevel)
 		{
-            AstExpression resultado;
+            AstExpression result;
             TokenType type = lexer.CurrentToken.Type;
             switch (type)
             {
                 case TokenType.id:
-                    resultado = ParseDotChain(currLevel);
+                    result = ParseDotChain(currLevel);
                     break;
                 case TokenType.lParen:
                     lexer.Accept();
                     {
                         if (lexer.CurrentToken.Type == TokenType.id && lexer.CurrentLexeme().Equals("list".AsSpan(), StringComparison.OrdinalIgnoreCase))
                         {
-                            resultado = ParseId(currLevel);
+                            result = ParseId(currLevel);
                         }
                         else
                         {
-                            resultado = ParseLogicalExpression(currLevel);
+                            result = ParseLogicalExpression(currLevel);
                         }
-                        if (resultado is Id typeToCast)
+                        if (result is Id typeToCast)
                         {
 							if (String.Equals(typeToCast.Name, "list", StringComparison.OrdinalIgnoreCase))
 							{
@@ -1555,120 +1486,120 @@ namespace Puppeteer.EventSourcing.Interpreter
 								Id listType = (Id)ParseId(currLevel);
 								lexer.Accept(TokenType.greaterThan);
 								lexer.Accept(TokenType.rParen);
-								var expresionDerecha = ParseLogicalExpression(currLevel);
-								resultado = new OpCast(this.libraries, typeToCast, expresionDerecha, listType);
+								var rightExpression = ParseLogicalExpression(currLevel);
+								result = new OpCast(this.libraries, typeToCast, rightExpression, listType);
 							}
 							else
 							{
 								lexer.Accept(TokenType.rParen);
 								if (IsAtomicExpression())
 								{
-									var expresionDerecha = ParseLogicalExpression(currLevel);
-									resultado = new OpCast(this.libraries, typeToCast, expresionDerecha);
+									var rightExpression = ParseLogicalExpression(currLevel);
+									result = new OpCast(this.libraries, typeToCast, rightExpression);
 								}
 								else
 								{
-									resultado = new Parenthesis(resultado);
+									result = new Parenthesis(result);
 								}
 							}
                         }
                         else
                         {
-							resultado = new Parenthesis(resultado);
+							result = new Parenthesis(result);
 							lexer.Accept(TokenType.rParen);
 						}
                     }
                     break;
                 case TokenType.begin:
-                    resultado = ParseList(currLevel);
+                    result = ParseList(currLevel);
                     break;
                 case TokenType.logicalNot:
                     lexer.Accept();
-                    resultado = ParseExpression(currLevel);
-                    resultado = new OpNot(resultado);
+                    result = ParseExpression(currLevel);
+                    result = new OpNot(result);
                     break;
                 case TokenType.minus:
                     lexer.Accept();
 					if (lexer.CurrentToken.Type == TokenType.id)
-						resultado = ParseAtomicExpression(currLevel);
+						result = ParseAtomicExpression(currLevel);
 					else if (IsLiteral())
-						resultado = ParseLiteral();
+						result = ParseLiteral();
 					else
-						resultado = ParseMultiplicativeExpression(currLevel);
-					resultado = new OpNegate(resultado);
+						result = ParseMultiplicativeExpression(currLevel);
+					result = new OpNegate(result);
 					break;
                 case TokenType.plus:
                     lexer.Accept();
 					if (lexer.CurrentToken.Type == TokenType.id)
-						resultado = ParseAtomicExpression(currLevel);
+						result = ParseAtomicExpression(currLevel);
 					else if (IsLiteral())
-						resultado = ParseLiteral();
+						result = ParseLiteral();
 					else
-						resultado = ParseMultiplicativeExpression(currLevel);
+						result = ParseMultiplicativeExpression(currLevel);
 					break;
 				default:
-                    resultado = ParseLiteral();
+                    result = ParseLiteral();
                     break;
             }
-            return resultado;
+            return result;
         }
 
 		private AstExpression ParseLiteral()
 		{
-			AstExpression resultado;
+			AstExpression result;
 			TokenType literalType = lexer.CurrentToken.Type;
 			switch (literalType)
 			{
                 case TokenType.number:
-					resultado = ParseNumber();
+					result = ParseNumber();
 					break;
 
                 case TokenType.stringLit:
-					resultado = ParseString();
+					result = ParseString();
 					break;
 
                 case TokenType.@decimal:
-					resultado = ParseDecimal();
+					result = ParseDecimal();
 					break;
 
 				case TokenType.@double:
-					resultado = ParseDouble();
+					result = ParseDouble();
 					break;
 
 				case TokenType.nullToken:
-					resultado = ParseNull();
+					result = ParseNull();
 					break;
 
                 case TokenType.date:
-					resultado = ParseDate();
+					result = ParseDate();
 					break;
 
                 case TokenType.boolFalse:
                 case TokenType.boolTrue:
-					resultado = ParseBoolean();
+					result = ParseBoolean();
 					break;
 
 				default:
 					var problematicLexeme = lexer.CurrentLexeme();
 					throw new LanguageException($"Expected a literal value, but found '{problematicLexeme}' at line {Row()}, column {Column()}.", problematicLexeme.ToString(), Row(), Column());
 			}
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseBoolean()
 		{
-			AstExpression resultado = null;
+			AstExpression result = null;
 			switch (lexer.CurrentToken.Type)
 			{
 				case TokenType.boolTrue:
-					resultado = LiteralBoolean.LiteralTrue;
+					result = LiteralBoolean.LiteralTrue;
 					break;
 				case TokenType.boolFalse:
-					resultado = LiteralBoolean.LiteralFalse;
+					result = LiteralBoolean.LiteralFalse;
 					break;
 			}
             lexer.Accept();
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseString()
@@ -1723,16 +1654,16 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private AstExpression ParseNull()
 		{
-			AstExpression resultado = new LiteralNull();
+			AstExpression result = new LiteralNull();
 			lexer.Accept();
-			return resultado;
+			return result;
 		}
 
 		private AstExpression ParseNumber()
 		{
-			AstExpression resultado = new LiteralNumber(int.Parse(lexer.CurrentLexeme()));
+			AstExpression result = new LiteralNumber(int.Parse(lexer.CurrentLexeme()));
 			lexer.Accept();
-			return resultado;
+			return result;
 		}
 
         internal string CurrentStatementText()

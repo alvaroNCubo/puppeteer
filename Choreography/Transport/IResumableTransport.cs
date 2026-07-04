@@ -4,22 +4,22 @@ using Choreography.StageManager;
 
 namespace Choreography.Transport
 {
-    // Bug 19 (SMP) — Capacidad opcional de un transport: reabrir un canal previamente
-    // establecido tras un process-death, SIN re-handshake.
+    // Bug 19 (SMP) — Optional transport capability: reopen a previously established
+    // channel after a process-death, WITHOUT re-handshake.
     //
-    // Es una capability aparte de IStageTransport (no todos los transports la necesitan):
-    //   - PortableHttps re-bindea su listener, asi que el rejoin host-driven ya cierra via
-    //     WaitForConnectionAsync; no implementa esto.
-    //   - InMemory no persiste; no implementa esto.
-    //   - SimpleX/SMP SI: la invitacion es single-use (queue KEY-secured) y la recipient key
-    //     es efimera, asi que el unico camino de recuperacion es resumir el canal desde su
-    //     estado persistido (re-SUB unilateral; SMP es store-and-forward).
+    // This is a capability separate from IStageTransport (not all transports need it):
+    //   - PortableHttps re-binds its listener, so the host-driven rejoin already closes via
+    //     WaitForConnectionAsync; it does not implement this.
+    //   - InMemory does not persist; it does not implement this.
+    //   - SimpleX/SMP DOES: the invitation is single-use (queue KEY-secured) and the recipient key
+    //     is ephemeral, so the only recovery path is to resume the channel from its
+    //     persisted state (unilateral re-SUB; SMP is store-and-forward).
     //
-    // El Stage la consulta con `transport is IResumableTransport`; si el transport no la
-    // expone, Stage.ResumeChannelAsync devuelve null y el host cae a su fallback de pairing.
+    // The Stage queries it with `transport is IResumableTransport`; if the transport does not
+    // expose it, Stage.ResumeChannelAsync returns null and the host falls back to pairing.
     public interface IResumableTransport
     {
-        // Devuelve el canal resumido, o null si no hay estado persistido para (peer, purpose).
+        // Returns the resumed channel, or null if there is no persisted state for (peer, purpose).
         Task<IStageChannel> ResumeChannelAsync(PerformerId peer, ChannelPurpose purpose, CancellationToken ct);
     }
 }

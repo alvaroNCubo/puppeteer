@@ -17,40 +17,40 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void ValidateStatically()
 		{
-			Type tipo1 = e1.ComputeType();
-			if (tipo1 != typeof(bool))
+			Type type1 = e1.ComputeType();
+			if (type1 != typeof(bool))
 			{
-				throw new LanguageException($"The left-hand expression of OR must return a boolean value, but got type '{tipo1.Name}'.");
+				throw new LanguageException($"The left-hand expression of OR must return a boolean value, but got type '{type1.Name}'.");
 			}
-			Type tipo2 = e2.ComputeType();
-			if (tipo2 != typeof(bool))
+			Type type2 = e2.ComputeType();
+			if (type2 != typeof(bool))
 			{
-				throw new LanguageException($"The right-hand expression of OR must return a boolean value, but got type '{tipo2.Name}'.");
+				throw new LanguageException($"The right-hand expression of OR must return a boolean value, but got type '{type2.Name}'.");
 			}
 
 			ForcedType = typeof(bool);
 		}
 		internal override object Execute()
 		{
-			object objeto1 = e1.Execute();
-			Type tipo1 = objeto1.GetType();
-			if (tipo1 != typeof(bool))
+			object object1 = e1.Execute();
+			Type type1 = object1.GetType();
+			if (type1 != typeof(bool))
 			{
-				throw new LanguageException($"The OR operator cannot operate on a value of type '{tipo1.Name}'.");
+				throw new LanguageException($"The OR operator cannot operate on a value of type '{type1.Name}'.");
 			}
 
-			bool cortoCircuito = (bool)objeto1;
+			bool cortoCircuito = (bool)object1;
 			if (cortoCircuito)
 			{
 				return true;
 			}
-			object objeto2 = e2.Execute();
-			Type tipo2 = objeto1.GetType();
-			if (tipo2 != typeof(bool))
+			object object2 = e2.Execute();
+			Type type2 = object1.GetType();
+			if (type2 != typeof(bool))
 			{
-				throw new LanguageException($"The OR operator cannot operate on values of types '{tipo1.Name}' and '{tipo2.Name}'.");
+				throw new LanguageException($"The OR operator cannot operate on values of types '{type1.Name}' and '{type2.Name}'.");
 			}
-			return (bool)objeto2;
+			return (bool)object2;
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
@@ -66,8 +66,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (leftExpr is ConstantExpression && rightExpr is ConstantExpression)
 			{
-				var valorEstatico = Execute();
-				return Expression.Constant(valorEstatico, typeof(bool));
+				var staticValue = Execute();
+				return Expression.Constant(staticValue, typeof(bool));
 			}
 
 			// Simulate short-circuit evaluation: left || right
@@ -79,11 +79,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			e1.write(resultado, databaseType);
-			resultado.Append(" || ");
-			e2.write(resultado, databaseType);
+			e1.write(result, databaseType);
+			result.Append(" || ");
+			e2.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)

@@ -2,6 +2,7 @@ using Puppeteer.EventSourcing;
 using Puppeteer.EventSourcing.DB;
 using Puppeteer.EventSourcing.DB.FileSystem;
 using Puppeteer.EventSourcing.Follower;
+using Puppeteer.EventSourcing.Interpreter.Formatters;
 using Puppeteer.EventSourcing.Playbill;
 using System;
 
@@ -36,6 +37,21 @@ namespace Puppeteer
         public bool IsNew => handler.ItsANewOne;
 
         public Reactions Reactions => handler.Reactions;
+
+        // Transport for the cross-actor Tell primitive, exposed so a Choreography
+        // host that is NOT a Performance (e.g. a StageV2) can plug it into the actor
+        // that lives under this hook. Without this seam a Stage could DEFINE a
+        // Reaction whose Causation body issues a `tell`, but the post-commit drain
+        // had no transport to dispatch through and failed at execution. Setting it
+        // makes a Stage's tell reach the wire exactly as a Performance's does — the
+        // capability was always the ActorHandler's; only its exposure was missing.
+        // Single-assignment is enforced by the handler (re-assigning a live
+        // transport would orphan in-flight tells).
+        public Puppeteer.Tell.ITransport Transport
+        {
+            get { return handler.Transport; }
+            set { handler.Transport = value; }
+        }
 
         public Action<long, byte[]> OnRecordWritten
         {
@@ -144,6 +160,22 @@ namespace Puppeteer
         public void InitializeStorage(DatabaseType dbType, string connectionString)
         {
             handler.EventSourcingStorage(dbType, connectionString);
+        }
+
+        // Push/pull selection (Paper 9 / OutputTarget). This is the interface
+        // the hook knows to manipulate the output destination: configure the
+        // sink that a Reaction's Program.Emit projection is pushed to at the
+        // close of PerformEmit. PerformCmd/PerformQry stay pull (the caller
+        // reads the result). Passing a null sink reverts to pull-only. The push
+        // renders with pushFormat — TOON by default (compact, line-autonomous on
+        // the wire); pass an explicit formatter to override. The sink is handed
+        // the immutable document string, never the engine's pooled buffer. This
+        // is the ephemeral channel; for guaranteed delivery use the Outbox
+        // Reaction plane.
+        public void SetOutputTarget(IOutputSink sink, IOutputFormatter pushFormat = null)
+        {
+            handler.OutputTarget = sink;
+            handler.OutputTargetFormatter = sink == null ? null : (pushFormat ?? new ToonFormatter());
         }
 
         public string PerformCmd(string script)

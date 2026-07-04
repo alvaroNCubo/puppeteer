@@ -34,18 +34,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			string script = ((string)expression.Execute());
 			parser.SetSource(script);
-			Program programaEval = parser.ParseEval(currLevel, isQuery, isCheck);
-			programaEval.DeclaracionesExternas = this.Program.Declaraciones;
-			programaEval.Parameters = this.Program.Parameters;
-			programaEval.SolveReferences(programaEval.Parameters, withStaticValidation: false);
-			programaEval.SetContextInfo();
-			string resultado = programaEval.Execute();
-			forDairy = programaEval.ConvertToString(DatabaseType.IN_MEMORY);
-			if (resultado != "")
+			Program evalProgram = parser.ParseEval(currLevel, isQuery, isCheck);
+			evalProgram.ExternalDeclarations = this.Program.Declarations;
+			evalProgram.Parameters = this.Program.Parameters;
+			evalProgram.SolveReferences(evalProgram.Parameters, withStaticValidation: false);
+			evalProgram.SetContextInfo();
+			string result = evalProgram.Execute();
+			forDairy = evalProgram.ConvertToString(DatabaseType.IN_MEMORY);
+			if (result != "")
 			{
-				output.PrintBuffer.Append(resultado, 1, resultado.Length - 2);
+				output.PrintBuffer.Append(result, 1, result.Length - 2);
 			}
-			this.Program.DeclaracionesExternas = programaEval.Declaraciones;
+			this.Program.ExternalDeclarations = evalProgram.Declarations;
 			this.Program.SolveReferences(this.Program.Parameters, withStaticValidation: true);
 		}
 
@@ -79,13 +79,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			expression.AccumulatePromotionCandidateHash(ref hc);
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
+			if (WasFiltered) return;
 			if (!String.IsNullOrWhiteSpace(forDairy))
 			{
-				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-				resultado.Append(forDairy);
+				if (tabs > 0) result.Append(GenerateTabs(tabs));
+				result.Append(forDairy);
 			}
 			else
 			{
@@ -100,10 +100,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// EvalStatement, hasEvals==true in Program.ValidateStatically, and
 				// static validation is skipped — replay re-executes the Eval and
 				// rebuilds the globals deterministically (same call order, etc.).
-				if (tabs > 0) resultado.Append(GenerateTabs(tabs));
-				resultado.Append("Eval(");
-				expression.write(resultado, databaseType);
-				resultado.Append(");\r");
+				if (tabs > 0) result.Append(GenerateTabs(tabs));
+				result.Append("Eval(");
+				expression.write(result, databaseType);
+				result.Append(");\r");
 			}
 		}
 

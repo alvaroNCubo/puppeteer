@@ -3,6 +3,8 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using Choreography.Dispatch;
 using Choreography.Saga;
+using Choreography.Told;
+using Choreography.Transport.Brokered;
 using Puppeteer;
 using Puppeteer.EventSourcing.Follower;
 using Puppeteer.EventSourcing.Interpreter.Formatters;
@@ -278,6 +280,62 @@ namespace Choreography.Theater
             if (scriptForChk == null) throw new ArgumentNullException(nameof(scriptForChk));
             if (scriptForCmd == null) throw new ArgumentNullException(nameof(scriptForCmd));
             return new ActorV2Invocation(actorV2, scriptForChk, scriptForCmd, playbill, currentPlaybillSchemaName);
+        }
+
+        // ── Tell transport (V2 surface) ────────────────────────────────────
+
+        // Plug the transport that carries this actor's tells across a boundary
+        // (e.g. a KafkaTellTransport). The transport is what a Reaction's
+        // `.Causation.Continue("tell ... through '...';")` body is delivered
+        // through; the domain never names the wire. Single-assignment: the
+        // ActorHandler rejects swapping a live transport (it would orphan
+        // in-flight tells), so call this once, before the first tell is issued.
+        public PerformanceV2 UseTellTransport(Puppeteer.Tell.ITransport transport)
+        {
+            if (transport == null) throw new ArgumentNullException(nameof(transport));
+            actorV2.Handler.Transport = transport;
+            return this;
+        }
+
+        // ── Told (receiver-side uptake, the dual of `tell`) ────────────────
+
+        // Listen for tells addressed to a logical role and declare, in this
+        // Performance's own vocabulary, which command each message runs. The topic
+        // is resolved from the SAME TellBindingTable the sender routes by — the role
+        // is the legible name; the wire is config, never a magic string in code.
+        // Returns a ToldListener; register mappings with .Told(msg)...Command(cmd)
+        // and call .Start() to begin consuming. Dispose the listener to stop.
+        //
+        // This is the tell-aware receiver: it acks the origin only AFTER the hearer's
+        // command commits (uptake), is idempotent on redelivery, and honors a check
+        // carried by the tell. Cross-actor causation reads symmetrically on both
+        // ends: `tell <Message> to <Role>` out, `Told(<Message>).Command(...)` in.
+        public ToldListener ListenAs(string role, TellBindingTable bindings, IMessageBroker broker)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(role);
+            if (bindings == null) throw new ArgumentNullException(nameof(bindings));
+            if (broker == null) throw new ArgumentNullException(nameof(broker));
+
+            // Resolve the role's topic (message-agnostic: one listener drains the
+            // role's topic and routes by message name to the mapped command).
+            string topic = bindings.Resolve(role, null);
+            return new ToldListener(this, broker, topic, role, actorV2.Handler.Logger);
+        }
+
+        // ── Output target (push channel, Paper 9) ──────────────────────────
+
+        // Configure the transport sink a Reaction's Program.Emit projection is
+        // pushed to. PerformCmd/PerformQry stay pull (the caller reads the
+        // result); a Reaction's Program.Emit becomes push when a sink is set —
+        // same script, the destination decides the transport. The push renders
+        // TOON by default; pass a formatter to override. Pass a null sink to
+        // revert to pull-only. Ephemeral channel; durable delivery is the
+        // Outbox Reaction plane. The sink receives the immutable document
+        // string, never the engine's pooled buffer.
+        public PerformanceV2 OutputTarget(IOutputSink transport, IOutputFormatter format = null)
+        {
+            hook.SetOutputTarget(transport, format);
+            return this;
         }
 
         // ── Dispatch / Saga (existing) ─────────────────────────────────────

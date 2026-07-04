@@ -507,7 +507,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			// fragments"); under TOON we still call it but emit the raw
 			// string as-is, prefixed by the key. Not pretty but preserves
 			// the legacy contract.
-			MethodInfo posiblePrint = type
+			MethodInfo possiblePrint = type
 				.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
 				.FirstOrDefault(m =>
 					m.Name.ToLower() == "print" &&
@@ -517,10 +517,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			WriteKey(name);
 			WriteStructure(':');
 			sink.Append(' ');
-			if (posiblePrint != null)
+			if (possiblePrint != null)
 			{
 				var tmp = new StringBuilder();
-				posiblePrint.Invoke(value, new object[] { tmp });
+				possiblePrint.Invoke(value, new object[] { tmp });
 				sink.Append(tmp.ToString());
 			}
 			else

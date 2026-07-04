@@ -59,20 +59,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				if (subType != null)
 				{
-					string strSubtipo = subType.Name;
+					string strSubtype = subType.Name;
 					Type elementType;
-					if (string.Equals(strSubtipo, "int", StringComparison.OrdinalIgnoreCase))
+					if (string.Equals(strSubtype, "int", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(int);
-					else if (string.Equals(strSubtipo, "string", StringComparison.OrdinalIgnoreCase))
+					else if (string.Equals(strSubtype, "string", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(string);
-					else if (string.Equals(strSubtipo, "datetime", StringComparison.OrdinalIgnoreCase))
+					else if (string.Equals(strSubtype, "datetime", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(DateTime);
-					else if (string.Equals(strSubtipo, "bool", StringComparison.OrdinalIgnoreCase))
+					else if (string.Equals(strSubtype, "bool", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(bool);
-					else if (string.Equals(strSubtipo, "double", StringComparison.OrdinalIgnoreCase))
+					else if (string.Equals(strSubtype, "double", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(double);
 					else
-						elementType = libraries.GetTypeOrThrow(strSubtipo);
+						elementType = libraries.GetTypeOrThrow(strSubtype);
 					if (elementType == null) elementType = typeof(object);
 					result = typeof(List<>).MakeGenericType(new[] { elementType });
 				}
@@ -92,7 +92,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
         }
 
-        private Type calcularTipoOfSubType()
+        private Type computeSubType()
         {
             if (subType == null) throw new LanguageException("The subType is only used for list element types and cannot be null.");
 			string name = subType.Name;
@@ -203,135 +203,135 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         {
             object value = e.Execute();
             Type cast = ComputeType();
-            Type tipoDelValor = e.ComputeType();
+            Type valueType = e.ComputeType();
             if (cast.IsEnum)
             {
-                if (tipoDelValor == typeof(string))
+                if (valueType == typeof(string))
                     return ParseEnumOrThrow(cast, (string)value);
-                else if (tipoDelValor == cast)
+                else if (valueType == cast)
                     return value;
                 else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             if (cast == typeof(String))
             {
-                if (tipoDelValor == typeof(string))
+                if (valueType == typeof(string))
                     return value;
-                else if (tipoDelValor == typeof(int))
+                else if (valueType == typeof(int))
                     return "" + (int)value;
-                else if (tipoDelValor == typeof(double))
+                else if (valueType == typeof(double))
                     return "" + (double)value;
-                else if (tipoDelValor == typeof(bool))
+                else if (valueType == typeof(bool))
                     return "" + (bool)value;
-                else if (tipoDelValor == typeof(DateTime))
+                else if (valueType == typeof(DateTime))
                 {
-                    DateTime dateValor = (DateTime)value;
-                    if (dateValor.Hour == 0 && dateValor.Minute == 0 && dateValor.Second == 0)
+                    DateTime dateValue = (DateTime)value;
+                    if (dateValue.Hour == 0 && dateValue.Minute == 0 && dateValue.Second == 0)
                     {
-                        return dateValor.ToString("MM/dd/yyyy");
+                        return dateValue.ToString("MM/dd/yyyy");
                     }
-                    return dateValor.ToString("MM/dd/yyyy HH:mm:ss");
+                    return dateValue.ToString("MM/dd/yyyy HH:mm:ss");
                 }
-                else if (tipoDelValor.IsEnum)
+                else if (valueType.IsEnum)
                     return value.ToString();
                 else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(int))
             {
-				if (tipoDelValor == typeof(int))
+				if (valueType == typeof(int))
 					return value;
-				else if (tipoDelValor == typeof(double))
+				else if (valueType == typeof(double))
 					return (int)(double)value;
-				else if (tipoDelValor == typeof(string))
+				else if (valueType == typeof(string))
 				{
-					double valorDecimal;
-					if (double.TryParse((string)value, out valorDecimal))
-						return (int)valorDecimal;
+					double decimalValue;
+					if (double.TryParse((string)value, out decimalValue))
+						return (int)decimalValue;
 					else
-						throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+						throw new LanguageException($"Invalid cast from {valueType} to {cast}");
 				}
-				else if (tipoDelValor == typeof(bool))
+				else if (valueType == typeof(bool))
 					return Convert.ToInt32((bool)value);
-				else if (tipoDelValor == typeof(object) && value != null)
+				else if (valueType == typeof(object) && value != null)
 					return Convert.ToInt32(value);
 				else
-					throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+					throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(double))
             {
-				if (tipoDelValor == typeof(double))
+				if (valueType == typeof(double))
 					return value;
-				else if (tipoDelValor == typeof(int))
+				else if (valueType == typeof(int))
 					return (double)(int)value;
-				else if (tipoDelValor == typeof(string))
+				else if (valueType == typeof(string))
 				{
-					double valorDecimal;
-					if (double.TryParse((string)value, out valorDecimal))
-						return valorDecimal;
+					double decimalValue;
+					if (double.TryParse((string)value, out decimalValue))
+						return decimalValue;
 					else
-						throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+						throw new LanguageException($"Invalid cast from {valueType} to {cast}");
 				}
-				else if (tipoDelValor == typeof(bool))
+				else if (valueType == typeof(bool))
 					return Convert.ToDouble((bool)value);
-				else if (tipoDelValor == typeof(object) && value != null)
+				else if (valueType == typeof(object) && value != null)
 					return Convert.ToDouble(value);
 				else
-					throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+					throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(decimal))
             {
-                if (tipoDelValor == typeof(decimal))
+                if (valueType == typeof(decimal))
                     return value;
-                else if (tipoDelValor == typeof(int))
+                else if (valueType == typeof(int))
                     return (double)(int)value;
-                else if (tipoDelValor == typeof(string))
+                else if (valueType == typeof(string))
                 {
-                    double valorDecimal;
-                    if (double.TryParse((string)value, out valorDecimal))
-                        return valorDecimal;
+                    double decimalValue;
+                    if (double.TryParse((string)value, out decimalValue))
+                        return decimalValue;
                     else
-                        throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                        throw new LanguageException($"Invalid cast from {valueType} to {cast}");
                 }
-                else if (tipoDelValor == typeof(bool))
+                else if (valueType == typeof(bool))
                     return Convert.ToDecimal((bool)value);
-				else if (tipoDelValor == typeof(object) && value != null)
+				else if (valueType == typeof(object) && value != null)
 					return Convert.ToDecimal(value);
 				else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(DateTime))
             {
-                if (tipoDelValor == typeof(DateTime))
+                if (valueType == typeof(DateTime))
                     return value;
                 else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(bool))
             {
-                if (tipoDelValor == typeof(bool))
+                if (valueType == typeof(bool))
                     return value;
-                else if (tipoDelValor == typeof(string))
+                else if (valueType == typeof(string))
                 {
-                    bool valorDe;
-                    if (System.Boolean.TryParse((string)value, out valorDe))
-                        return valorDe;
+                    bool valueOf;
+                    if (System.Boolean.TryParse((string)value, out valueOf))
+                        return valueOf;
                     else
-                        throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                        throw new LanguageException($"Invalid cast from {valueType} to {cast}");
                 }
-                else if (tipoDelValor == typeof(int))
+                else if (valueType == typeof(int))
                     return (int)value != 0;
-                else if (tipoDelValor == typeof(double))
+                else if (valueType == typeof(double))
                     return (double)value != 0;
                 else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             else if (cast == typeof(DateTime))
             {
-                if (tipoDelValor == typeof(DateTime))
+                if (valueType == typeof(DateTime))
                     return value;
                 else
-                    throw new LanguageException($"Invalid cast from {tipoDelValor} to {cast}");
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             // Fallback for class/interface casts: return the already-evaluated
             // value. Re-running e.Execute() here would invoke the inner
@@ -348,8 +348,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (expr is ConstantExpression)
 			{
-				var valorEstatico = Execute();
-				return Expression.Constant(valorEstatico, ComputeType());
+				var staticValue = Execute();
+				return Expression.Constant(staticValue, ComputeType());
 			}
 
 			Type targetType = ComputeType();
@@ -605,18 +605,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
         }
 
-        internal override void write(StringBuilder resultado, DatabaseType databaseType)
+        internal override void write(StringBuilder result, DatabaseType databaseType)
         {
-            resultado.Append('(');
-            id.write(resultado, databaseType);
+            result.Append('(');
+            id.write(result, databaseType);
             if (subType != null)
             {
-                resultado.Append('<');
-                subType.write(resultado, databaseType);
-                resultado.Append('>');
+                result.Append('<');
+                subType.write(result, databaseType);
+                result.Append('>');
             }
-            resultado.Append(')');
-            e.write(resultado, databaseType);
+            result.Append(')');
+            e.write(result, databaseType);
         }
 
         internal override void Visit(ASTVisitor v)

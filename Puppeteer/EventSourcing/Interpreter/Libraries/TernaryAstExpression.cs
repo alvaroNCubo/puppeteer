@@ -7,24 +7,24 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 {
 	class TernaryAstExpression : AstExpression
 	{
-		private readonly AstExpression condicion;
-		private readonly AstExpression siVerdadero;
-		private readonly AstExpression siFalso;
+		private readonly AstExpression condition;
+		private readonly AstExpression ifTrue;
+		private readonly AstExpression ifFalse;
 
-		internal TernaryAstExpression(AstExpression condicion, AstExpression siVerdadero, AstExpression siFalso)
+		internal TernaryAstExpression(AstExpression condition, AstExpression ifTrue, AstExpression ifFalse)
 		{
-			ArgumentNullException.ThrowIfNull(condicion);
-			ArgumentNullException.ThrowIfNull(siVerdadero);
-			ArgumentNullException.ThrowIfNull(siFalso);
-			this.condicion = condicion;
-			this.siVerdadero = siVerdadero;
-			this.siFalso = siFalso;
+			ArgumentNullException.ThrowIfNull(condition);
+			ArgumentNullException.ThrowIfNull(ifTrue);
+			ArgumentNullException.ThrowIfNull(ifFalse);
+			this.condition = condition;
+			this.ifTrue = ifTrue;
+			this.ifFalse = ifFalse;
 		}
 
 		internal override Type ComputeType()
 		{
-			Type trueType = siVerdadero.ComputeType();
-			Type falseType = siFalso.ComputeType();
+			Type trueType = ifTrue.ComputeType();
+			Type falseType = ifFalse.ComputeType();
 
 			if (trueType == falseType)
 				return trueType;
@@ -34,11 +34,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void ValidateStatically()
 		{
-			condicion.ValidateStatically();
-			siVerdadero.ValidateStatically();
-			siFalso.ValidateStatically();
+			condition.ValidateStatically();
+			ifTrue.ValidateStatically();
+			ifFalse.ValidateStatically();
 
-			Type conditionType = condicion.ComputeType();
+			Type conditionType = condition.ComputeType();
 			if (conditionType != typeof(bool))
 			{
 				throw new LanguageException($"The condition of the ternary operator must be of type Boolean, but found type '{conditionType.Name}'.");
@@ -49,21 +49,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object valorCondicion = condicion.Execute();
-			if (valorCondicion.GetType() != typeof(bool))
+			object conditionValue = condition.Execute();
+			if (conditionValue.GetType() != typeof(bool))
 			{
-				throw new LanguageException($"The condition of the ternary operator must be of type Boolean, but found type '{valorCondicion.GetType().Name}'.");
+				throw new LanguageException($"The condition of the ternary operator must be of type Boolean, but found type '{conditionValue.GetType().Name}'.");
 			}
 
-			bool cumple = (bool)valorCondicion;
-			return cumple ? siVerdadero.Execute() : siFalso.Execute();
+			bool cumple = (bool)conditionValue;
+			return cumple ? ifTrue.Execute() : ifFalse.Execute();
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
 		{
-			Expression condExpr = condicion.ExecuteExpression(parametersParam);
-			Expression trueExpr = siVerdadero.ExecuteExpression(parametersParam);
-			Expression falseExpr = siFalso.ExecuteExpression(parametersParam);
+			Expression condExpr = condition.ExecuteExpression(parametersParam);
+			Expression trueExpr = ifTrue.ExecuteExpression(parametersParam);
+			Expression falseExpr = ifFalse.ExecuteExpression(parametersParam);
 
 			if (condExpr.Type != typeof(bool))
 				throw new LanguageException($"The condition of the ternary operator must be of type Boolean, but found type '{condExpr.Type.Name}'.");
@@ -79,20 +79,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (condExpr is ConstantExpression constCond)
 			{
-				bool valorEstatico = (bool)constCond.Value;
-				return valorEstatico ? trueExpr : falseExpr;
+				bool staticValue = (bool)constCond.Value;
+				return staticValue ? trueExpr : falseExpr;
 			}
 
 			return Expression.Condition(condExpr, trueExpr, falseExpr);
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			condicion.write(resultado, databaseType);
-			resultado.Append(" ? ");
-			siVerdadero.write(resultado, databaseType);
-			resultado.Append(" : ");
-			siFalso.write(resultado, databaseType);
+			condition.write(result, databaseType);
+			result.Append(" ? ");
+			ifTrue.write(result, databaseType);
+			result.Append(" : ");
+			ifFalse.write(result, databaseType);
 		}
 
 		internal override void Visit(ASTVisitor v)
@@ -101,16 +101,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				v.OnVisit(this);
 			}
-			condicion.Visit(v);
-			siVerdadero.Visit(v);
-			siFalso.Visit(v);
+			condition.Visit(v);
+			ifTrue.Visit(v);
+			ifFalse.Visit(v);
 		}
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			condicion.PreparePatternMatching(patternAst, ref position);
-			siVerdadero.PreparePatternMatching(patternAst, ref position);
-			siFalso.PreparePatternMatching(patternAst, ref position);
+			condition.PreparePatternMatching(patternAst, ref position);
+			ifTrue.PreparePatternMatching(patternAst, ref position);
+			ifFalse.PreparePatternMatching(patternAst, ref position);
 		}
 	}
 }

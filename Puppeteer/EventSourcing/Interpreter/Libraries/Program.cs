@@ -19,15 +19,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		private List<Statement> statements;
 		private bool statementsReleased;
 		private bool cachedHasSingleTellStatement;
+		private bool cachedContainsTell;
 		internal bool StatementsReleased => statementsReleased;
 
-        private readonly bool elProgramaEsUnEval;
+        private readonly bool programIsEval;
         internal Statement lastExecutedStatement;
 
         private List<Id> idAllReferences;
         private List<Id> idParameters;
 		private List<Id> idDeclarations;
-		private List<Id> idDeclaracionesExternas;
+		private List<Id> externalDeclarationIds;
 
 		private readonly int[] level;
         private readonly bool isQuery;
@@ -115,7 +116,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             this.Script = script;
 			this.statements = statements;
             this.symbolTable = symbolTable;
-            this.elProgramaEsUnEval = symbolTable.InEvalMode;//Check that the Eval source cannot be used with the perform query
+            this.programIsEval = symbolTable.InEvalMode;//Check that the Eval source cannot be used with the perform query
             this.level = level;
             this.isQuery = isQuery;
             this.parameters = Parameters.EMPTY;
@@ -148,6 +149,31 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
         }
 
+        // True iff the program contains any TellStatement (at any position).
+        // A `tell` has no compiled-mode lowering, so AdjustCompilationMode uses
+        // this to force the WHOLE program to interpreted execution. A tell-bearing
+        // program is therefore never compiled and never released, so the live
+        // scan below always has statements to read; the cached value only ever
+        // backs released (compiled, tell-free) programs, where it is false.
+        internal bool ContainsTell
+        {
+            get
+            {
+                if (statementsReleased) return cachedContainsTell;
+                return ComputeContainsTell();
+            }
+        }
+
+        private bool ComputeContainsTell()
+        {
+            if (statements == null) return false;
+            for (int i = 0; i < statements.Count; i++)
+            {
+                if (statements[i] is TellStatement) return true;
+            }
+            return false;
+        }
+
         internal bool IsQuery
         {
             get
@@ -176,19 +202,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
         }
 
-		internal List<Id> DeclaracionesExternas
+		internal List<Id> ExternalDeclarations
 		{
 			get 
 			{
-				if (idDeclaracionesExternas == null)
+				if (externalDeclarationIds == null)
 					return new List<Id>();
-				return idDeclaracionesExternas;
+				return externalDeclarationIds;
 			}
 			set 
 			{
 				if (value == null) throw new LanguageException("External declarations can not be null");
 
-				idDeclaracionesExternas = value;
+				externalDeclarationIds = value;
 			}
 		}
 
@@ -204,10 +230,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				case CompilationModePolicy.Automatic:
 					if (IsCompiledMode) throw new LanguageException("The Program is already in compiled execution mode.");
 
-					IsCompiledMode = !useInterpretedMode;
+					// A `tell` has no compiled-mode lowering, so a tell-bearing
+					// program runs interpreted. This is per-program: the tell lives in
+					// a Reaction's Causation body (post-commit, not the actor's hot
+					// command path), so the actor's other programs keep compiling —
+					// no global interpreted regression.
+					IsCompiledMode = !useInterpretedMode && !ContainsTell;
 					break;
 				case CompilationModePolicy.AlwaysCompiled:
-					IsCompiledMode = true;
+					// Even under an explicit AlwaysCompiled policy a tell cannot be
+					// compiled; fall back to interpreted for the tell-bearing program
+					// rather than failing at write-time. AlwaysCompiled exists only to
+					// pin unit-test execution mode.
+					IsCompiledMode = !ContainsTell;
 					break;
 				case CompilationModePolicy.AlwaysInterpreted:
 					IsCompiledMode = false;
@@ -270,11 +305,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			// Warm the canonical-text cache before dropping the AST it renders from.
 			_ = ConvertToString(databaseType);
-			// Preserve the cheap shape query that must outlive the AST.
+			// Preserve the cheap shape queries that must outlive the AST. (A
+			// tell-bearing program is forced interpreted and never reaches here, so
+			// cachedContainsTell is only ever snapshotted false — but keep it honest.)
 			cachedHasSingleTellStatement = statements.Count == 1 && statements[0] is TellStatement;
+			cachedContainsTell = ComputeContainsTell();
 
 			// Drop the Statement tree and the all-references list. idDeclarations
-			// is kept (small, and Declaraciones may be queried) — the bulk freed
+			// is kept (small, and Declarations may be queried) — the bulk freed
 			// is the Statement nodes plus the Ids reachable only via idAllReferences.
 			statements = null;
 			idAllReferences = null;
@@ -283,8 +321,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal Expression<Func<Parameters, Output, string>> ProgramExpression()
 		{
-			var parametersParam = Expression.Parameter(typeof(Parameters), "_$_context_parametros");
-			var outputParam = Expression.Parameter(typeof(Output), "_$_context_salida");
+			var parametersParam = Expression.Parameter(typeof(Parameters), "_$_context_parameters");
+			var outputParam = Expression.Parameter(typeof(Output), "_$_context_output");
 
 			List<Expression> cmds = new List<Expression>();
 
@@ -348,7 +386,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return lambda;
 		}
 
-		private string Execute(bool limpiarParametros)
+		private string Execute(bool clearParameters)
         {
 			ExecutionOutput output = (symbolTable.RecoveringState) ? ExecutionOutput.RentWithoutOutput() : ExecutionOutput.RentWithOutput();
 			output.Clear();
@@ -358,25 +396,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 source.Execute(output);
             }
             output.Finish();
-            string resultado = output.ToString();
+            string result = output.ToString();
 			string exposeJson = output.GetExposeJson();
 			LastExposeData = string.IsNullOrEmpty(exposeJson) ? null : exposeJson;
 
 			ExecutionOutput.Return(output);
-			if (limpiarParametros || output.HasEWIS())
+			if (clearParameters || output.HasEWIS())
 			{
 				parameters.Clear();
             }
 
-            return resultado;
+            return result;
         }
 
 		internal string Execute()
         {
-            return Execute(limpiarParametros: true);
+            return Execute(clearParameters: true);
         }
 
-        private string EjecutarEval()
+        private string ExecuteEval()
         {
             return Execute(false);
         }
@@ -386,12 +424,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return Execute(false);
         }
 
-        internal void LoadArguments(Parameters arguments)
+        internal void LoadArguments(Parameters arguments, bool recomputeEvalParameters = true)
         {
 			if (!this.IsCompiledMode || _executable == null)
 			{
 				this.parameters = arguments;
 			}
+
+			// Eval parameters are computed transactionally at COMMAND time and their result
+			// is journaled with the invocation. Recomputing them means EXECUTING the eval
+			// expression (e.g. `company.Sales.DomainFrom(host)`) — which is correct at command
+			// time but WRONG on a replay/observer that only carries the arguments blob and a
+			// type-seeded (value-less) symbol table: the expression dereferences a null global
+			// and throws. When recomputeEvalParameters is false (the Reaction matcher path),
+			// keep the journaled value already loaded into `arguments` instead of re-executing.
+			if (!recomputeEvalParameters) return;
 
 			foreach (var argument in arguments)
             {
@@ -404,40 +451,40 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         }
 
 
-		private Dictionary<string, (string EvalScript, Func<Parameters, Output, string> Ejecutable)> _ejecutableEvalParameter = new Dictionary<string, (string, Func<Parameters, Output, string>)>();
-		private Program CrearProgramaEval(Parameter parametro)
+		private Dictionary<string, (string EvalScript, Func<Parameters, Output, string> Executable)> _executableEvalParameter = new Dictionary<string, (string, Func<Parameters, Output, string>)>();
+		private Program CreateEvalProgram(Parameter parameter)
 		{
 			Parser parser = new Parser(this.libraries, this.symbolTable);
-			parser.SetSource(parametro.EvalScript);
-			var programaEval = parser.Parse(isQuery: false, isCheck: false);
-			programaEval.SetContextInfo();
-			programaEval.AdjustCompilationMode(useInterpretedMode: false, CompilationModePolicy.Automatic);
-			programaEval.Parameters = this.parameters;
-			programaEval.SolveReferences(this.parameters, withStaticValidation: true);
-			parametro.Program = programaEval;
-			parametro.Program.Parameters = this.parameters;
-			return programaEval;
+			parser.SetSource(parameter.EvalScript);
+			var evalProgram = parser.Parse(isQuery: false, isCheck: false);
+			evalProgram.SetContextInfo();
+			evalProgram.AdjustCompilationMode(useInterpretedMode: false, CompilationModePolicy.Automatic);
+			evalProgram.Parameters = this.parameters;
+			evalProgram.SolveReferences(this.parameters, withStaticValidation: true);
+			parameter.Program = evalProgram;
+			parameter.Program.Parameters = this.parameters;
+			return evalProgram;
 		}
 
-		private object EvaluateEvalParameters(Parameter parametro)
+		private object EvaluateEvalParameters(Parameter parameter)
 		{
-			var evalScript = parametro.EvalScript;
-			if (!_ejecutableEvalParameter.TryGetValue(parametro.Name, out var evalParameterCacheEntry) || evalParameterCacheEntry.EvalScript != evalScript)
+			var evalScript = parameter.EvalScript;
+			if (!_executableEvalParameter.TryGetValue(parameter.Name, out var evalParameterCacheEntry) || evalParameterCacheEntry.EvalScript != evalScript)
 			{
-				Program programaEval = CrearProgramaEval(parametro);
-				var programExpression = parametro.Program.ProgramExpression();
+				Program evalProgram = CreateEvalProgram(parameter);
+				var programExpression = parameter.Program.ProgramExpression();
 				var swEval = LabInstrumentation.OnEvalCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
 				var executable = programExpression.Compile();
 				if (swEval != null) { swEval.Stop(); LabInstrumentation.OnEvalCompileElapsedTicks(swEval.ElapsedTicks); }
 				evalParameterCacheEntry = (evalScript, executable);
-				_ejecutableEvalParameter[parametro.Name] = evalParameterCacheEntry;
-				parametro.Program.idParameters = null;
+				_executableEvalParameter[parameter.Name] = evalParameterCacheEntry;
+				parameter.Program.idParameters = null;
 			}
 			var output = Output.RentWithoutOutput();
-			evalParameterCacheEntry.Ejecutable(this.parameters, output);
+			evalParameterCacheEntry.Executable(this.parameters, output);
 			Output.Return(output);
 
-			return parametro.GetValue();
+			return parameter.GetValue();
 		}
 
         private string builderStr = null;
@@ -452,6 +499,27 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
             builderStr = builder.ToString();
             return builderStr;
+        }
+
+        // Authored render of the program body: identical to ConvertToString
+        // except that filtered print statements are kept (see AuthoredRenderScope
+        // and OutputStatementIndividual.Write). Used only to compose the once-
+        // written Action (Define) body text, so the developer's prints survive in
+        // the journal. Deliberately NOT cached and NOT sharing builderStr: the
+        // canonical render remains the cache key and the payload for repeated
+        // Script rows. The render is synchronous, so the ambient scope enters and
+        // exits within this call.
+        internal string ConvertToAuthoredString(DatabaseType databaseType)
+        {
+            StringBuilder builder = new StringBuilder();
+            using (AuthoredRenderScope.Enter())
+            {
+                foreach (Statement source in statements)
+                {
+                    source.Write(builder, 0, databaseType);
+                }
+            }
+            return builder.ToString();
         }
 
         // ConvertToString caches builderStr on the first call. ActorHandler
@@ -627,7 +695,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return false;
 		}
 
-        internal List<Id> Declaraciones
+        internal List<Id> Declarations
         {
             get
             {
@@ -639,9 +707,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
         class ReferencesSolver
         {
-            private readonly List<Id> todasLasDeclaraciones;
+            private readonly List<Id> allDeclarations;
             private readonly List<Id> localDeclarations;
-            private readonly List<Id> todosLosIds;
+            private readonly List<Id> allIds;
             private readonly HashSet<Id> parametersIds;
 			private readonly SymbolTable symbolTable;
 
@@ -656,20 +724,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					.Where(id => !symbolTable.HasVariable(id.Name))  // Filter out existing global variables
 					.ToList();
 
-                var forVariables = program.Collect<ForStatement>().Where(x => x.Variable != null).Select(x => (Id)x.Variable);
-                var forIndexVariables = program.Collect<ForStatement>()
-                    .Where(x => x.VariableIndice != null)
-                    .Select(x => (Id)x.VariableIndice);
+                var forVariables = program.Collect<ForEachStatement>().Where(x => x.Variable != null).Select(x => (Id)x.Variable);
+                var forIndexVariables = program.Collect<ForEachStatement>()
+                    .Where(x => x.IndexVariable != null)
+                    .Select(x => (Id)x.IndexVariable);
                 localDeclarations = lValuesFromAssignments
                     .Union(forVariables)
                     .Union(forIndexVariables)
                     .OrderBy(x => x.Level).ToList();
-                todasLasDeclaraciones = program.DeclaracionesExternas.Count > 0 ? program.DeclaracionesExternas.Union(localDeclarations).ToList() : localDeclarations;
-                todosLosIds = program.Collect<Id>().ToList();
+                allDeclarations = program.ExternalDeclarations.Count > 0 ? program.ExternalDeclarations.Union(localDeclarations).ToList() : localDeclarations;
+                allIds = program.Collect<Id>().ToList();
 				parametersIds = new HashSet<Id>();
 
 				// First, process LValues that are parameters AND exist in the symbol table
-				// (those that don't exist in the table will be processed in the todasLasDeclaraciones loop)
+				// (those that don't exist in the table will be processed in the allDeclarations loop)
 				var parameterLValues = program.Collect<NewInstanceStatement>()
 					.Where(x => x.LValue is Id)
 					.Select(x => (Id)x.LValue)
@@ -703,8 +771,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
 				}
 
-				var programaLevel = program.Level;
-                foreach (var id in todasLasDeclaraciones)
+				var programLevel = program.Level;
+                foreach (var id in allDeclarations)
                 {
 					id.Program = program;
 					if (initialParameterSet.ContainsParameter(id.Name))
@@ -717,7 +785,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                     {
                         id.DeclareAsGlobalVariable();
                     }
-                    else if (id.Level >= programaLevel && !id.IsGlobalVariable && !id.IsParameter)
+                    else if (id.Level >= programLevel && !id.IsGlobalVariable && !id.IsParameter)
                     {
                         id.DeclareAsLocalVariable();
                     }
@@ -727,7 +795,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 				// Eval re-declaration unification:
 				// EvalStatement.Execute re-enters SolveReferences passing the
-				// inner program's declarations as the parent's DeclaracionesExternas
+				// inner program's declarations as the parent's ExternalDeclarations
 				// (and vice versa when parsing the next Eval). At the TOP-LEVEL
 				// the HasVariable filter avoids the problem because the eval's x stays
 				// Global. Inside a block the x is Local (IsolatedStorage), does not
@@ -739,9 +807,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// declaration". Here we detect that case and unify the local with
 				// the external: the inner Eval's assignment ends up writing to the
 				// same symbol that the outer block's reads already see.
-				if (program.DeclaracionesExternas.Count > 0)
+				if (program.ExternalDeclarations.Count > 0)
 				{
-					var externalsByName = program.DeclaracionesExternas
+					var externalsByName = program.ExternalDeclarations
 						.Where(ext => ext.IsLValue && ext.IsOriginalLValueDeclaration)
 						.ToLookup(ext => ext.Name, StringComparer.OrdinalIgnoreCase);
 					var unified = new List<Id>();
@@ -759,11 +827,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
 					foreach (var localLValue in unified)
 					{
-						todasLasDeclaraciones.Remove(localLValue);
+						allDeclarations.Remove(localLValue);
 					}
 				}
 
-                foreach (var id in todosLosIds)
+                foreach (var id in allIds)
                 {
 					id.Program = program;
 					if (initialParameterSet.ContainsParameter(id.Name))
@@ -801,32 +869,32 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
 					for(int declIdx = 0; declIdx < localDeclarations.Count; declIdx++)
 					{
-						Id declaracion = localDeclarations[declIdx];
+						Id declaration = localDeclarations[declIdx];
 
-						if (declaracion.IsOriginalLValueDeclaration)
+						if (declaration.IsOriginalLValueDeclaration)
 						{
 							for (int refIdx = declIdx + 1; refIdx < localDeclarations.Count; refIdx++)
 							{
-								Id referencia = localDeclarations[refIdx];
-								if (declaracion.IsReferencedBy(referencia))
+								Id reference = localDeclarations[refIdx];
+								if (declaration.IsReferencedBy(reference))
 								{
-									referencia.ReferencesTo(declaracion);
+									reference.ReferencesTo(declaration);
 								}
 							}
 
-							if (!declaracion.IsParameter)
+							if (!declaration.IsParameter)
 							{
-								var referencias = todosLosIds.Where(
-									referencia =>
-										referencia != declaracion &&
-										!referencia.IsLValue && 
-										!referencia.IsParameter &&
-										string.Equals(referencia.Name, declaracion.Name, StringComparison.OrdinalIgnoreCase) &&
-										declaracion.IsReferencedBy(referencia)
+								var references = allIds.Where(
+									reference =>
+										reference != declaration &&
+										!reference.IsLValue && 
+										!reference.IsParameter &&
+										string.Equals(reference.Name, declaration.Name, StringComparison.OrdinalIgnoreCase) &&
+										declaration.IsReferencedBy(reference)
 								);
-								foreach (Id referencia in referencias)
+								foreach (Id reference in references)
 								{
-									referencia.ReferencesTo(declaracion);
+									reference.ReferencesTo(declaration);
 								}
 							}
 						}
@@ -835,24 +903,24 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
             internal void SolveReferencesToRValues()
             {
-                var ids = todosLosIds;
-                foreach (Id declaracion in todasLasDeclaraciones)
+                var ids = allIds;
+                foreach (Id declaration in allDeclarations)
                 {
-					if (declaracion.IsOriginalLValueDeclaration && !declaracion.IsParameter)
+					if (declaration.IsOriginalLValueDeclaration && !declaration.IsParameter)
 					{
-						var referencias = ids.Where(
-							referencia =>
-								string.Equals(referencia.Name, declaracion.Name, StringComparison.OrdinalIgnoreCase) &&
-								! referencia.IsLValue &&
-								declaracion.IsReferencedBy(referencia)
+						var references = ids.Where(
+							reference =>
+								string.Equals(reference.Name, declaration.Name, StringComparison.OrdinalIgnoreCase) &&
+								! reference.IsLValue &&
+								declaration.IsReferencedBy(reference)
 						);
-						foreach (Id referencia in referencias)
+						foreach (Id reference in references)
 						{
-							referencia.ReferencesTo(declaracion);
+							reference.ReferencesTo(declaration);
 						}
 					}
                 }
-				foreach (Id reference in todosLosIds)
+				foreach (Id reference in allIds)
 				{
 					if (! reference.IsLValue && ! reference.IsParameter && ! reference.IsLocalVariable)
 					{
@@ -872,12 +940,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			internal IEnumerable<Id> IdDeclarations()
 			{
-				return todasLasDeclaraciones;
+				return allDeclarations;
 			}
 
 			internal IEnumerable<Id> IdAllReferences()
 			{
-				return todosLosIds;
+				return allIds;
 			}
 
 			internal IEnumerable<Id> IdsParameter()
@@ -887,7 +955,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			internal ParameterSignature ParameterSignature()
 			{
-				var referencedParams = this.todosLosIds
+				var referencedParams = this.allIds
 					.Where(id => id.IsParameter)
 					.Select(id => id.Parameter)
 					.Distinct();
@@ -910,9 +978,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
             }
 
-            internal override void OnVisit(AST nodo)
+            internal override void OnVisit(AST node)
             {
-                Id id = (Id)nodo;
+                Id id = (Id)node;
                 var name = id.Name.ToLower();
                 if (!ids.Contains(name)) ids.Add(name);
             }

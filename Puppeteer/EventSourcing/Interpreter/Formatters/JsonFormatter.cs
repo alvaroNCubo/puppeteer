@@ -184,9 +184,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			sink.Append('"');
 			EscapeString(name);
 			sink.Append('"').Append(':');
-			var valorStr = value.ToString("0.######################");
-			sink.Append(valorStr);
-			if (valorStr.IndexOf('.') == -1) sink.Append(".0");
+			var strValue = value.ToString("0.######################");
+			sink.Append(strValue);
+			if (strValue.IndexOf('.') == -1) sink.Append(".0");
 			needsComma = true;
 		}
 
@@ -196,9 +196,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			sink.Append('"');
 			EscapeString(name);
 			sink.Append('"').Append(':');
-			var valorStr = value.ToString("0.######################");
-			sink.Append(valorStr);
-			if (valorStr.IndexOf('.') == -1) sink.Append(".0");
+			var strValue = value.ToString("0.######################");
+			sink.Append(strValue);
+			if (strValue.IndexOf('.') == -1) sink.Append(".0");
 			needsComma = true;
 		}
 
@@ -401,9 +401,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 				{
 					sink.Append(doubleValue);
 				}
-				else if (value is decimal decimaValue)
+				else if (value is decimal decimalValue)
 				{
-					sink.Append(decimaValue);
+					sink.Append(decimalValue);
 				}
 				else if (value is string stringValue)
 				{
@@ -428,11 +428,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 				}
 				else
 				{
-					MethodInfo posiblePrint = value.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-					if (posiblePrint != null)
+					MethodInfo possiblePrint = value.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
+					if (possiblePrint != null)
 					{
 						StringBuilder outputTemp = new StringBuilder();
-						posiblePrint.Invoke(value, new object[] { outputTemp });
+						possiblePrint.Invoke(value, new object[] { outputTemp });
 						sink.Append(outputTemp.ToString());
 					}
 					else
@@ -543,11 +543,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			}
 			else
 			{
-				MethodInfo posiblePrint = values.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-				if (posiblePrint != null)
+				MethodInfo possiblePrint = values.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
+				if (possiblePrint != null)
 				{
 					StringBuilder outputTemp = new StringBuilder();
-					posiblePrint.Invoke(values, new object[] { outputTemp });
+					possiblePrint.Invoke(values, new object[] { outputTemp });
 					WritePairExp(name, outputTemp.ToString());
 				}
 				else

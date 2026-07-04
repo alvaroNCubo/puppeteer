@@ -1390,7 +1390,7 @@ namespace Puppeteer.EventSourcing.Follower
 				long[] chainSnapshot = reactionAction.EventIdsToSkip.ToArray();
 				leafNode.Engine.Reaction.RecordCompleteMatch(leafNode.EntryId, leafNode.OccurredAt, chainSnapshot, allParameters);
 
-				leafNode.Engine.ExecuteAction(allParameters, leafNode.EntryId);
+				leafNode.Engine.ExecuteAction(allParameters, leafNode.EntryId, leafNode.OccurredAt);
 
 				// PHASE 5A-2: only save the Confirmed checkpoint if ExecuteAction() succeeded.
 				// On failure, leave a gap (detected > confirmed) so the retry kicks in.

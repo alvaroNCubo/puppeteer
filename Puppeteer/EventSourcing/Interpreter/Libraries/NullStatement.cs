@@ -8,11 +8,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 	class NullStatement : Statement
 	{
-		private readonly string lineaComentada;
+		private readonly string commentedLine;
 
-		internal NullStatement(string lineaComentada)
+		internal NullStatement(string commentedLine)
 		{
-			this.lineaComentada = lineaComentada;
+			this.commentedLine = commentedLine;
 		}
 
 		internal NullStatement()
@@ -36,17 +36,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 		}
 
-		internal override void Write(StringBuilder resultado, int tabs, DatabaseType databaseType)
+		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (FueFiltrado) return;
-			if (lineaComentada == ReadOnlySpan<char>.Empty)
+			if (WasFiltered) return;
+			if (commentedLine == ReadOnlySpan<char>.Empty)
 			{
-				resultado.Append('\r');
+				result.Append('\r');
 			}
 			else
 			{
-				resultado.Append(lineaComentada);
-				resultado.Append('\r');
+				result.Append(commentedLine);
+				result.Append('\r');
 			}
 		}
 

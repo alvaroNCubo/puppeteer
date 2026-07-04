@@ -313,21 +313,80 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// member access. If the runtime object is not actually of that subclass
 			// Expression.Convert will throw InvalidCastException at runtime — same
 			// behaviour the interpreted mode gives when looking up via instance.GetType().
+			bool memberOnOpenGenericSubclass = false;
 			if (CanHaveConcreteSubclasses(instanceExpr.Type))
 			{
+				// Scan every assignable concrete subclass and record those that declare the member.
+				// Resolution is unambiguous only when a single closed subclass declares it: then the
+				// runtime object can only be that subclass and the static Expression.Convert is safe.
+				// When two or more sibling subclasses declare the member (e.g. a property present on
+				// two siblings of an abstract base), the compile-time choice of which to convert to is
+				// a guess; converting to the wrong sibling throws InvalidCastException at runtime. In
+				// that case resolve late-bound against instance.GetType(), mirroring the interpreted
+				// path which always reads off the real runtime type.
+				int closedDeclaringCount = 0;
+				Type singleClosedType = null;
+				FieldInfo singleClosedField = null;
+				PropertyInfo singleClosedProperty = null;
 				foreach (Type derived in EnumerateAssignableConcreteSubclasses(instanceExpr.Type))
 				{
+					// An open generic definition (e.g. Derived<>) cannot be a target of
+					// Expression.Convert: the CLR rejects it with "is a generic type definition".
+					// The member is reachable only through its closed construction at runtime, which
+					// is not present in Assembly.GetTypes(); record it for the late-bound fallback.
+					if (derived.IsGenericTypeDefinition)
+					{
+						if (!memberOnOpenGenericSubclass && (FindField(derived) != null || FindProperty(derived) != null))
+						{
+							memberOnOpenGenericSubclass = true;
+						}
+						continue;
+					}
 					FieldInfo derivedField = FindField(derived);
 					if (derivedField != null)
 					{
-						return Expression.Field(Expression.Convert(instanceExpr, derived), derivedField);
+						closedDeclaringCount++;
+						singleClosedType = derived;
+						singleClosedField = derivedField;
+						singleClosedProperty = null;
+						continue;
 					}
 					PropertyInfo derivedProperty = FindProperty(derived);
 					if (derivedProperty != null)
 					{
-						return Expression.Property(Expression.Convert(instanceExpr, derived), derivedProperty);
+						closedDeclaringCount++;
+						singleClosedType = derived;
+						singleClosedProperty = derivedProperty;
+						singleClosedField = null;
 					}
 				}
+
+				// Ambiguous: two or more closed siblings declare it, or a single closed subclass plus
+				// an open generic subclass. Convert-to-a-guess is unsafe; resolve late-bound.
+				int totalDeclaring = closedDeclaringCount + (memberOnOpenGenericSubclass ? 1 : 0);
+				if (totalDeclaring >= 2)
+				{
+					return ReadMemberLateBoundExpression(instanceExpr);
+				}
+
+				// Exactly one closed subclass declares it: the static cast is safe.
+				if (closedDeclaringCount == 1)
+				{
+					if (singleClosedField != null)
+					{
+						return Expression.Field(Expression.Convert(instanceExpr, singleClosedType), singleClosedField);
+					}
+					return Expression.Property(Expression.Convert(instanceExpr, singleClosedType), singleClosedProperty);
+				}
+			}
+
+			// The field/property lives only on a closed generic subclass (the open definition was
+			// skipped above and the closed construction is unknown at compile time). Read it
+			// late-bound against instance.GetType() at runtime, mirroring the interpreted path,
+			// instead of emitting an Expression.Convert to an open generic that would throw.
+			if (memberOnOpenGenericSubclass)
+			{
+				return ReadMemberLateBoundExpression(instanceExpr);
 			}
 
 			// If it's not a property but is "Count" and instance is IEnumerable<T>, use the extension method
@@ -773,7 +832,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			bool fieldFound = fieldToRead != null;
 			if (!fieldFound)
 			{
-				ParserValidation.validacionDeMetodo(instance.GetType(), methodName, GetArgumentSignature());
+				ParserValidation.methodValidation(instance.GetType(), methodName, GetArgumentSignature());
 			}
 			object result = fieldToRead.GetValue(instance);
 			return result;
@@ -794,7 +853,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			bool methodFound = targetMethod != null;
 			if (!methodFound)
 			{
-				ParserValidation.validacionDeMetodo(instance.GetType(), methodName, GetArgumentSignature());
+				ParserValidation.methodValidation(instance.GetType(), methodName, GetArgumentSignature());
 			}
 			var parameterValues = BindValuesForMethod(targetMethod, instance, isExtensionMethod);
 
@@ -851,23 +910,72 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// call. If the runtime object is not actually of that concrete
 			// subclass, the cast throws InvalidCastException (parallel to the
 			// interpreted-mode behaviour, which would use instance.GetType()).
+			bool methodOnOpenGenericSubclass = false;
 			if (targetMethod == null && CanHaveConcreteSubclasses(instanceExpr.Type))
 			{
+				// Scan every assignable concrete subclass and record those that declare a matching
+				// method. A single closed subclass is unambiguous: the runtime object can only be
+				// that subclass, so the static Expression.Convert is safe. Two or more sibling
+				// subclasses declaring it makes the compile-time cast a guess; converting to the
+				// wrong sibling throws InvalidCastException at runtime, so dispatch late-bound against
+				// instance.GetType() instead, mirroring the interpreted path.
+				int closedDeclaringCount = 0;
+				Type singleClosedType = null;
+				MethodInfo singleClosedMethod = null;
+				bool singleClosedIsExtension = false;
 				foreach (Type derived in EnumerateAssignableConcreteSubclasses(instanceExpr.Type))
 				{
-					MethodInfo hit = FindMethod(derived, signatures, out isExtensionMethod);
+					// An open generic definition (e.g. Derived<>) cannot be a target of
+					// Expression.Convert: the CLR rejects it with "is a generic type definition".
+					// The method is reachable only through its closed construction at runtime, which
+					// is not present in Assembly.GetTypes(); record it for the late-bound fallback.
+					if (derived.IsGenericTypeDefinition)
+					{
+						if (!methodOnOpenGenericSubclass && FindMethod(derived, signatures, out _) != null)
+						{
+							methodOnOpenGenericSubclass = true;
+						}
+						continue;
+					}
+					MethodInfo hit = FindMethod(derived, signatures, out bool hitIsExtension);
 					if (hit != null)
 					{
-						targetMethod = hit;
-						instanceExpr = Expression.Convert(instanceExpr, derived);
-						break;
+						closedDeclaringCount++;
+						singleClosedType = derived;
+						singleClosedMethod = hit;
+						singleClosedIsExtension = hitIsExtension;
 					}
 				}
+
+				// Ambiguous: two or more closed siblings declare it, or a single closed subclass plus
+				// an open generic subclass. The static cast to a guessed sibling is unsafe.
+				int totalDeclaring = closedDeclaringCount + (methodOnOpenGenericSubclass ? 1 : 0);
+				if (totalDeclaring >= 2)
+				{
+					return InvokeMethodLateBoundExpression(instanceExpr, parametersParam);
+				}
+
+				// Exactly one closed subclass declares it: the static cast is safe.
+				if (closedDeclaringCount == 1)
+				{
+					targetMethod = singleClosedMethod;
+					isExtensionMethod = singleClosedIsExtension;
+					instanceExpr = Expression.Convert(instanceExpr, singleClosedType);
+				}
+			}
+
+			// The method lives only on a closed generic subclass (the open definition was skipped
+			// above and the closed construction is unknown at compile time). Dispatch late-bound
+			// against instance.GetType() at runtime, mirroring the interpreted path (InvokeMethod),
+			// instead of emitting an Expression.Convert to an open generic that would throw.
+			if (targetMethod == null && methodOnOpenGenericSubclass)
+			{
+				return InvokeMethodLateBoundExpression(instanceExpr, parametersParam);
 			}
 
 			if (targetMethod == null)
 			{
-				ParserValidation.validacionDeMetodo(instanceExpr.Type, methodName, signatures);
+				ParserValidation.methodValidation(instanceExpr.Type, methodName, signatures);
 			}
 			var argumentExprs = new List<Expression>();
 			var methodParameters = targetMethod.GetParameters();
@@ -918,6 +1026,215 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Call(null, targetMethod, finalArguments);
 			}
 			return Expression.Call(instanceExpr, targetMethod, finalArguments);
+		}
+
+		// Compiled-mode late-bound method dispatch. Reached only when the method resolves
+		// exclusively on a closed generic subclass of the receiver's static type: the open
+		// definition cannot be an Expression.Convert target and the closed construction is not in
+		// Assembly.GetTypes(). The emitted node evaluates the argument values (a bare enum symbol
+		// has no compiled expression, so it is left null and resolved from the AST inside the
+		// helper) and the boxed receiver, then resolves and invokes the method against
+		// instance.GetType() at runtime, the same way interpreted mode does in InvokeMethod.
+		private Expression InvokeMethodLateBoundExpression(Expression instanceExpr, ParameterExpression parametersParam)
+		{
+			Expression boxedInstance = Expression.Convert(instanceExpr, typeof(object));
+
+			Expression[] argValueExprs = new Expression[arguments.Length];
+			for (int i = 0; i < arguments.Length; i++)
+			{
+				if (ClassifyEnumArg(arguments[i]) == EnumArgKind.Symbol)
+				{
+					argValueExprs[i] = Expression.Constant(null, typeof(object));
+				}
+				else
+				{
+					argValueExprs[i] = Expression.Convert(arguments[i].ExecuteExpression(parametersParam), typeof(object));
+				}
+			}
+			Expression argsArray = Expression.NewArrayInit(typeof(object), argValueExprs);
+
+			MethodInfo helper = typeof(DotAccess).GetMethod(nameof(InvokeResolvedMethodLateBound), BindingFlags.Instance | BindingFlags.NonPublic);
+			Expression call = Expression.Call(Expression.Constant(this), helper, boxedInstance, argsArray);
+			return ConvertLateBoundResultToResolvedType(call, instanceExpr.Type);
+		}
+
+		// Runtime tail of InvokeMethodLateBoundExpression: resolves the overload against the
+		// concrete runtime type of the receiver and invokes it with the pre-evaluated arguments.
+		private object InvokeResolvedMethodLateBound(object instance, object[] evaluatedArgs)
+		{
+			if (instance == null)
+			{
+				throw new LanguageException($"Cannot invoke '{methodName}' because the receiver is null at runtime.");
+			}
+
+			bool isExtensionMethod;
+			MethodInfo targetMethod = FindMethodCached(instance.GetType(), GetArgumentSignature(), out isExtensionMethod);
+			if (targetMethod == null)
+			{
+				ParserValidation.methodValidation(instance.GetType(), methodName, GetArgumentSignature());
+			}
+
+			object[] parameterValues = BindEvaluatedValuesForMethod(targetMethod, instance, evaluatedArgs, isExtensionMethod);
+
+			if (isExtensionMethod)
+			{
+				Type elementType = instance.GetType().GetGenericArguments()[0];
+				targetMethod = targetMethod.MakeGenericMethod(elementType);
+				instance = null;
+			}
+			return targetMethod.Invoke(instance, parameterValues);
+		}
+
+		// Value-binding twin of BindValuesForMethod that consumes pre-evaluated argument values
+		// (computed by the compiled lambda) instead of calling this.arguments[i].Execute(). Enum
+		// slots are still resolved from the AST node so a bare symbol keeps working.
+		private object[] BindEvaluatedValuesForMethod(MethodInfo method, object instance, object[] evaluatedArgs, bool isExtensionMethod)
+		{
+			ParameterInfo[] methodParameters = method.GetParameters();
+
+			if (!isExtensionMethod && UsesParamsExpansion(methodParameters, out Type paramsElementType, out int paramsFixedCount))
+			{
+				return BindEvaluatedParamsExpansion(methodParameters, evaluatedArgs, paramsElementType, paramsFixedCount);
+			}
+
+			object[] values;
+			int startIndex;
+			if (isExtensionMethod)
+			{
+				values = new object[this.arguments.Length + 1];
+				values[0] = instance;
+				startIndex = 1;
+			}
+			else
+			{
+				values = new object[this.arguments.Length];
+				startIndex = 0;
+			}
+
+			for (int i = 0; i < this.arguments.Length; i++)
+			{
+				ParameterInfo parameterInfo = methodParameters[i];
+				if (parameterInfo.ParameterType.IsEnum && ClassifyEnumArg(this.arguments[i]) != EnumArgKind.NotEnumBindable)
+				{
+					values[startIndex++] = ParseEnumArgValue(parameterInfo.ParameterType, this.arguments[i]);
+				}
+				else
+				{
+					values[startIndex++] = evaluatedArgs[i];
+				}
+			}
+
+			return BindValuesToParameters(methodParameters, values);
+		}
+
+		// params-expansion twin of BindParamsExpansionInterpreted over pre-evaluated values.
+		private object[] BindEvaluatedParamsExpansion(ParameterInfo[] parameters, object[] evaluatedArgs, Type elementType, int fixedCount)
+		{
+			object[] result = new object[parameters.Length];
+
+			object[] fixedEvaluated = new object[fixedCount];
+			ParameterInfo[] fixedParameters = new ParameterInfo[fixedCount];
+			for (int i = 0; i < fixedCount; i++)
+			{
+				ParameterInfo parameterInfo = parameters[i];
+				fixedParameters[i] = parameterInfo;
+				if (parameterInfo.ParameterType.IsEnum && ClassifyEnumArg(this.arguments[i]) != EnumArgKind.NotEnumBindable)
+				{
+					fixedEvaluated[i] = ParseEnumArgValue(parameterInfo.ParameterType, this.arguments[i]);
+				}
+				else
+				{
+					fixedEvaluated[i] = evaluatedArgs[i];
+				}
+			}
+
+			object[] boundFixed = BindValuesToParameters(fixedParameters, fixedEvaluated);
+			for (int i = 0; i < fixedCount; i++)
+			{
+				result[i] = boundFixed[i];
+			}
+
+			int trailing = this.arguments.Length - fixedCount;
+			Array array = Array.CreateInstance(elementType, trailing);
+			for (int j = 0; j < trailing; j++)
+			{
+				AstExpression argNode = this.arguments[fixedCount + j];
+				object element;
+				if (elementType.IsEnum && ClassifyEnumArg(argNode) != EnumArgKind.NotEnumBindable)
+				{
+					element = ParseEnumArgValue(elementType, argNode);
+				}
+				else
+				{
+					element = CoerceScalarValue(evaluatedArgs[fixedCount + j], elementType);
+				}
+				array.SetValue(element, j);
+			}
+			result[fixedCount] = array;
+
+			return result;
+		}
+
+		// Compiled-mode late-bound field/property read, twin of InvokeMethodLateBoundExpression for
+		// the member-access (non-method) path: the field or property lives only on a closed generic
+		// subclass, so resolve it against instance.GetType() at runtime.
+		private Expression ReadMemberLateBoundExpression(Expression instanceExpr)
+		{
+			Expression boxedInstance = Expression.Convert(instanceExpr, typeof(object));
+			MethodInfo helper = typeof(DotAccess).GetMethod(nameof(ReadResolvedMemberLateBound), BindingFlags.Instance | BindingFlags.NonPublic);
+			Expression call = Expression.Call(Expression.Constant(this), helper, boxedInstance);
+			return ConvertLateBoundResultToResolvedType(call, instanceExpr.Type);
+		}
+
+		// The late-bound helpers (ReadResolvedMemberLateBound / InvokeResolvedMethodLateBound)
+		// return object, but ComputeType()/ComputeCallExpressionType already know the member's or
+		// method's statically resolved type. Align the expression's type with the resolved type so
+		// typed consumers (an if/while condition, logical/arithmetic operators, typed assignments,
+		// argument binding) see the real type instead of object. Expression.Convert unboxes value
+		// types (e.g. bool, so Expression.Condition accepts it) and casts reference types. A void
+		// method return or an unresolvable type leaves the object-typed call untouched.
+		private Expression ConvertLateBoundResultToResolvedType(Expression call, Type receiverType)
+		{
+			Type resolvedType;
+			try
+			{
+				resolvedType = ComputeCallExpressionType(receiverType);
+			}
+			catch (LanguageException)
+			{
+				return call;
+			}
+
+			if (resolvedType == null || resolvedType == typeof(void) || resolvedType == typeof(object))
+			{
+				return call;
+			}
+
+			return Expression.Convert(call, resolvedType);
+		}
+
+		private object ReadResolvedMemberLateBound(object instance)
+		{
+			if (instance == null)
+			{
+				throw new LanguageException($"Cannot read '{propertyName ?? methodName}' because the receiver is null at runtime.");
+			}
+
+			Type runtimeType = instance.GetType();
+
+			FieldInfo fieldInfo = FindField(runtimeType);
+			if (fieldInfo != null)
+			{
+				return fieldInfo.GetValue(instance);
+			}
+
+			PropertyInfo propertyInfo = FindProperty(runtimeType);
+			if (propertyInfo != null)
+			{
+				return propertyInfo.GetValue(instance);
+			}
+
+			throw new LanguageException($"Unknown property or method '{propertyName ?? methodName}' on type '{runtimeType.Name}'.");
 		}
 
 		// Compiled call to a static method 'Clase.Metodo(args)'. Same binding/coercion as the
@@ -1027,7 +1344,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			bool methodFound = propertyToInvoke != null;
 			if (!methodFound)
 			{
-				ParserValidation.validacionDeMetodo(instance.GetType(), methodName, GetArgumentSignature());
+				ParserValidation.methodValidation(instance.GetType(), methodName, GetArgumentSignature());
 			}
 			object result = propertyToInvoke.GetValue(instance, BindValuesForPropertyGet(propertyToInvoke));
 			return result;

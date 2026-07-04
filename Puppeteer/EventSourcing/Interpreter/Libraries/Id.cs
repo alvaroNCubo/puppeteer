@@ -689,9 +689,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			resultado.Append(name);
+			result.Append(name);
 		}
 
 		internal override void Visit(ASTVisitor v)

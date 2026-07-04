@@ -48,16 +48,6 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// non-tell siblings as collateral damage.
 		private readonly HashSet<long> singleTellEntryIds = new HashSet<long>();
 
-		// Plan 8 of the Tell primitive roadmap: per-saga-instance cursor that
-		// tracks the saga state machine (NotStarted -> Open -> Closed) and the
-		// list of journal entry ids that form the saga's trajectory. The cursor
-		// is keyed by the canonical "sagaActor|sagaIdValue" string. On `close`
-		// the framework emits MarkEventsAsElided over the whole TrajectoryEntryIds
-		// list — claim 12 of Paper 3 generalised to cross-actor processes.
-		// Survives across actor restarts via journal replay reconstructing the
-		// cursor through TellSagaStatement.Execute(RecoveringState=true).
-		private readonly Dictionary<string, SagaCursor> sagaCursors = new Dictionary<string, SagaCursor>(StringComparer.Ordinal);
-
 		// Set of envelope ids that have already received an ack from the receiver.
 		// Plan 6 of the Tell primitive roadmap uses it to reject duplicate acks
 		// (the same envelope.Id arriving a second time is a transport bug or a
@@ -70,11 +60,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// Plan 10 of the Tell primitive roadmap: terminal NON-delivery verdicts —
 		// the failure-side mirror of ackedTellEnvelopeIds. An envelope id lands
 		// here when the transport testifies a Failed fate (by declaration or by
-		// citation) or when a `tell ... not delivered` sentence replays from the
-		// journal. Acked and not-delivered are both TERMINAL fates: a tell in
+		// citation) or when a `tell ... unacknowledged by` sentence replays from the
+		// journal. Acked and unacknowledged are both TERMINAL fates: a tell in
 		// neither set is still PENDING, and the pending set is exactly what the
 		// post-rehydration recovery pass cites the transport about. During replay
-		// TellNotDeliveredStatement.Execute repopulates this set.
+		// TellUnacknowledgedStatement.Execute repopulates this set.
 		private readonly HashSet<string> notDeliveredTellEnvelopeIds = new HashSet<string>(StringComparer.Ordinal);
 
 		// Plan 10 of the Tell primitive roadmap: minimal facts about each issued
@@ -151,22 +141,22 @@ namespace Puppeteer.EventSourcing.Interpreter
 		internal void SetVariable(string instanceName, object dato, Type type)
 		{
 			VariableSymbol storedSymbol = null;
-			bool existeVariable = variablesByName.TryGetValue(instanceName, out storedSymbol);
+			bool variableExists = variablesByName.TryGetValue(instanceName, out storedSymbol);
 
-			if (StrictQueryValidation && _readOnlyMode && existeVariable)
+			if (StrictQueryValidation && _readOnlyMode && variableExists)
 			{
 				throw new LanguageException($"[STRICT-MODE] Query attempted to modify the global variable '{instanceName}'. Queries must be read-only.");
 			}
 
-			if (existeVariable)
+			if (variableExists)
 			{
 				if (dato != null)
 				{
 					Type previousType = storedSymbol.value?.GetType();
 					Type newType = dato.GetType();
-					bool sonDelMismoTipo = previousType == null || newType == previousType ||
+					bool areSameType = previousType == null || newType == previousType ||
 											newType.IsSubclassOf(previousType.BaseType);
-					if (!sonDelMismoTipo)
+					if (!areSameType)
 					{
 						throw new LanguageException($"Instance '{instanceName}' can only be assigned values of type '{storedSymbol.value.GetType().Name}', but a value of type '{dato.GetType().Name}' is being assigned.");
 					}
@@ -441,28 +431,6 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return pending;
 		}
 
-		// Plan 8 helpers — saga cursor lifecycle.
-
-		internal SagaCursor GetOrCreateSagaCursor(string sagaActor, string sagaIdValue)
-		{
-			ArgumentException.ThrowIfNullOrWhiteSpace(sagaActor);
-			ArgumentException.ThrowIfNullOrWhiteSpace(sagaIdValue);
-			string key = sagaActor + "|" + sagaIdValue;
-			if (!sagaCursors.TryGetValue(key, out SagaCursor cursor))
-			{
-				cursor = new SagaCursor(sagaActor, sagaIdValue);
-				sagaCursors[key] = cursor;
-			}
-			return cursor;
-		}
-
-		internal SagaCursor TryGetSagaCursor(string sagaActor, string sagaIdValue)
-		{
-			if (string.IsNullOrEmpty(sagaActor) || string.IsNullOrEmpty(sagaIdValue)) return null;
-			sagaCursors.TryGetValue(sagaActor + "|" + sagaIdValue, out SagaCursor cursor);
-			return cursor;
-		}
-
 		internal void EnqueuePendingTell(TellEnvelope envelope)
 		{
 			pendingTells.Enqueue(envelope);
@@ -490,105 +458,6 @@ namespace Puppeteer.EventSourcing.Interpreter
 			this.name = name;
 			this.value = value;
 			this.type = type;
-		}
-	}
-
-	// Plan 8 of the Tell primitive roadmap: state machine + trajectory tracking
-	// for a single saga instance. Cursor lifecycle:
-	//
-	//   NotStarted --start--> Open --step/compensate--> Open --close--> Closed
-	//
-	// Live execution enforces the transitions strictly (illegal transitions
-	// raise LanguageException). Replay rebuilds the cursor from journal entries
-	// and is tolerant — already-violated invariants on the storage are journal
-	// facts, not new errors to raise.
-	//
-	// TrajectoryEntryIds accumulates the journal entry id of every saga
-	// statement (start, step, compensate, close) executed against this cursor.
-	// On `close` the framework emits MarkEventsAsElided over the whole list —
-	// the saga's trajectory becomes a skipable group at rehydration.
-	internal enum SagaState
-	{
-		NotStarted,
-		Open,
-		Closed
-	}
-
-	internal class SagaCursor
-	{
-		internal string SagaActor { get; }
-		internal string SagaIdValue { get; }
-		internal SagaState State { get; private set; }
-		internal List<long> TrajectoryEntryIds { get; }
-
-		internal SagaCursor(string sagaActor, string sagaIdValue)
-		{
-			SagaActor = sagaActor;
-			SagaIdValue = sagaIdValue;
-			State = SagaState.NotStarted;
-			TrajectoryEntryIds = new List<long>();
-		}
-
-		// Live transitions raise on illegal moves so a buggy script fails fast.
-		// Replay calls the lenient *AtReplay variants below.
-
-		internal void TransitionStart(long entryId)
-		{
-			if (State != SagaState.NotStarted)
-			{
-				throw new LanguageException($"Saga '{SagaActor}({SagaIdValue})' cannot be started: it is already in state '{State}'. Each sagaId can only be started once.");
-			}
-			State = SagaState.Open;
-			RecordEntry(entryId);
-		}
-
-		internal void TransitionStep(long entryId)
-		{
-			if (State != SagaState.Open)
-			{
-				throw new LanguageException($"Saga '{SagaActor}({SagaIdValue})' cannot accept a step: it is in state '{State}', not Open.");
-			}
-			RecordEntry(entryId);
-		}
-
-		internal void TransitionCompensate(long entryId)
-		{
-			if (State != SagaState.Open)
-			{
-				throw new LanguageException($"Saga '{SagaActor}({SagaIdValue})' cannot be compensated: it is in state '{State}', not Open.");
-			}
-			RecordEntry(entryId);
-		}
-
-		internal void TransitionClose(long entryId)
-		{
-			if (State != SagaState.Open)
-			{
-				throw new LanguageException($"Saga '{SagaActor}({SagaIdValue})' cannot be closed: it is in state '{State}', not Open.");
-			}
-			RecordEntry(entryId);
-			State = SagaState.Closed;
-		}
-
-		// Replay variants: rebuild state from the journal without raising on
-		// previously-applied transitions (they are facts of the storage by now).
-		internal void ReplayStart(long entryId)
-		{
-			State = SagaState.Open;
-			RecordEntry(entryId);
-		}
-
-		internal void ReplayStep(long entryId) { RecordEntry(entryId); }
-		internal void ReplayCompensate(long entryId) { RecordEntry(entryId); }
-		internal void ReplayClose(long entryId)
-		{
-			RecordEntry(entryId);
-			State = SagaState.Closed;
-		}
-
-		private void RecordEntry(long entryId)
-		{
-			if (entryId > 0) TrajectoryEntryIds.Add(entryId);
 		}
 	}
 

@@ -91,7 +91,7 @@ namespace Puppeteer.EventSourcing.Follower
 				if (System.Text.RegularExpressions.Regex.IsMatch(expression, $@"{System.Text.RegularExpressions.Regex.Escape(symbol)}\s*(==|!=)\s*null", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
 				    || System.Text.RegularExpressions.Regex.IsMatch(expression, $@"null\s*(==|!=)\s*{System.Text.RegularExpressions.Regex.Escape(symbol)}", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
 				{
-					throw new LanguageException($"Comparar {symbol} contra null es siempre falso (su type no tiene sentinela); use otra condicion.");
+					throw new LanguageException($"Comparing {symbol} against null is always false (its type has no sentinel); use another condition.");
 				}
 			}
 		}
@@ -309,9 +309,9 @@ namespace Puppeteer.EventSourcing.Follower
 		public MetadataPlane Metadata => this.reaction.Metadata;
 		public OutboxPlane Outbox => this.reaction.Outbox;
 
-		internal void ExecuteAction(Parameters matchedParameters, long triggeringEntryId)
+		internal void ExecuteAction(Parameters matchedParameters, long triggeringEntryId, DateTime occurredAt)
 		{
-			this.reaction.ExecuteAction(matchedParameters, triggeringEntryId);
+			this.reaction.ExecuteAction(matchedParameters, triggeringEntryId, occurredAt);
 		}
 
 		public long SeekEntered => Interlocked.Read(ref seekEntered);

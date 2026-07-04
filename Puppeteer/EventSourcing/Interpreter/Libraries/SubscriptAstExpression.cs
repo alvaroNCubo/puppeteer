@@ -11,25 +11,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 {
 	class SubscriptAstExpression : AstExpression
 	{
-		private readonly AstExpression coleccion;
+		private readonly AstExpression collection;
 		private readonly AstExpression[] indices;
 
-		internal SubscriptAstExpression(AstExpression coleccion, AstExpression[] indices)
+		internal SubscriptAstExpression(AstExpression collection, AstExpression[] indices)
 		{
-			ArgumentNullException.ThrowIfNull(coleccion);
+			ArgumentNullException.ThrowIfNull(collection);
 			ArgumentNullException.ThrowIfNull(indices);
 			if (indices.Length == 0)
 				throw new LanguageException("The subscript operator '[]' requires at least one index.");
 			foreach (AstExpression index in indices)
 				ArgumentNullException.ThrowIfNull(index);
 
-			this.coleccion = coleccion;
+			this.collection = collection;
 			this.indices = indices;
 		}
 
 		internal override Type ComputeType()
 		{
-			Type collectionType = coleccion.ComputeType();
+			Type collectionType = collection.ComputeType();
 			if (collectionType == null)
 				throw new LanguageException("Cannot determine the collection type for the subscript operator '[]'.");
 
@@ -58,11 +58,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private void ValidateCore(bool asLValue)
 		{
-			coleccion.ValidateStatically();
+			collection.ValidateStatically();
 			foreach (AstExpression index in indices)
 				index.ValidateStatically();
 
-			Type collectionType = coleccion.ComputeType();
+			Type collectionType = collection.ComputeType();
 			if (collectionType == null)
 				throw new LanguageException("Cannot determine the collection type for the subscript operator '[]'.");
 
@@ -93,7 +93,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override object Execute()
 		{
-			object col = coleccion.Execute();
+			object col = collection.Execute();
 
 			if (col == null)
 				throw new LanguageException("The collection is null when trying to access it by index.");
@@ -121,7 +121,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam)
 		{
-			Expression colExpr = coleccion.ExecuteExpression(parametersParam);
+			Expression colExpr = collection.ExecuteExpression(parametersParam);
 			Type collectionType = colExpr.Type;
 
 			if (collectionType.IsArray)
@@ -160,7 +160,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		// Left-hand side (L-value) interpreted: collection[key] = value.
 		internal void ExecuteAssignment(object value)
 		{
-			object col = coleccion.Execute();
+			object col = collection.Execute();
 
 			if (col == null)
 				throw new LanguageException("The collection is null when trying to assign it by index.");
@@ -198,7 +198,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			ArgumentNullException.ThrowIfNull(valueExpr);
 
-			Expression colExpr = coleccion.ExecuteExpression(parametersParam);
+			Expression colExpr = collection.ExecuteExpression(parametersParam);
 			Type collectionType = colExpr.Type;
 
 			if (collectionType.IsArray)
@@ -373,16 +373,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return indexExpr.Type == typeof(int) ? indexExpr : Expression.Convert(indexExpr, typeof(int));
 		}
 
-		internal override void write(StringBuilder resultado, DatabaseType databaseType)
+		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
-			coleccion.write(resultado, databaseType);
-			resultado.Append('[');
+			collection.write(result, databaseType);
+			result.Append('[');
 			for (int i = 0; i < indices.Length; i++)
 			{
-				if (i > 0) resultado.Append(',');
-				indices[i].write(resultado, databaseType);
+				if (i > 0) result.Append(',');
+				indices[i].write(result, databaseType);
 			}
-			resultado.Append(']');
+			result.Append(']');
 		}
 
 		internal override void Visit(ASTVisitor v)
@@ -391,14 +391,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				v.OnVisit(this);
 			}
-			coleccion.Visit(v);
+			collection.Visit(v);
 			foreach (AstExpression index in indices)
 				index.Visit(v);
 		}
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
-			coleccion.PreparePatternMatching(patternAst, ref position);
+			collection.PreparePatternMatching(patternAst, ref position);
 			foreach (AstExpression index in indices)
 				index.PreparePatternMatching(patternAst, ref position);
 		}

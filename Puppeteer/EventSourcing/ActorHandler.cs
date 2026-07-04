@@ -121,6 +121,37 @@ namespace Puppeteer.EventSourcing
 			}
 		}
 
+		// Ephemeral push channel (Paper 9 / OutputTarget). When set, the
+		// projection a `Program.Emit` Reaction produces — the document
+		// PerformEmit would otherwise discard — is delivered to this sink at the
+		// close of the emit. Null = pull-only (today's behavior, untouched). The
+		// sink receives the single immutable ToString, NEVER the pooled Output
+		// buffer (rule that avoids the ExecutionOutput double-return corruption).
+		// This is the ephemeral channel; the durable counterpart is the Outbox
+		// Reaction plane. Assembly-agnostic: configured via StageHook.SetOutputTarget,
+		// exposed identically on every Choreography assembly (Performance / Ensemble
+		// / StageV2). It is handler-scoped (not AsyncLocal) because Reactions run
+		// out-of-band on their own threads, where an AsyncLocal set by a request
+		// flow would not reach.
+		private IOutputSink outputTarget;
+		// Formatter for the push channel (TOON by default — compact, line-
+		// autonomous on the wire). Installed for the emit only, since the
+		// AsyncLocal FormatterContext does not flow to the Reaction's thread.
+		// Null defers to the FormatterContext default (JSON).
+		private IOutputFormatter outputTargetFormatter;
+
+		internal IOutputSink OutputTarget
+		{
+			get => outputTarget;
+			set => outputTarget = value;
+		}
+
+		internal IOutputFormatter OutputTargetFormatter
+		{
+			get => outputTargetFormatter;
+			set => outputTargetFormatter = value;
+		}
+
 		// Tell-only-in-Reaction-Action enforcement. Cross-actor `tell` is a
 		// consequence of an intra-actor event observed by a Reaction, not a
 		// command/query primitive. The flag is raised while a Reaction's
@@ -482,13 +513,13 @@ namespace Puppeteer.EventSourcing
 		{
 			if (string.IsNullOrEmpty(envelope.Id))
 			{
-				Debug.WriteLine($"[Tell.Ack] rejected ack with empty envelope.Id from {envelope.TargetClass}({envelope.TargetId}) — transport contract requires the originating tell id to round-trip.");
+				Debug.WriteLine($"[Tell.Ack] rejected ack with empty envelope.Id from {envelope.Addressee}({envelope.AddresseeInstanceId}) — transport contract requires the originating tell id to round-trip.");
 				return;
 			}
 
 			if (!symbolTable.IsTellEnvelopeIdKnown(envelope.Id))
 			{
-				Debug.WriteLine($"[Tell.Ack] orphan ack '{envelope.Id}' from {envelope.TargetClass}({envelope.TargetId}) — no matching tell was ever sent from this actor. Likely transport bug or split-brain restart.");
+				Debug.WriteLine($"[Tell.Ack] orphan ack '{envelope.Id}' from {envelope.Addressee}({envelope.AddresseeInstanceId}) — no matching tell was ever sent from this actor. Likely transport bug or split-brain restart.");
 				return;
 			}
 
@@ -497,7 +528,7 @@ namespace Puppeteer.EventSourcing
 			{
 				if (symbolTable.IsTellEnvelopeIdAcked(envelope.Id))
 				{
-					Debug.WriteLine($"[Tell.Ack] duplicate ack '{envelope.Id}' from {envelope.TargetClass}({envelope.TargetId}) — already acked previously.");
+					Debug.WriteLine($"[Tell.Ack] duplicate ack '{envelope.Id}' from {envelope.Addressee}({envelope.AddresseeInstanceId}) — already acked previously.");
 					return;
 				}
 
@@ -559,25 +590,9 @@ namespace Puppeteer.EventSourcing
 				DateTime.Now);
 		}
 
-		// Plan 8 of the Tell primitive roadmap: emit MarkEventsAsElided over the
-		// full saga trajectory when a `close` statement runs. Generalises Plan 6
-		// (A)'s pair elision to the entire saga (start + steps + compensates +
-		// close) — claim 12 of Paper 3 lifted from intra-actor MarkAsSkip to
-		// cross-actor saga close. Idempotent — re-marking already-elided ids
-		// is a no-op at the storage level.
-		internal void EmitSagaTrajectoryElision(long[] trajectoryEntryIds)
-		{
-			ArgumentNullException.ThrowIfNull(trajectoryEntryIds);
-			if (trajectoryEntryIds.Length == 0) return;
-			EventElisionStorage elisionStorage = dairy?.Storage?.EventElisionStorage;
-			if (elisionStorage == null) return;
-			elisionStorage.MarkEventsAsElided(
-				trajectoryEntryIds,
-				TELL_PAIR_ELISION_REACTION_ID,
-				DateTime.Now);
-		}
-
-		// Render the canonical ack sentence: `tell ack '<id>' from <Target>('<id>');`
+		// Render the canonical ack sentence:
+		//   `tell ack '<id>' from <Addressee>('<instanceId>');`  (instance named), or
+		//   `tell ack '<id>' from <Addressee>;`                  (role only)
 		// — same shape TellAckStatement.Write produces, kept in lockstep so that the
 		// journal and live-emitted entries are indistinguishable.
 		private static string RenderAckSentence(AckEnvelope envelope)
@@ -586,10 +601,14 @@ namespace Puppeteer.EventSourcing
 			sb.Append("tell ack '");
 			sb.Append(envelope.Id);
 			sb.Append("' from ");
-			sb.Append(envelope.TargetClass);
-			sb.Append("('");
-			sb.Append(envelope.TargetId);
-			sb.Append("');");
+			sb.Append(envelope.Addressee);
+			if (!string.IsNullOrEmpty(envelope.AddresseeInstanceId))
+			{
+				sb.Append("('");
+				sb.Append(envelope.AddresseeInstanceId);
+				sb.Append("')");
+			}
+			sb.Append(";");
 			return sb.ToString();
 		}
 
@@ -606,13 +625,13 @@ namespace Puppeteer.EventSourcing
 		{
 			if (string.IsNullOrEmpty(failure.Id))
 			{
-				Debug.WriteLine($"[Tell.Failure] rejected non-delivery with empty envelope.Id (witness '{failure.Witness}') — the originating tell id must round-trip.");
+				Debug.WriteLine($"[Tell.Failure] rejected non-acknowledgement with empty envelope.Id (witness '{failure.Witness}') — the originating tell id must round-trip.");
 				return;
 			}
 
 			if (!symbolTable.IsTellEnvelopeIdKnown(failure.Id))
 			{
-				Debug.WriteLine($"[Tell.Failure] orphan non-delivery '{failure.Id}' (witness '{failure.Witness}') — no matching tell was ever sent from this actor. Likely transport bug or split-brain restart.");
+				Debug.WriteLine($"[Tell.Failure] orphan non-acknowledgement '{failure.Id}' (witness '{failure.Witness}') — no matching tell was ever sent from this actor. Likely transport bug or split-brain restart.");
 				return;
 			}
 
@@ -623,25 +642,29 @@ namespace Puppeteer.EventSourcing
 				// a later failure report is stale and must not overwrite the verdict.
 				if (symbolTable.IsTellEnvelopeIdAcked(failure.Id))
 				{
-					Debug.WriteLine($"[Tell.Failure] stale non-delivery '{failure.Id}' (witness '{failure.Witness}') — already acked; delivered wins.");
+					Debug.WriteLine($"[Tell.Failure] stale non-acknowledgement '{failure.Id}' (witness '{failure.Witness}') — already acked; delivered wins.");
 					return;
 				}
 
 				if (symbolTable.IsTellEnvelopeIdNotDelivered(failure.Id))
 				{
-					Debug.WriteLine($"[Tell.Failure] duplicate non-delivery '{failure.Id}' (witness '{failure.Witness}') — already recorded.");
+					Debug.WriteLine($"[Tell.Failure] duplicate non-acknowledgement '{failure.Id}' (witness '{failure.Witness}') — already recorded.");
 					return;
 				}
 
-				// Witness fallback: a transport may decline to name itself in the
-				// failure report; the journaled sentence still needs a witness.
-				string witness = string.IsNullOrEmpty(failure.Witness) ? (_transport?.WitnessName ?? "transport") : failure.Witness;
+				// The verdict is LOGICAL: it names the addressee A did not hear from,
+				// never the transport. The witness (which broker testified) is
+				// provenance for telemetry only — logged here, never journaled.
+				if (!string.IsNullOrEmpty(failure.Witness))
+				{
+					Debug.WriteLine($"[Tell.Failure] non-acknowledgement '{failure.Id}' for addressee '{failure.Addressee}' testified by '{failure.Witness}'{(string.IsNullOrEmpty(failure.Reason) ? string.Empty : $" ({failure.Reason})")}.");
+				}
 
 				symbolTable.MarkTellEnvelopeIdNotDelivered(failure.Id);
 
 				if (dairy != null)
 				{
-					string sentence = RenderNotDeliveredSentence(failure.Id, witness);
+					string sentence = RenderUnacknowledgedSentence(failure.Id, failure.Addressee);
 					long entryId = TakeAndIncrementEntryId();
 					DateTime now = DateTime.Now;
 					dairy.WriteScriptEntry(entryId, sentence, now, exposeData: null);
@@ -653,18 +676,20 @@ namespace Puppeteer.EventSourcing
 			}
 		}
 
-		// Render the canonical non-delivery sentence:
-		// `tell '<id>' not delivered, per '<witness>';` — same shape
-		// TellNotDeliveredStatement.Write produces, kept in lockstep so that the
-		// journal and live-emitted entries are indistinguishable.
-		private static string RenderNotDeliveredSentence(string envelopeId, string witness)
+		// Render the canonical logical non-acknowledgement sentence:
+		// `tell '<id>' unacknowledged by <Addressee>;` — same shape
+		// TellUnacknowledgedStatement.Write produces, kept in lockstep so the
+		// journal and live-emitted entries are indistinguishable. No transport name
+		// appears: A asserts only what it observed (the absence of an acknowledgement
+		// from the addressee).
+		private static string RenderUnacknowledgedSentence(string envelopeId, string addressee)
 		{
 			StringBuilder sb = new StringBuilder(64);
 			sb.Append("tell '");
 			sb.Append(envelopeId);
-			sb.Append("' not delivered, per '");
-			sb.Append(witness);
-			sb.Append("';");
+			sb.Append("' unacknowledged by ");
+			sb.Append(string.IsNullOrEmpty(addressee) ? "Unknown" : addressee);
+			sb.Append(";");
 			return sb.ToString();
 		}
 
@@ -711,7 +736,7 @@ namespace Puppeteer.EventSourcing
 				{
 					// Testimony unavailable (transport unreachable, etc.) — leave the
 					// tell pending; a future declaration callback can still settle it.
-					Debug.WriteLine($"[Tell.Recovery] could not obtain fate for '{envelopeId}' (witness '{info.Witness}'): {e.GetType().Name}: {e.Message}. Leaving pending.");
+					Debug.WriteLine($"[Tell.Recovery] could not obtain fate for '{envelopeId}' (addressee '{info.Addressee}'): {e.GetType().Name}: {e.Message}. Leaving pending.");
 					continue;
 				}
 
@@ -720,10 +745,10 @@ namespace Puppeteer.EventSourcing
 					case TellFate.Delivered:
 						// Only the ack round-trip was lost. Journal the ack through the
 						// same single-writer path a live ack uses.
-						HandleAckEnvelope(new AckEnvelope(envelopeId, info.TargetClass, info.TargetId));
+						HandleAckEnvelope(new AckEnvelope(envelopeId, info.Addressee, info.AddresseeInstanceId));
 						break;
 					case TellFate.Failed:
-						HandleTellFailure(new TellFailure(envelopeId, info.Witness));
+						HandleTellFailure(new TellFailure(envelopeId, info.Addressee));
 						break;
 					case TellFate.InFlight:
 					default:
@@ -744,7 +769,7 @@ namespace Puppeteer.EventSourcing
 
 		public ActorFollower CreateFollower(int followerId)
 		{
-			ActorFollower result = ActorFollower.CreateFollowerConActor(this.actor, followerId);
+			ActorFollower result = ActorFollower.CreateFollowerWithActor(this.actor, followerId);
 
 			var culture = new CultureInfo("en-US");
 			CultureInfo.DefaultThreadCurrentCulture = culture;
@@ -753,9 +778,9 @@ namespace Puppeteer.EventSourcing
 			return result;
 		}
 
-		public ActorFollower CreateFollowerSinActor(int followerId)
+		public ActorFollower CreateFollowerWithoutActor(int followerId)
 		{
-			ActorFollower result = ActorFollower.CreateFollowerSinActor(this.actor, followerId);
+			ActorFollower result = ActorFollower.CreateFollowerWithoutActor(this.actor, followerId);
 
 			var culture = new CultureInfo("en-US");
 			CultureInfo.DefaultThreadCurrentCulture = culture;
@@ -1019,6 +1044,17 @@ namespace Puppeteer.EventSourcing
 									// types of globals for cross-entry resolution. Without evals (the whole journal) the
 									// full validation is skipped; with evals (rare) that propagation is preserved.
 									rentedProgram.SolveReferences(rentedProgram.Parameters, withStaticValidation: rentedProgram.HasEval);
+								else if (!rentedProgram.IsCompiledMode)
+									// Cached Action that will run INTERPRETED (AlwaysInterpreted actor, or a
+									// tell-bearing body). Its references were resolved once when the Define
+									// populated the cache (AddKnownActionFromDefine); rebind the @parameter Ids
+									// to THIS invocation's freshly-loaded argument values, mirroring the live
+									// interpreted cache-hit path (PrepareCommandProgram: NeedsToSolveParameters).
+									// Without this the interpreted walker (Perform -> Execute) reaches an unbound
+									// parameter Id and throws "Variable '<param>' has not been defined", skipping
+									// the invocation and silently losing its effect. Compiled cached Actions
+									// rebind lazily inside ExecuteExpression, so they are left untouched.
+									rentedProgram.SolveParameters(rentedProgram.Parameters);
 								if (stageTiming) LabInstrumentation.AddResolveTicks(System.Diagnostics.Stopwatch.GetTimestamp() - resolveT0);
 
 								preparedQueue.Add(rentedProgram);
@@ -1049,8 +1085,8 @@ namespace Puppeteer.EventSourcing
 				{
 					try
 					{
-						long avanceParcial = 0;
-						int avanceDelCienPorCiento = 0;
+						long partialProgress = 0;
+						int fullProgressReached = 0;
 						foreach (Program rentedProgram in preparedQueue.GetConsumingEnumerable())
 						{
 							long execEntryId = rentedProgram.EntryId;
@@ -1086,12 +1122,12 @@ namespace Puppeteer.EventSourcing
 								LabInstrumentation.OnReplayEventCounted?.Invoke(execEntryId);
 							}
 
-							avanceParcial++;
-							if (avanceParcial == _avanceEquivalenteUnoPorciento)
+							partialProgress++;
+							if (partialProgress == _onePercentEquivalentAdvance)
 							{
-								avanceDelCienPorCiento++;
-								avanceParcial = 0;
-								Console.Write($"{avanceDelCienPorCiento}%");
+								fullProgressReached++;
+								partialProgress = 0;
+								Console.Write($"{fullProgressReached}%");
 							}
 						}
 					}
@@ -1248,6 +1284,9 @@ namespace Puppeteer.EventSourcing
 						if (String.IsNullOrEmpty(scriptEvent.Script)) throw new LanguageException("Script cannot be null or empty");
 						parser.SetSource(scriptEvent.Script);
 						program = parser.Rehydrate();
+						// Honor the actor's real execution policy (see GenerateAndRentProgram):
+						// an AlwaysCompiled actor must run the replayed script compiled.
+						program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 						program.Parameters = ParametersPool.Rent();
 						program.SolveParameters(program.Parameters);
 						// B.3.1: rehydration also observes the promotion candidate —
@@ -1298,6 +1337,11 @@ namespace Puppeteer.EventSourcing
 
 				if (!actionCommands.ContainsAction(program.Script))
 					program.SolveReferences(program.Parameters, withStaticValidation: true);
+				else if (!program.IsCompiledMode)
+					// Interpreted cached Action: rebind the @parameter Ids to this
+					// invocation's arguments before the interpreted Perform. See the
+					// matching comment in the EventSourcingStorage resolver stage.
+					program.SolveParameters(program.Parameters);
 
 				Perform(program, program.Parameters);
 
@@ -1374,6 +1418,16 @@ namespace Puppeteer.EventSourcing
 					// rehydration.
 					program.SetContextInfo();
 
+					// Honor the actor's real execution policy, exactly as the live script path
+					// does (PrepareCommandProgram: AdjustCompilationMode(useInterpretedMode: true,
+					// this.actor.CompiledModePolicy)). Rehydrate() leaves the program interpreted
+					// (IsCompiledMode = false); without this an AlwaysCompiled actor would run the
+					// replayed script via Perform -> ExecuteExpression while its Ids report
+					// interpreted mode, throwing "Cannot generate Expression-based storage in
+					// interpreted mode". Under Automatic/AlwaysInterpreted the mode stays
+					// interpreted (unchanged behavior); only AlwaysCompiled is corrected.
+					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+
 					program.Parameters = ParametersPool.Rent();
 
 					program.SolveParameters(program.Parameters);
@@ -1392,12 +1446,12 @@ namespace Puppeteer.EventSourcing
 					// via AddKnownActionFromDefine). A defensive early return covers
 					// the otherwise-unreachable orphan path — caller must tolerate
 					// a null Program (subsequent code is short-circuited).
-					if (!actionCommands.TryGetValue(executable.ActionId, out CommandCacheEntry cacheDeComando))
+					if (!actionCommands.TryGetValue(executable.ActionId, out CommandCacheEntry commandCache))
 					{
 						return null;
 					}
 
-					program = cacheDeComando.Program;
+					program = commandCache.Program;
 
 					program.Parameters.LoadArguments(executable.Arguments);
 
@@ -1423,12 +1477,12 @@ namespace Puppeteer.EventSourcing
 
 		long IActorEventJournalClient.GetLastProcessedEntryId(int followerId) => dairy.GetLastProcessedEntryId(followerId);
 
-		private long _avanceEquivalenteUnoPorciento = Int64.MaxValue;
+		private long _onePercentEquivalentAdvance = Int64.MaxValue;
 		void IActorEventJournalClient.BeginJournalReplay(long totalEventsToApply)
 		{
 			if (totalEventsToApply < 0) throw new LanguageException($"Total events to apply '{totalEventsToApply}' cannot be negative.");
 
-			_avanceEquivalenteUnoPorciento = (long)(totalEventsToApply / 100.0 + 1.0);
+			_onePercentEquivalentAdvance = (long)(totalEventsToApply / 100.0 + 1.0);
 		}
 
 		bool IActorEventJournalClient.CanContinueReplay(long currentEntryId)
@@ -1488,13 +1542,13 @@ namespace Puppeteer.EventSourcing
 
 		private readonly ReaderWriterLockSlim rwLock = new ReaderWriterLockSlim();
 		private readonly SemaphoreSlim _block = new SemaphoreSlim(1, 1);
-		private static string scriptEnEjecucion = "";
+		private static string runningScript = "";
 
-		internal string ScriptEnEjecucion
+		internal string RunningScript
 		{
 			get
 			{
-				return scriptEnEjecucion;
+				return runningScript;
 			}
 		}
 
@@ -1585,8 +1639,15 @@ namespace Puppeteer.EventSourcing
 			ParsersPool.Return(parser);
 
 			program.SetContextInfo();
-			program.AdjustCompilationMode(useInterpretedMode: false, CompilationModePolicy.Automatic);
+			// Honor the actor's real execution policy (see AddKnownActionFromDefine): an
+			// AlwaysInterpreted actor must materialize this cached Action interpreted so
+			// its @parameter Ids bind on the interpreted replay path.
+			program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
 			program.Parameters = new Parameters(parameters);
+			// Resolve references once for an interpreted cached Action so idParameters is
+			// populated for the per-invocation SolveParameters at the replay sites.
+			if (!program.IsCompiledMode)
+				program.SolveReferences(program.Parameters, withStaticValidation: false);
 			_ = actionCommands.Add(actionId, actionScript, program);
 		}
 
@@ -1639,7 +1700,16 @@ namespace Puppeteer.EventSourcing
 			ParsersPool.Return(bodyPass);
 
 			bodyProgram.SetContextInfo();
-			bodyProgram.AdjustCompilationMode(useInterpretedMode: false, CompilationModePolicy.Automatic);
+			// Honor the actor's real execution policy. The live cache-miss path builds
+			// the same Action with this.actor.CompiledModePolicy (PrepareCommandProgram),
+			// so an AlwaysInterpreted actor must materialize this replayed Action
+			// interpreted as well. Hardcoding Automatic left the cached Action COMPILED
+			// while Perform ran it via Execute() (the interpreted walker never calls
+			// ExecuteExpression, the only path that lazily resolves a compiled Action), so
+			// its @parameter Ids were never bound and replay threw "Variable '<param>'
+			// has not been defined". This also aligns the tell-bearing corollary: a body
+			// with a tell is interpreted (IsCompiledMode = !ContainsTell) under any policy.
+			bodyProgram.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
 
 			string parametersDeclarationText = Parameters.CanonicalDeclarationsToParametersString(defineStmt.ParametersText);
 			if (!string.IsNullOrEmpty(parametersDeclarationText))
@@ -1650,7 +1720,26 @@ namespace Puppeteer.EventSourcing
 				bodyProgram.Parameters = new Parameters(parametersDeclarationText, libraries);
 			}
 
-			_ = actionCommands.Add(actionId, canonicalBody, bodyProgram);
+			// An interpreted cached Action is executed by Program.Execute() on every
+			// replayed invocation, and that walker binds each @parameter Id from the
+			// resolved idParameters (SolveParameters -> Id.DeclareAsLocalParameter, gated
+			// on !IsCompiledMode). Resolve the references once here — the replay analog of
+			// the live cache-miss SolveReferences — so idParameters is populated for the
+			// per-invocation SolveParameters at the replay sites. Compiled Actions resolve
+			// lazily inside ExecuteExpression on first Perform and need nothing here.
+			// This runs single-threaded on the journal-reader thread (Define is processed
+			// inline, before any invocation of this Action is dispatched), so it does not
+			// race the rehydration pipeline stages.
+			if (!bodyProgram.IsCompiledMode && bodyProgram.Parameters != null)
+				bodyProgram.SolveReferences(bodyProgram.Parameters, withStaticValidation: false);
+
+			// Key by the DatabaseType-consistent canonical render so the live command
+			// path (PrepareCommandProgram / PerformCmdAsync, which key by
+			// program.ConvertToString(this.DatabaseType)) resolves this rehydrated Action
+			// on the first re-issue instead of journaling a duplicate Define. canonicalBody
+			// (IN_MEMORY) remains the re-parse source above; the cache key uses this actor's
+			// DatabaseType so both paths agree regardless of backend.
+			_ = actionCommands.Add(actionId, bodyProgram.ConvertToString(this.DatabaseType), bodyProgram);
 		}
 
 
@@ -1730,7 +1819,7 @@ namespace Puppeteer.EventSourcing
 				// depends on the user parameters (see Parameters.HasAnyUserParameter).
 				if (parameters == EMPTY_PARAMETERS || !parameters.HasAnyUserParameter())
 				{
-					// Sin parameters de user: would be a V1 Script unless the
+					// Without user parameters: would be a V1 Script unless the
 					// candidate hash matches an already-promoted Action — in
 					// which case B.3.4 reroutes the incoming script as an
 					// invocation of that Action, so the journal grows with
@@ -1756,13 +1845,42 @@ namespace Puppeteer.EventSourcing
 				}
 				else
 				{
-					// With user parameters: compiled mode, cached with an ActionId.
-					// Serialized as an Action (ActionId + arguments) in the journal.
+					// With user parameters this is an Action. Key the cache by the CANONICAL
+					// body text, DatabaseType-consistent with the rehydration path
+					// (AddKnownActionFromDefine), not the raw endpoint text. Otherwise a
+					// rehydrated Action — cached under its canonical Define body — is missed
+					// on the first live re-issue (whose raw text carries prints / comments /
+					// @-aliases / whitespace the canonical render drops) and a duplicate
+					// Define is journaled on every restart. The raw text is registered as an
+					// alias so repeated identical calls still fast-hit without re-rendering.
+					string canonicalKey = commandPrepared.Program.ConvertToString(this.DatabaseType);
+					commandPrepared.FormatedScriptForDairy = canonicalKey;
+					// A body that renders to an empty canonical form (e.g. a print-only
+					// parametric command with no journaled state) cannot key the cache;
+					// fall back to the raw endpoint text so the non-empty-key contract
+					// holds. Such degenerate Actions are rare and do not round-trip through
+					// rehydration anyway (their Define body has no canonical statements).
+					string identityKey = string.IsNullOrWhiteSpace(canonicalKey) ? script : canonicalKey;
+
+					if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
+					{
+						// Same body already known (rehydrated, or a differently-spelled
+						// earlier call). Reuse it as an invocation — mirrors the raw cache-hit
+						// path below: the Program is already reference-resolved, only the
+						// per-call parameters rebind.
+						commandPrepared.Entry = JournalEntry.IsExistingAction;
+						commandPrepared.Program = (Program)existingAction.Program;
+						commandPrepared.CacheEntry = existingAction;
+						commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+						if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, existingAction);
+						return;
+					}
+
 					commandPrepared.Entry = JournalEntry.IsNewAction;
 					var nextActionId = this.TakeAndIncrementActionId();
 					commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-					commandPrepared.CacheEntry = actionCommands.Add(nextActionId, script, commandPrepared.Program);
-					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
+					commandPrepared.CacheEntry = actionCommands.Add(nextActionId, identityKey, commandPrepared.Program);
+					if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, commandPrepared.CacheEntry);
 				}
 				// On a cache miss, SolveReferences is always needed to resolve the program's full
 				// structure (LValues, RValues, global variables, parameters).
@@ -1810,11 +1928,30 @@ namespace Puppeteer.EventSourcing
 			// all see the populated set.
 			Parameters effectiveParameters = commandPrepared.PromotedArgumentParameters ?? parameters;
 
+			// System Now contract on the promotion-routing path. Now is a per-call
+			// system parameter the framework injects via SetNow only when the program
+			// references it; the caller's injection targeted `parameters`. When the
+			// Script was routed to a promoted Action, effectiveParameters is the
+			// freshly-built PromotedArgumentParameters (literals only) — a DIFFERENT
+			// instance that never received SetNow. Since effectiveParameters is what
+			// feeds SolveReferences (eagerly here, and lazily in Program.ExecuteExpression
+			// on the compiled Action's first compile), Now must be present on it too;
+			// otherwise the Id 'Now' resolves to no scope and the codegen throws. Now
+			// stays excluded from the journal signature/args by Parameters.IsSystemNow.
+			if (!ReferenceEquals(effectiveParameters, parameters) && effectiveParameters != EMPTY_PARAMETERS && commandPrepared.Program.ReferencesNow)
+			{
+				effectiveParameters.SetNow(now);
+			}
+
 			commandPrepared.Program.LoadArguments(effectiveParameters);
 
 			if (commandPrepared.NeedsToSolveReferences) commandPrepared.Program.SolveReferences(effectiveParameters, withStaticValidation: true);
 			if (commandPrepared.NeedsToSolveParameters) commandPrepared.Program.SolveParameters(effectiveParameters);
 
+			// Hoisted out of the try so the write-time-failure catch can reuse the Define
+			// entry id it reserved here: a failed PARAMETRIC command journals a self-contained
+			// `define action` + invocation (not a bare-identifier body) — see the catch below.
+			long defineEntryIdForCutover = -1;
 			try
 			{
 				executionError = true;
@@ -1826,7 +1963,6 @@ namespace Puppeteer.EventSourcing
 				// effect of running the body); TellStatement and friends see this
 				// same id during execution and on replay (LoadProgram sets it
 				// from the Invocation row).
-				long defineEntryIdForCutover = -1;
 				if (writeNewEntry)
 				{
 					// B.3.3: a Script observation that fires automatic promotion
@@ -1931,7 +2067,7 @@ namespace Puppeteer.EventSourcing
 							break;
 
 						case JournalEntry.IsNewAction:
-							if (actionCommands == null) throw new LanguageException("cacheDeComandos is null");
+							if (actionCommands == null) throw new LanguageException("commandsCache is null");
 
 							var nextActionId = commandPrepared.CacheEntry.Id;
 							argumentValues = parameters.ArgumentsAsString(this.DatabaseType);
@@ -1939,10 +2075,13 @@ namespace Puppeteer.EventSourcing
 							// journal rows atomically. defineText is the canonical
 							// `define action <id> (<params>) as <body> end;`
 							// sentence Phase 1's parser reads back during replay.
+							// Authored body: keeps the developer's prints in the once-
+							// written Define sentence (identity/cache key still use the
+							// canonical FormatedScriptForDairy elsewhere).
 							string defineText = DefineActionStatement.ComposeJournalText(
 								nextActionId,
 								parameters.UserParametersAsCanonicalText(),
-								commandPrepared.FormatedScriptForDairy);
+								commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType));
 							dairy.WriteDefineWithFirstInvocation(
 								nextActionId,
 								defineText,
@@ -1959,20 +2098,65 @@ namespace Puppeteer.EventSourcing
 			}
 			catch (Exception executionEx)
 			{
-				if (executionError && writeNewEntry)
+				if (executionError && writeNewEntry && nextEntryId >= 0)
 				{
 					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(dairy.DatabaseType);
 					if (!String.IsNullOrWhiteSpace(commandPrepared.FormatedScriptForDairy))
 					{
-						// The script is persisted WHOLE in the journal (without an error tag). The
-						// failure information lives in the IPuppeteerLogger.Error sink and
-						// can reach the host via custom logger injection (Serilog/MEL/
-						// NLog/bridge-to-email). This way the journal is a faithful record of the
-						// attempted commands, not a transport channel for error metadata.
+						// The attempted command is persisted WHOLE in the journal (without an error tag).
+						// The failure information lives in the IPuppeteerLogger.Error sink and can reach
+						// the host via custom logger injection (Serilog/MEL/NLog/bridge-to-email). This
+						// way the journal is a faithful record of the attempted commands, not a transport
+						// channel for error metadata.
 						Logger.Error(
 							$"Script execution failed at write-time. EntryId={nextEntryId}, OccurredAt={now:O}, Script:\n{commandPrepared.FormatedScriptForDairy}",
 							executionEx);
-						dairy.WriteScriptEntry(nextEntryId, commandPrepared.FormatedScriptForDairy, now, null);
+
+						// The entry must be SELF-CONTAINED so replay reproduces the attempted command
+						// faithfully and fails the SAME way (permissively logged and skipped). For a
+						// PARAMETRIC command the body alone is NOT replayable: it references the
+						// @parameters as bare identifiers (the journal never carries '@') and lacks the
+						// `define action (<params>)` declaration that binds them, so a plain Script row
+						// would die on replay with "Variable '<name>' has not been defined" (or break the
+						// compiled framing the body needs) on every restart — indistinguishable from real
+						// corruption. So we mirror the happy-path shape for the command's Entry kind.
+						switch (commandPrepared.Entry)
+						{
+							case JournalEntry.IsNewAction:
+								// First invocation of a parametric command: emit Define + first Invocation
+								// atomically, reusing the Define id reserved before Perform — no id gap.
+								int newActionId = commandPrepared.CacheEntry.Id;
+								string defineText = DefineActionStatement.ComposeJournalText(
+									newActionId,
+									parameters.UserParametersAsCanonicalText(),
+									commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType));
+								dairy.WriteDefineWithFirstInvocation(
+									newActionId,
+									defineText,
+									defineEntryIdForCutover,
+									nextEntryId,
+									now,
+									parameters.ArgumentsAsString(this.DatabaseType),
+									null);
+								break;
+
+							case JournalEntry.IsExistingAction:
+								// The action body was declared by an earlier entry; only the invocation
+								// (with this call's argument values) is new and self-contained.
+								dairy.WriteInvocationEntry(
+									commandPrepared.CacheEntry.Id,
+									nextEntryId,
+									now,
+									(commandPrepared.PromotedArgumentParameters ?? parameters).ArgumentsAsString(this.DatabaseType),
+									null);
+								break;
+
+							default:
+								// A non-parametric Script (with or without promotion): the rendered body
+								// is already a complete, replayable sentence — persist it as-is.
+								dairy.WriteScriptEntry(nextEntryId, commandPrepared.FormatedScriptForDairy, now, null);
+								break;
+						}
 					}
 				}
 				if (executionError) throw;
@@ -2024,7 +2208,7 @@ namespace Puppeteer.EventSourcing
 			try
 			{
 				commandLineError = "";
-				scriptEnEjecucion = script;
+				runningScript = script;
 
 				string Ip = "";
 				string User = "";
@@ -2131,7 +2315,7 @@ namespace Puppeteer.EventSourcing
 			string User;
 			DateTime now = DateTime.MinValue;
 
-			CommandCacheEntry cacheDeComandosEntry = null;
+			CommandCacheEntry commandCacheEntry = null;
 
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
@@ -2159,7 +2343,7 @@ namespace Puppeteer.EventSourcing
 
 			try
 			{
-				if (!actionCommands.TryGetValue(script, out cacheDeComandosEntry))
+				if (!actionCommands.TryGetValue(script, out commandCacheEntry))
 				{
 					// CACHE MISS: parse, compile and (optionally) cache.
 					// Same logic as PrepareCommandProgram but with local variables.
@@ -2197,7 +2381,7 @@ namespace Puppeteer.EventSourcing
 							}
 							entry = JournalEntry.IsExistingAction;
 							program = routedEntry.Program;
-							cacheDeComandosEntry = routedEntry;
+							commandCacheEntry = routedEntry;
 							promotedArgumentParameters = routedArgs;
 							formatedScriptForDairy = canonicalForRouting;
 							needsToSolveReferences = false;
@@ -2216,12 +2400,34 @@ namespace Puppeteer.EventSourcing
 					}
 					else
 					{
-						entry = JournalEntry.IsNewAction;
-						var nextActionId = this.TakeAndIncrementActionId();
-						program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-						cacheDeComandosEntry = actionCommands.Add(nextActionId, script, program);
-						formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
-						needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+						// See PrepareCommandProgram: key the Action cache by the canonical
+						// body text (DatabaseType-consistent with AddKnownActionFromDefine)
+						// so a rehydrated Action is matched instead of duplicated on the
+						// first live re-issue. Raw text aliased for fast subsequent hits.
+						string canonicalKey = program.ConvertToString(this.DatabaseType);
+						formatedScriptForDairy = canonicalKey;
+						// Empty canonical (print-only parametric body): fall back to raw text
+						// so the non-empty-key contract holds (see PrepareCommandProgram).
+						string identityKey = string.IsNullOrWhiteSpace(canonicalKey) ? script : canonicalKey;
+
+						if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
+						{
+							entry = JournalEntry.IsExistingAction;
+							program = existingAction.Program;
+							commandCacheEntry = existingAction;
+							needsToSolveReferences = false;
+							needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+							if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, existingAction);
+						}
+						else
+						{
+							entry = JournalEntry.IsNewAction;
+							var nextActionId = this.TakeAndIncrementActionId();
+							program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+							commandCacheEntry = actionCommands.Add(nextActionId, identityKey, program);
+							if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, commandCacheEntry);
+							needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+						}
 					}
 				}
 				else
@@ -2229,7 +2435,7 @@ namespace Puppeteer.EventSourcing
 					// CACHE HIT: Program already compiled, references already resolved.
 					// Only rebind parameters (SolveParameters) if interpreted mode.
 					entry = JournalEntry.IsExistingAction;
-					program = cacheDeComandosEntry.Program;
+					program = commandCacheEntry.Program;
 					needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 					needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
@@ -2258,6 +2464,23 @@ namespace Puppeteer.EventSourcing
 				// caller's (empty) `parameters` — parallel to the sync path.
 				Parameters effectiveParameters = promotedArgumentParameters ?? parameters;
 
+				// System Now contract on the promotion-routing path. Now is a per-call
+				// system parameter the framework injects via SetNow only when the program
+				// references it; the SetNow above targeted the caller's `parameters`. When
+				// the Script was routed to a promoted Action, effectiveParameters is the
+				// freshly-built PromotedArgumentParameters (literals only) — a DIFFERENT
+				// instance that never received SetNow. Since effectiveParameters is what
+				// feeds SolveReferences (eagerly here, and lazily in Program.ExecuteExpression
+				// on the compiled Action's first compile), Now must be present on it too;
+				// otherwise the Id 'Now' resolves to no scope and the codegen throws. This
+				// generalizes to any per-call system parameter the framework injects at
+				// runtime (today Now is the only one). Now stays excluded from the journal
+				// signature/args by Parameters.IsSystemNow, so this does not contaminate it.
+				if (!ReferenceEquals(effectiveParameters, parameters) && effectiveParameters != EMPTY_PARAMETERS && program.ReferencesNow)
+				{
+					effectiveParameters.SetNow(now);
+				}
+
 				program.LoadArguments(effectiveParameters);
 
 				if (needsToSolveReferences) program.SolveReferences(effectiveParameters, withStaticValidation: true);
@@ -2271,7 +2494,7 @@ namespace Puppeteer.EventSourcing
 
 				try
 				{
-					scriptEnEjecucion = script;
+					runningScript = script;
 					if (writeNewEntry)
 					{
 						// B.3.3: a Script observation that fires promotion writes
@@ -2369,13 +2592,13 @@ namespace Puppeteer.EventSourcing
 							// a Script-routed-to-Action invocation (parallel to
 							// the sync path).
 							argumentValues = (promotedArgumentParameters ?? parameters).ArgumentsAsString(this.DatabaseType);
-							var actionId = cacheDeComandosEntry.Id;
+							var actionId = commandCacheEntry.Id;
 							await dairy.WriteInvocationEntryAsync(actionId, nextEntryId, now, argumentValues, program.LastExposeData);
 							break;
 
 						case JournalEntry.IsNewAction:
-							if (actionCommands == null) throw new LanguageException("cacheDeComandos is null");
-							actionId = cacheDeComandosEntry.Id;
+							if (actionCommands == null) throw new LanguageException("commandsCache is null");
+							actionId = commandCacheEntry.Id;
 							argumentValues = parameters.ArgumentsAsString(this.DatabaseType);
 							// Phase 4 cutover: emit Define + first Invocation as TWO
 							// journal rows atomically (see ExecuteCommandWithWriteLock
@@ -2383,7 +2606,7 @@ namespace Puppeteer.EventSourcing
 							string defineText = DefineActionStatement.ComposeJournalText(
 								actionId,
 								parameters.UserParametersAsCanonicalText(),
-								formatedScriptForDairy);
+								program.ConvertToAuthoredString(this.DatabaseType));
 							await dairy.WriteDefineWithFirstInvocationAsync(
 								actionId,
 								defineText,
@@ -2455,7 +2678,7 @@ namespace Puppeteer.EventSourcing
 		// and in parallel with other read locks (PerformChk, PerformEmit).
 		// SetReadOnlyMode(true) protects the SymbolTable against accidental writes.
 		//
-		// Cache: QuerysEnCache (ConcurrentDictionary) — shared with PerformChk and PerformEmit.
+		// Cache: cachedQueries (ConcurrentDictionary) — shared with PerformChk and PerformEmit.
 		// - With user parameters: compiled mode, IS cached.
 		// - Without user parameters: interpreted mode, NOT cached.
 		//
@@ -2474,7 +2697,7 @@ namespace Puppeteer.EventSourcing
 			bool needsToSolveReferences = false;
 			string result = null;
 
-			if (!QuerysEnCache.TryGetValue(script, out Program program))
+			if (!cachedQueries.TryGetValue(script, out Program program))
 			{
 				// CACHE MISS: parse with isQuery:true (blocks expose and global variable declaration).
 				Parser parser = ParsersPool.Rent();
@@ -2489,7 +2712,7 @@ namespace Puppeteer.EventSourcing
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
 					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-					QuerysEnCache.TryAdd(script, program);
+					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
@@ -2557,9 +2780,9 @@ namespace Puppeteer.EventSourcing
 		// Concurrency: READ LOCK — same semantics as PerformQry.
 		// SetReadOnlyMode(true) protects the SymbolTable against accidental writes.
 		// Parser: isQuery:true — blocks expose (which would persist to the journal) and global variable declaration.
-		// Cache: QuerysEnCache — compiled and cached with the same rules as PerformQry.
+		// Cache: cachedQueries — compiled and cached with the same rules as PerformQry.
 		// Returns void (not string) because the result is an external side effect, not a return value.
-		internal void PerformEmit(string script, Parameters parameters)
+		internal string PerformEmit(string script, Parameters parameters)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 			ArgumentNullException.ThrowIfNull(parameters);
@@ -2568,7 +2791,7 @@ namespace Puppeteer.EventSourcing
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
 
-			if (!QuerysEnCache.TryGetValue(script, out Program program))
+			if (!cachedQueries.TryGetValue(script, out Program program))
 			{
 				// CACHE MISS: parse with isQuery:true (blocks expose and global variable declaration).
 				Parser parser = ParsersPool.Rent();
@@ -2583,7 +2806,7 @@ namespace Puppeteer.EventSourcing
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
 					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-					QuerysEnCache.TryAdd(script, program);
+					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
@@ -2615,13 +2838,35 @@ namespace Puppeteer.EventSourcing
 
 			commandLineError = "";
 
+			// Push channel (Paper 9 / OutputTarget): when a sink is configured we
+			// CAPTURE the projection that PerformEmit would otherwise discard, using
+			// the push formatter (TOON by default) installed for this emit only — the
+			// Reaction runs out-of-band, so no FormatterContext flows in here. The
+			// captured document (the single ToString already produced by Perform) is
+			// RETURNED to the caller (Reaction.ExecuteProgram), which owns the
+			// triggering EntryId / OccurredAt / match bindings and assembles the
+			// PushDocument for the sink. When no sink is configured the path is
+			// byte-for-byte the pre-existing behavior (Perform's result is dropped)
+			// and null is returned.
+			string emittedDocument = null;
+
 			rwLock.EnterReadLock();
 
 			symbolTable.SetReadOnlyMode(true);
 
 			try
 			{
-				Perform(program, parameters);
+				if (outputTarget != null)
+				{
+					using (FormatterContext.Push(outputTargetFormatter))
+					{
+						emittedDocument = Perform(program, parameters);
+					}
+				}
+				else
+				{
+					Perform(program, parameters);
+				}
 			}
 			catch (Exception e)
 			{
@@ -2638,13 +2883,18 @@ namespace Puppeteer.EventSourcing
 			// Playbill final refactor: timeStamp is no longer read from parameters["Now"] (V2 may not
 			// declare it).
 			timeStamp = nowForEmit;
+
+			// The immutable document (or null when no target). The actual push to the
+			// sink happens in Reaction.ExecuteProgram, which has the two clocks +
+			// match bindings the transport needs.
+			return emittedDocument;
 		}
 
 		// PerformChk: executes a read-only check against the actor. Does not persist to the journal.
 		// Returns null/empty if the check passes, or an error message if it fails.
 		// Concurrency: READ LOCK — same semantics as PerformQry.
 		// Parser: isCheck:true — produces a Program that executes via ExecuteCheck() instead of Perform().
-		// Cache: QuerysEnCache — same cache as PerformQry and PerformEmit.
+		// Cache: cachedQueries — same cache as PerformQry and PerformEmit.
 		//
 		// Difference from PerformQry on cache hit:
 		// PerformChk only assigns needsToSolveParameters (not needsToSolveReferences).
@@ -2663,7 +2913,7 @@ namespace Puppeteer.EventSourcing
 			bool needsToSolveReferences = false;
 			string result = null;
 
-			if (!QuerysEnCache.TryGetValue(script, out Program program))
+			if (!cachedQueries.TryGetValue(script, out Program program))
 			{
 				// CACHE MISS: parse with isCheck:true (produces a Program for ExecuteCheck).
 				Parser parser = ParsersPool.Rent();
@@ -2676,7 +2926,7 @@ namespace Puppeteer.EventSourcing
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
 					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-					QuerysEnCache.TryAdd(script, program);
+					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
@@ -2745,7 +2995,7 @@ namespace Puppeteer.EventSourcing
 		//    If the check passes, executes the source (ExecuteCommandWithWriteLock) which persists to the journal.
 		//
 		// Concurrency: WRITE LOCK for phase 2. Uses _reusableCommandPrepared.
-		// Cache: scriptForCmd in actionCommands (via PrepareCommandProgram), scriptForChk in QuerysEnCache.
+		// Cache: scriptForCmd in actionCommands (via PrepareCommandProgram), scriptForChk in cachedQueries.
 		//
 		// Note on the check cache hit (scriptForChk):
 		// It only assigns needsToSolveParametersChk (not needsToSolveReferencesChk).
@@ -2780,7 +3030,7 @@ namespace Puppeteer.EventSourcing
 			try
 			{
 				commandLineError = "";
-				scriptEnEjecucion = scriptForCmd;
+				runningScript = scriptForCmd;
 
 				// Phase 4.5 Playbill refactor: ip/user no longer travel as script parameters.
 				string Ip = "";
@@ -2788,7 +3038,7 @@ namespace Puppeteer.EventSourcing
 
 				PrepareCommandProgram(scriptForCmd, parameters, _reusableCommandPrepared);
 
-				if (!QuerysEnCache.TryGetValue(scriptForChk, out programChk))
+				if (!cachedQueries.TryGetValue(scriptForChk, out programChk))
 				{
 					// CACHE MISS of the check script: parse with isCheck:true.
 					Parser parserChk = ParsersPool.Rent();
@@ -2801,7 +3051,7 @@ namespace Puppeteer.EventSourcing
 					if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 					{
 						programChk.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-						QuerysEnCache.TryAdd(scriptForChk, programChk);
+						cachedQueries.TryAdd(scriptForChk, programChk);
 					}
 					else
 					{
@@ -2878,25 +3128,25 @@ namespace Puppeteer.EventSourcing
 		{
 			ArgumentNullException.ThrowIfNull(program);
 
-			string resultado;
+			string result;
 
 			switch (this.actor.CompiledModePolicy)
 			{
 				case CompilationModePolicy.Automatic:
 					if (program.IsCompiledMode)
 					{
-						resultado = program.ExecuteExpression(parameters);
+						result = program.ExecuteExpression(parameters);
 					}
 					else
 					{
-						resultado = program.Execute();
+						result = program.Execute();
 					}
 					break;
 				case CompilationModePolicy.AlwaysCompiled:
-					resultado = program.ExecuteExpression(parameters);
+					result = program.ExecuteExpression(parameters);
 					break;
 				case CompilationModePolicy.AlwaysInterpreted:
-					resultado = program.Execute();
+					result = program.Execute();
 					break;
 				default:
 					throw new LanguageException("Unknown compilation mode");
@@ -2904,7 +3154,7 @@ namespace Puppeteer.EventSourcing
 
 			dateOfLastActivity = DateTime.Now;
 
-			return resultado;
+			return result;
 		}
 
 		internal string ComandForDairy(String script, string ip, string user)
@@ -2979,10 +3229,10 @@ namespace Puppeteer.EventSourcing
 					long lastIdAfterRecoveredState = 0;
 					long previousLastIdAfterRecoveredState = 0;
 
-					bool salir = false;
-					int reintentos = 0;
+					bool shouldExit = false;
+					int retries = 0;
 					//while (itsFollowerRunning) && lastIdAfterRecoveredState == the previous lastIdAfterRecoveredState
-					while (!salir)
+					while (!shouldExit)
 					{
 						previousLastIdAfterRecoveredState = lastIdAfterRecoveredState;
 						lastIdAfterRecoveredState = ReplayPendingEventsForRedBlack();
@@ -2991,13 +3241,13 @@ namespace Puppeteer.EventSourcing
 						Thread.Sleep(TimeSpan.FromSeconds(0.5));
 
 						if (lastIdAfterRecoveredState != previousLastIdAfterRecoveredState)
-							reintentos = 0;
+							retries = 0;
 						else
-							reintentos++;
+							retries++;
 
-						bool seAlcanzaron = reintentos >= 3;
+						bool wereReached = retries >= 3;
 
-						salir = RecoveringStatusIsRunning == false && seAlcanzaron;
+						shouldExit = RecoveringStatusIsRunning == false && wereReached;
 					}
 					Debug.WriteLine("New Actor Version reached last Entry Id: " + lastIdAfterRecoveredState);
 
@@ -3033,6 +3283,9 @@ namespace Puppeteer.EventSourcing
 							if (String.IsNullOrEmpty(scriptEvent.Script)) throw new LanguageException("Script cannot be null or empty");
 							parser.SetSource(scriptEvent.Script);
 							program = parser.Rehydrate();
+							// Honor the actor's real execution policy (see GenerateAndRentProgram):
+							// an AlwaysCompiled actor must run the replayed script compiled.
+							program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
 							program.Parameters = ParametersPool.Rent();
 							program.SolveParameters(program.Parameters);
 							break;
@@ -3060,6 +3313,11 @@ namespace Puppeteer.EventSourcing
 
 					if (!actionCommands.ContainsAction(program.Script))
 						program.SolveReferences(program.Parameters, withStaticValidation: true);
+					else if (!program.IsCompiledMode)
+						// Interpreted cached Action: rebind the @parameter Ids to this
+						// invocation's arguments before the interpreted Perform. See the
+						// matching comment in the EventSourcingStorage resolver stage.
+						program.SolveParameters(program.Parameters);
 
 					try
 					{
@@ -3277,7 +3535,7 @@ namespace Puppeteer.EventSourcing
 		internal const string ActionCommandsFieldName = nameof(actionCommands);
 		internal const string ContainsActionMethodName = nameof(CommandCache.ContainsAction);
 
-		internal readonly ConcurrentDictionary<string, Program> QuerysEnCache = new ConcurrentDictionary<string, Program>();
+		internal readonly ConcurrentDictionary<string, Program> cachedQueries = new ConcurrentDictionary<string, Program>();
 
 		// B.2 ext: sliding window of the most recently executed script entries.
 		// Captured at the tail of ExecuteCommandWithWriteLock / PerformCmdAsync
@@ -3285,7 +3543,7 @@ namespace Puppeteer.EventSourcing
 		// the window can reuse the already-parsed-and-resolved Program instead
 		// of re-parsing. Scope: V1 JournalEntry.IsScript (no parameters) — these
 		// are the entries whose Programs are NOT in actionCommands; ActionEvents
-		// already benefit from actionCommands.cacheDeCmdsPorId in O(1).
+		// already benefit from actionCommands.cmdCacheById in O(1).
 		//
 		// Window size > 1 is required because multiple Reactions consume the
 		// same EntryId at slightly different rates: a single-slot cache would
@@ -3596,6 +3854,18 @@ namespace Puppeteer.EventSourcing
 			actionProgram.Parameters = declaredParameters;
 			actionProgram.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
 
+			// An interpreted promoted Action (AlwaysInterpreted actor) is executed by
+			// Program.Execute() on every routed invocation — the interpreted walker never
+			// calls ExecuteExpression, the only path that lazily resolves a compiled Action.
+			// Resolve its references once here so idParameters is populated for the
+			// per-invocation SolveParameters (B.3.4 routing sets NeedsToSolveParameters).
+			// Without this the synthesized @parameter Ids (p0, p1, ...) never bind and the
+			// first routed invocation throws "Variable 'p0' has not been defined". This
+			// mirrors the replay-side AddKnownActionFromDefine; compiled Actions resolve
+			// lazily inside ExecuteExpression and need nothing here.
+			if (!actionProgram.IsCompiledMode && actionProgram.Parameters != null)
+				actionProgram.SolveReferences(actionProgram.Parameters, withStaticValidation: false);
+
 			actionCommands.Add(actionId, extraction.ActionBodyText, actionProgram);
 			promotionCandidateToActionId[candidateHash] = actionId;
 
@@ -3609,39 +3879,52 @@ namespace Puppeteer.EventSourcing
 
 		private class CommandCache
 		{
-			private readonly Dictionary<string, CommandCacheEntry> cacheDeCmdsPorScript = new Dictionary<string, CommandCacheEntry>();
-			private readonly Dictionary<int, CommandCacheEntry> cacheDeCmdsPorId = new Dictionary<int, CommandCacheEntry>();
+			private readonly Dictionary<string, CommandCacheEntry> cmdCacheByScript = new Dictionary<string, CommandCacheEntry>();
+			private readonly Dictionary<int, CommandCacheEntry> cmdCacheById = new Dictionary<int, CommandCacheEntry>();
 			internal CommandCacheEntry Add(int id, string script, Program program)
 			{
 				if (id < 0) throw new ArgumentNullException(nameof(id));
 				ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 				ArgumentNullException.ThrowIfNull(program);
 
-				CommandCacheEntry cacheDeComandosEntry = new CommandCacheEntry(id, script, program);
+				CommandCacheEntry commandCacheEntry = new CommandCacheEntry(id, script, program);
 
-				cacheDeCmdsPorScript.TryAdd(script, cacheDeComandosEntry);
-				cacheDeCmdsPorId.TryAdd(id, cacheDeComandosEntry);
+				cmdCacheByScript.TryAdd(script, commandCacheEntry);
+				cmdCacheById.TryAdd(id, commandCacheEntry);
 
-				return cacheDeComandosEntry;
+				return commandCacheEntry;
+			}
+
+			// Register an additional script-text key pointing at an existing entry.
+			// Used by the command dispatch two-tier lookup: the canonical body text is
+			// the identity key (matches the rehydration path), and the raw endpoint text
+			// is aliased to the same entry so repeated identical calls fast-hit without
+			// re-rendering the canonical form. Same id/Program — never a new Action.
+			internal void AddScriptAlias(string script, CommandCacheEntry entry)
+			{
+				ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
+				ArgumentNullException.ThrowIfNull(entry);
+
+				cmdCacheByScript.TryAdd(script, entry);
 			}
 
 			internal bool TryGetValue(string script, out CommandCacheEntry statements)
 			{
-				return cacheDeCmdsPorScript.TryGetValue(script, out statements);
+				return cmdCacheByScript.TryGetValue(script, out statements);
 			}
 
-			internal bool TryGetValue(int id, out CommandCacheEntry CacheDeComando)
+			internal bool TryGetValue(int id, out CommandCacheEntry CommandCache)
 			{
-				return cacheDeCmdsPorId.TryGetValue(id, out CacheDeComando);
+				return cmdCacheById.TryGetValue(id, out CommandCache);
 			}
 
 			internal bool ContainsAction(int actionId)
 			{
-				return cacheDeCmdsPorId.ContainsKey(actionId);
+				return cmdCacheById.ContainsKey(actionId);
 			}
 			internal bool ContainsAction(string script)
 			{
-				return cacheDeCmdsPorScript.ContainsKey(script);
+				return cmdCacheByScript.ContainsKey(script);
 			}
 		}
 

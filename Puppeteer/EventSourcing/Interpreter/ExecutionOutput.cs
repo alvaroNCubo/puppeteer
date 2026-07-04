@@ -9,21 +9,21 @@ namespace Puppeteer.EventSourcing.Interpreter
 	{
 		private readonly Output printBuffer;
 		private readonly Output exposeBuffer;
-		private readonly bool escribirSalida;
+		private readonly bool writeOutput;
 		private readonly bool isRehydrating;
 
-		private ExecutionOutput(bool conSalida, bool isRehydrating)
+		private ExecutionOutput(bool withOutput, bool isRehydrating)
 		{
-			escribirSalida = conSalida;
+			writeOutput = withOutput;
 			this.isRehydrating = isRehydrating;
-			printBuffer = conSalida ? Output.RentWithOutput() : Output.RentWithoutOutput();
-			exposeBuffer = conSalida ? Output.RentWithOutput() : Output.RentWithoutOutput();
+			printBuffer = withOutput ? Output.RentWithOutput() : Output.RentWithoutOutput();
+			exposeBuffer = withOutput ? Output.RentWithOutput() : Output.RentWithoutOutput();
 		}
 
 		internal Output PrintBuffer => printBuffer;
 		internal Output ExposeBuffer => exposeBuffer;
 
-		internal bool IsWriting => escribirSalida;
+		internal bool IsWriting => writeOutput;
 		internal bool IsRehydrating => isRehydrating;
 
 		internal void Clear()
@@ -56,28 +56,28 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		public override string ToString() => GetPrintJson();
 
-		internal void OpenFor()
+		internal void OpenForEach()
 		{
-			printBuffer.OpenFor();
-			exposeBuffer.OpenFor();
+			printBuffer.OpenForEach();
+			exposeBuffer.OpenForEach();
 		}
 
-		internal void BeginForMoveNext()
+		internal void BeginForEachMoveNext()
 		{
-			printBuffer.BeginForMoveNext();
-			exposeBuffer.BeginForMoveNext();
+			printBuffer.BeginForEachMoveNext();
+			exposeBuffer.BeginForEachMoveNext();
 		}
 
-		internal void EndForMoveNext()
+		internal void EndForEachMoveNext()
 		{
-			printBuffer.EndForMoveNext();
-			exposeBuffer.EndForMoveNext();
+			printBuffer.EndForEachMoveNext();
+			exposeBuffer.EndForEachMoveNext();
 		}
 
-		internal void CloseFor(string variableName)
+		internal void CloseForEach(string variableName)
 		{
-			printBuffer.CloseFor(variableName);
-			exposeBuffer.CloseFor(variableName);
+			printBuffer.CloseForEach(variableName);
+			exposeBuffer.CloseForEach(variableName);
 		}
 
 		// Per-thread pool. The previous shared ConcurrentStack<ExecutionOutput>
@@ -96,13 +96,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 		private class ExecutionOutputPool
 		{
 			private readonly ThreadLocal<Stack<ExecutionOutput>> _objects = new ThreadLocal<Stack<ExecutionOutput>>(() => new Stack<ExecutionOutput>());
-			private readonly bool _conSalida;
+			private readonly bool _withOutput;
 			private readonly int _maxPoolSize;
 
-			internal ExecutionOutputPool(bool conSalida, int maxPoolSize = ActorHandler.MAX_NORMAL_LOAD_POOL_SIZE)
+			internal ExecutionOutputPool(bool withOutput, int maxPoolSize = ActorHandler.MAX_NORMAL_LOAD_POOL_SIZE)
 			{
 				if (maxPoolSize <= 0) throw new LanguageException($"{nameof(ExecutionOutputPool)} maxPoolSize must be greater than 0.");
-				_conSalida = conSalida;
+				_withOutput = withOutput;
 				_maxPoolSize = maxPoolSize;
 			}
 
@@ -111,7 +111,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				var stack = _objects.Value;
 				ExecutionOutput item = stack.Count > 0
 					? stack.Pop()
-					: new ExecutionOutput(conSalida: _conSalida, isRehydrating: isRehydrating);
+					: new ExecutionOutput(withOutput: _withOutput, isRehydrating: isRehydrating);
 				// Install the active formatter (if any) on the inner Outputs
 				// before handing the ExecutionOutput out. FormatterContext.Active
 				// is null when no Push has happened on this thread → defaults
@@ -132,17 +132,17 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-		private static readonly ExecutionOutputPool _conSalidaPool = new ExecutionOutputPool(conSalida: true);
-		private static readonly ExecutionOutputPool _sinSalidaPool = new ExecutionOutputPool(conSalida: false);
+		private static readonly ExecutionOutputPool _withOutputPool = new ExecutionOutputPool(withOutput: true);
+		private static readonly ExecutionOutputPool _withoutOutputPool = new ExecutionOutputPool(withOutput: false);
 
 		internal static ExecutionOutput RentWithOutput()
 		{
-			return _conSalidaPool.Rent(isRehydrating: false);
+			return _withOutputPool.Rent(isRehydrating: false);
 		}
 
 		internal static ExecutionOutput RentWithoutOutput()
 		{
-			return _sinSalidaPool.Rent(isRehydrating: true);
+			return _withoutOutputPool.Rent(isRehydrating: true);
 		}
 
 		internal static void Return(ExecutionOutput rentedOutput)
@@ -156,13 +156,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 			// in addition created a double-ownership window that races under
 			// parallel PerformQuery.
 
-			if (rentedOutput.escribirSalida)
+			if (rentedOutput.writeOutput)
 			{
-				_conSalidaPool.Return(rentedOutput);
+				_withOutputPool.Return(rentedOutput);
 			}
 			else
 			{
-				_sinSalidaPool.Return(rentedOutput);
+				_withoutOutputPool.Return(rentedOutput);
 			}
 		}
 	}
