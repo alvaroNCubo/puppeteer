@@ -305,6 +305,30 @@ namespace Puppeteer
 			}
 		}
 
+		// V2 fluent write-back: after a pool-rented copy has executed, propagate the
+		// computed values of THIS instance's Out/InOut parameters from `executed`,
+		// matched by name. THIS (the caller's original instance) is the source of truth
+		// for which parameters are Out/InOut — that decision does not depend on the copy's
+		// modifiers, so it stays correct even if the pooled slot's kind ever differs.
+		// WithParameters(Parameters) preserves the Out/InOut modifier when copying in, so
+		// Program's post-execution Parameters.Clear() (which resets only In parameters)
+		// leaves the computed Out/InOut value intact in `executed` for this read. The write
+		// goes straight to the caller's symbol, bypassing the Out declaration guard
+		// (see Parameter.WriteBackComputedValue).
+		internal void WriteBackOutputsFrom(Parameters executed)
+		{
+			if (executed == null || executed == EMPTY || this == EMPTY) return;
+
+			foreach (Parameter destination in parameters)
+			{
+				int kind = destination.ParameterModifier;
+				if (kind != Parameter.Out && kind != Parameter.InOut) continue;
+				if (!executed.ContainsParameter(destination.Name)) continue;
+
+				destination.WriteBackComputedValue(executed[destination.Name].GetValue());
+			}
+		}
+
 		// Phase 4 of the Action refactor: convert the canonical parameter declaration
 		// text (`name:type, name:type`) used in Define statements into the
 		// modifier-prefixed `In,name:type,In,name:type` form that the Parameters(string)

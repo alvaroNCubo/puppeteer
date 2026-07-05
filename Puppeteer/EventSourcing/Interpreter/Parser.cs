@@ -52,7 +52,35 @@ namespace Puppeteer.EventSourcing.Interpreter
 		internal Program Parse(bool isQuery, bool isCheck)
 		{
 			Program result = ParseProgram(Array.Empty<int>(), isQuery, isCheck);
+			if (isCheck)
+			{
+				// A check script that cannot reject the command is an always-pass
+				// footgun: the framework would treat it as "passed" and run the command
+				// unconditionally. A check rejects only via a Check(...) whose reason is a
+				// blocking severity (Error/Warning) — an Information/Message (including
+				// `Notify Information`) is advisory and never conditions the command. So a
+				// check with no Check(...) at all, or only Information reasons, is rejected
+				// here at parse time. This guards every check-parse entry point (PerformChk
+				// and phase 1 of PerformCheckThenCmd, including the reaction `when:` guard).
+				// It lives in Parse (not ParseProgram) on purpose: Rehydrate() overloads the
+				// isCheck flag to mean "don't need output" and re-parses ordinary COMMANDS
+				// via ParseProgram directly — those legitimately have no Check() and must
+				// not be rejected on journal replay.
+				RequireAtLeastOneRejectingCheck(result);
+			}
 			return result;
+		}
+
+		private static void RequireAtLeastOneRejectingCheck(Program program)
+		{
+			foreach (CheckStatement check in program.Collect<CheckStatement>())
+			{
+				if (check.CanReject)
+				{
+					return; // at least one Check(...) can condition the command
+				}
+			}
+			throw new LanguageException("A check script must contain at least one Check(...) whose reason is an Error or Warning; an Information message does not condition the command.");
 		}
 
 		internal Program Rehydrate()
@@ -599,7 +627,7 @@ namespace Puppeteer.EventSourcing.Interpreter
         //   tellStatement := TELL ( ackForm | unackForm | assertiveForm ) SEMICOLON
         //   ackForm       := "ack" stringLit "from" id [LPAREN expr RPAREN]
         //   unackForm     := stringLit "unacknowledged" "by" id
-        //   assertiveForm := id [ "with" exprList ] "to" id [LPAREN expr RPAREN] [ "once" stringLit ]
+        //   assertiveForm := id [ "with" exprList ] "to" id [LPAREN expr RPAREN] [ "once" expr ]
         //
         // <Message> (the assertive's id) is the SENDER's own vocabulary, validated as
         // a message name — NOT as a method on the addressee. There is no coupling to
@@ -637,7 +665,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 return unackResult;
             }
 
-            // Form: tell <Message> [with <args>] to <Addressee>[(<id>)] [once '<id>']
+            // Form: tell <Message> [with <args>] to <Addressee>[(<id>)] [once <idExpr>]
             if (lexer.CurrentToken.Type != TokenType.id)
             {
                 throw new LanguageException($"'tell' must be followed by a message name, 'ack', or a quoted envelope id, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
@@ -679,21 +707,23 @@ namespace Puppeteer.EventSourcing.Interpreter
                 lexer.Accept(TokenType.rParen);
             }
 
-            string onceLiteral = null;
+            // `once` takes an EXPRESSION, not just a string literal. The identity is
+            // resolved per event at execute-time, so a captured `@parameter`
+            // (once @order) yields a meaningful per-utterance id, a literal
+            // (once 'welcome-42') keeps the constant-key behavior, and a string-valued
+            // expression (once 'reward-' + @order) composes them. This is the issuing
+            // counterpart of the matcher's `once <param>` (PatternParser) and reuses the
+            // same expression machinery as the `with` payload.
+            AstExpression onceExpression = null;
             if (lexer.CurrentToken.Type == TokenType.id && LexemeEqualsIgnoreCase("once"))
             {
                 lexer.Accept(TokenType.id); // consume 'once'
-                if (lexer.CurrentToken.Type != TokenType.stringLit)
-                {
-                    throw new LanguageException($"'tell ... once' requires a string literal, but found token type '{lexer.CurrentToken.Type}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
-                }
-                onceLiteral = lexer.CurrentLexeme().ToString();
-                lexer.Accept(TokenType.stringLit);
+                onceExpression = ParseLogicalExpression(currLevel);
             }
 
             lexer.Accept(TokenType.semicolon);
 
-            return new AssertiveTellStatement(symbolTable, messageName, withArgs, addressee, addresseeInstanceId, onceLiteral);
+            return new AssertiveTellStatement(symbolTable, messageName, withArgs, addressee, addresseeInstanceId, onceExpression);
         }
 
         // Parse the comma-separated `with` payload, terminated by the 'to' keyword.
@@ -802,10 +832,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private Statement ParseCreateOrCallStatement(int[] currLevel, bool isQuery, bool isCheck)
 		{
-			if (isQuery && currLevel.Length == 0)
-			{
-				throw new LanguageException($"Global variable declarations are not allowed in queries (at line {Row()}, column {Column()}).");
-			}
+			// NOTE: the "no global variable declarations in queries" rule is NOT enforced
+			// here. At parse time the '@' alias is already dropped by the Lexer and the
+			// caller's parameter set is unknown, so a top-level `id = value;` is
+			// indistinguishable between declaring a new global (forbidden in a query) and
+			// assigning to a pre-declared @Out parameter (allowed). The rule is enforced
+			// in Program.SolveReferences, where each LValue's scope (Global vs Parameter)
+			// is resolved against the actual parameter set. See RejectGlobalDeclarationInQuery.
 			Statement result;
 			AstExpression dot = ParseDotChain(currLevel);
 			bool isCreateCommand = lexer.CurrentToken.Type == TokenType.assign;

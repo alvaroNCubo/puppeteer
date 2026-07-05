@@ -204,16 +204,26 @@ namespace Puppeteer
 		{
 			if (conEstado) (actor as IActorEventJournalClient).ReplayEvent(retornableEventData);
 
-			Program rentedProgram = actor.Handler.GenerateAndRentProgram(retornableEventData);
+			ActorHandler.RehydrationUnit unit = actor.Handler.GenerateAndRentProgram(retornableEventData);
 
 			retornableEventData.ReturnToEventDataPool();
 
-			// Phase 5 of the Action refactor: GenerateAndRentProgram now returns
-			// null for orphan Invocations (cache miss on the actionId). Skip the
-			// rest of the follower-replay pipeline — the orphan path is
-			// otherwise unreachable post-Fase-4 by construction.
-			if (rentedProgram == null) return;
+			// Phase 5 of the Action refactor: GenerateAndRentProgram now returns a
+			// default (null Program) unit for orphan Invocations (cache miss on the
+			// actionId). Skip the rest of the follower-replay pipeline — the orphan
+			// path is otherwise unreachable post-Fase-4 by construction.
+			if (unit.Program == null) return;
 
+			Program rentedProgram = unit.Program;
+
+			// A shared cached-Action invocation no longer carries its arguments pre-bound
+			// in the (shared) Program — the arguments are deferred out of the concurrent
+			// rehydration parse/resolve stages so parallel invocations of the same ActionId
+			// cannot clobber each other. This follower replay is serial (one event applied
+			// to completion before the next), so binding here reproduces the pre-refactor
+			// behavior exactly (arguments + Now + EntryId, without SolveParameters).
+			if (unit.IsSharedCachedAction)
+				actor.Handler.ApplyActionInvocationArguments(rentedProgram, unit.ActionArguments, unit.OccurredAt, unit.EntryId);
 
 			bool needsToMatchRules = lastProcessedEntryId > _lastEntryProcessedByFollower;
 

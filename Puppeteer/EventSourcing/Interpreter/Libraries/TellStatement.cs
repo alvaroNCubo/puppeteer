@@ -1,6 +1,7 @@
 using Puppeteer.EventSourcing.Follower;
 using Puppeteer.Tell;
 using System;
+using System.Globalization;
 using System.Linq.Expressions;
 using System.Text;
 
@@ -262,7 +263,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	}
 
 	// The assertive `tell`:
-	//   tell <Message> [with <v1, v2, ...>] to <Addressee>[('<instanceId>')] [once '<id>'];
+	//   tell <Message> [with <v1, v2, ...>] to <Addressee>[('<instanceId>')] [once <idExpr>];
 	//
 	// <Message> is a fact the sender lived, named in ITS OWN vocabulary (never the
 	// receiver's verb). The `with` values are the payload and deduce the typed
@@ -270,19 +271,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	// is the hearer (a logical role); the optional ('<instanceId>') is a specific
 	// instance the sender can name. Per-utterance identity defaults to the content
 	// hash of (message, addressee, instance, ordered values); the optional `once`
-	// literal pins it to an author-chosen key for an idempotent singleton utterance.
+	// EXPRESSION pins it to an author-chosen key for an idempotent utterance.
+	//
+	// The `once` clause is PARAMETRIC, mirroring the matcher's `once <param>`: the
+	// body is compiled once at DefineReaction but the expression is evaluated PER
+	// event, so a single Action firing on purchases A1, A2, A3 issues three tells
+	// with identities A1, A2, A3 — never one Action per purchase. A bare `@parameter`
+	// (once @order) captures the meaningful per-event value; a string literal
+	// (once 'welcome-42') pins a constant idempotent key exactly as before; and a
+	// string-valued expression (once 'reward-' + @order) composes the two.
 	internal sealed class AssertiveTellStatement : TellStatement
 	{
 		internal string MessageName { get; }
 		internal AstExpression[] WithArgs { get; }
 		internal string Addressee { get; }
 		internal AstExpression AddresseeInstanceId { get; }
-		// Optional `once '<literal>'`. When present, the per-utterance identity IS the
-		// literal (content does NOT enter the identity), so N utterances under the
-		// same key collapse to one commitment. Null → content-hash identity.
-		internal string OnceLiteral { get; }
+		// Optional `once <expr>`. When present, the per-utterance identity IS the value
+		// the expression evaluates to (content does NOT enter the identity), so N
+		// utterances under the same resolved key collapse to one commitment. A literal
+		// is just a constant expression (the pre-expression `once '<literal>'` shape).
+		// Null → content-hash identity.
+		internal AstExpression OnceExpression { get; }
 
-		internal AssertiveTellStatement(SymbolTable symbolTable, string messageName, AstExpression[] withArgs, string addressee, AstExpression addresseeInstanceId, string onceLiteral)
+		internal AssertiveTellStatement(SymbolTable symbolTable, string messageName, AstExpression[] withArgs, string addressee, AstExpression addresseeInstanceId, AstExpression onceExpression)
 			: base(symbolTable)
 		{
 			ArgumentException.ThrowIfNullOrWhiteSpace(messageName);
@@ -293,7 +304,43 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			WithArgs = withArgs;
 			Addressee = addressee;
 			AddresseeInstanceId = addresseeInstanceId;
-			OnceLiteral = onceLiteral;
+			OnceExpression = onceExpression;
+		}
+
+		// The `once` expression's identifiers must be reachable by reference
+		// resolution so a captured `@parameter` inside it binds to the per-event value
+		// (the same treatment the reaction action gives its parameters). Only the
+		// `once` subtree is exposed — the `with` args and addressee instance keep their
+		// established behavior of being read BY NAME from Program.Parameters, never
+		// bound for Id.Execute() (see ResolveArgValue). Forwarding just this new node
+		// lets `once 'reward-' + @order` evaluate while leaving all existing paths
+		// untouched. The base Visit performs the self type-match against the visitor.
+		internal override void Visit(ASTVisitor v)
+		{
+			base.Visit(v);
+			OnceExpression?.Visit(v);
+		}
+
+		// Resolve the `once` expression to the per-utterance identity string. Mirrors
+		// the `with` capture idiom (ResolveArgValue): a bare captured `@parameter` is
+		// read by name from the live Parameters, and any other expression (a literal or
+		// a composed string) is evaluated directly. The result is rendered with the
+		// invariant culture so a numeric/date-typed identity is byte-stable across
+		// runs, replays, and data centers — the same determinism the content hash gives.
+		private string ResolveOnceIdentity()
+		{
+			object value = ResolveArgValue(OnceExpression);
+			if (value == null)
+			{
+				throw new LanguageException("'tell ... once <expr>' evaluated to null. The once identity must resolve to a non-empty value — a captured @parameter (e.g. once @order), a literal (once 'welcome-42'), or a string-valued expression (e.g. once 'reward-' + @order).");
+			}
+			string id = value as string
+				?? (value is IFormattable formattable ? formattable.ToString(null, CultureInfo.InvariantCulture) : value.ToString());
+			if (string.IsNullOrEmpty(id))
+			{
+				throw new LanguageException("'tell ... once <expr>' evaluated to an empty identity. The once identity must be a non-empty value.");
+			}
+			return id;
 		}
 
 		// Register this outbound tell as a script-side ScriptTellStatement so the
@@ -308,8 +355,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				withValues[i] = ResolveArgValue(WithArgs[i]);
 			}
-			string envelopeId = OnceLiteral
-				?? FormatContentHash(ComputeContentHash(MessageName, Addressee, instanceValue, WithArgs));
+			string envelopeId = OnceExpression != null
+				? ResolveOnceIdentity()
+				: FormatContentHash(ComputeContentHash(MessageName, Addressee, instanceValue, WithArgs));
 			patternAst.RegisterTellStatement(MessageName, Addressee, instanceValue, withValues, envelopeId, position++);
 		}
 
@@ -321,11 +369,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (SymbolTable.RecoveringState)
 			{
 				object instanceValueReplay = EvaluateExpr(AddresseeInstanceId);
-				if (OnceLiteral != null)
+				if (OnceExpression != null)
 				{
-					SymbolTable.MarkExplicitTellApplied(OnceLiteral);
-					RegisterTellEntryForElision(OnceLiteral);
-					RegisterTellRecoveryInfo(OnceLiteral, Addressee, instanceValueReplay);
+					string onceIdReplay = ResolveOnceIdentity();
+					SymbolTable.MarkExplicitTellApplied(onceIdReplay);
+					RegisterTellEntryForElision(onceIdReplay);
+					RegisterTellRecoveryInfo(onceIdReplay, Addressee, instanceValueReplay);
 				}
 				else
 				{
@@ -343,13 +392,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			object instanceValue = EvaluateExpr(AddresseeInstanceId);
 
-			// Explicit branch — developer wrote `once 'X'`. Identity IS the literal.
-			if (OnceLiteral != null)
+			// Explicit branch — developer wrote `once <expr>`. Identity IS the value the
+			// expression evaluates to for THIS event (a captured @parameter varies per
+			// event; a literal is constant).
+			if (OnceExpression != null)
 			{
-				if (SymbolTable.IsExplicitTellApplied(OnceLiteral)) return;
+				string onceId = ResolveOnceIdentity();
+				if (SymbolTable.IsExplicitTellApplied(onceId)) return;
 
 				TellEnvelope envelopeOnce = new TellEnvelope(
-					Id: OnceLiteral,
+					Id: onceId,
 					MessageName: MessageName,
 					Addressee: Addressee,
 					AddresseeInstanceId: instanceValue?.ToString(),
@@ -358,9 +410,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					Check: SymbolTable.CurrentCausationCheck,
 					Values: CollectWithValues(WithArgs));
 
-				SymbolTable.MarkExplicitTellApplied(OnceLiteral);
+				SymbolTable.MarkExplicitTellApplied(onceId);
 				SymbolTable.EnqueuePendingTell(envelopeOnce);
-				RegisterTellEntryForElision(OnceLiteral);
+				RegisterTellEntryForElision(onceId);
 				return;
 			}
 
@@ -427,11 +479,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				AddresseeInstanceId.write(result, databaseType);
 				result.Append(")");
 			}
-			if (OnceLiteral != null)
+			if (OnceExpression != null)
 			{
-				result.Append(" once '");
-				result.Append(OnceLiteral);
-				result.Append("'");
+				result.Append(" once ");
+				OnceExpression.write(result, databaseType);
 			}
 			result.Append(";");
 		}

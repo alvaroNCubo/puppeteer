@@ -25,6 +25,14 @@ namespace Puppeteer
 		private readonly string _playbillSchemaName;
 		private readonly Parameters _playbillValues;
 
+		// Non-null only on the WithParameters(Parameters source) path: the caller's own
+		// instance, into which Out/InOut results are copied back after Perform. That
+		// overload runs against a pool-rented COPY of source, so without this the computed
+		// Out values would stay in the copy (returned to the pool) and never reach the
+		// caller. Null for every other path (configure-lambda, RentedParameter lease,
+		// auto-rent), whose parameters instance is either the caller's own or transient.
+		private readonly Parameters _writeBackTarget;
+
 		internal ActorV2Invocation(ActorV2 actor, string script)
 		{
 			_actor = actor;
@@ -36,6 +44,7 @@ namespace Puppeteer
 			_playbill = null;
 			_playbillSchemaName = null;
 			_playbillValues = null;
+			_writeBackTarget = null;
 		}
 
 		internal ActorV2Invocation(ActorV2 actor, string scriptForChk, string script)
@@ -49,6 +58,7 @@ namespace Puppeteer
 			_playbill = null;
 			_playbillSchemaName = null;
 			_playbillValues = null;
+			_writeBackTarget = null;
 		}
 
 		// Playbill-aware constructors — used by Performance.Using(...) to attach
@@ -65,6 +75,7 @@ namespace Puppeteer
 			_playbill = playbill;
 			_playbillSchemaName = playbillSchemaName;
 			_playbillValues = null;
+			_writeBackTarget = null;
 		}
 
 		internal ActorV2Invocation(ActorV2 actor, string scriptForChk, string script, Playbill playbill, string playbillSchemaName)
@@ -78,11 +89,13 @@ namespace Puppeteer
 			_playbill = playbill;
 			_playbillSchemaName = playbillSchemaName;
 			_playbillValues = null;
+			_writeBackTarget = null;
 		}
 
 		private ActorV2Invocation(ActorV2 actor, string scriptForChk, string script,
 			Parameters parameters, bool parametersAutoRented, bool parametersKeyed,
-			Playbill playbill, string playbillSchemaName, Parameters playbillValues)
+			Playbill playbill, string playbillSchemaName, Parameters playbillValues,
+			Parameters writeBackTarget = null)
 		{
 			_actor = actor;
 			_scriptForChk = scriptForChk;
@@ -93,6 +106,7 @@ namespace Puppeteer
 			_playbill = playbill;
 			_playbillSchemaName = playbillSchemaName;
 			_playbillValues = playbillValues;
+			_writeBackTarget = writeBackTarget;
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -117,6 +131,12 @@ namespace Puppeteer
 		// value by value into the rented set — no new allocation beyond the pooled
 		// instance, and no parameter declarations re-derived from the script. A Dispatch
 		// handler writes: receiver.Using("sink.Apply(@token);").WithParameters(env.Values).PerformCommand();
+		//
+		// source is also retained as the write-back target: because the operation runs
+		// against the pooled COPY, any Out/InOut result computed by the script would
+		// otherwise die with the copy when it returns to the pool. After Perform the
+		// Perform* methods copy those results back into source (see WriteBackOutputsFrom),
+		// so `p[name].GetValue()` on the caller's own instance observes the computed value.
 #if PUPPETEER_HIDE_INTERNALS
 		[DebuggerHidden]
 #endif
@@ -127,11 +147,17 @@ namespace Puppeteer
 			var parameters = _actor.Handler.ParametersPool.Rent(_script);
 			foreach (var p in source)
 			{
-				parameters[p.Name, p.ParameterType] = p.GetValue();
+				// Preserve the parameter MODIFIER (In/Out/InOut), not just the value. An Out
+				// or InOut slot must stay Out/InOut in the pooled copy so that Program's
+				// post-execution parameters.Clear() (which resets only In parameters to their
+				// original value) leaves the script's computed result intact for the
+				// write-back below. Copying every parameter as plain In would let Clear wipe
+				// the Out/InOut result before WriteBackOutputsFrom could read it.
+				parameters[p.ParameterModifier, p.Name, p.ParameterType] = p.GetValue();
 			}
 
 			return new ActorV2Invocation(_actor, _scriptForChk, _script, parameters, parametersAutoRented: false, parametersKeyed: true,
-				_playbill, _playbillSchemaName, _playbillValues);
+				_playbill, _playbillSchemaName, _playbillValues, writeBackTarget: source);
 		}
 
 #if PUPPETEER_HIDE_INTERNALS
@@ -200,6 +226,7 @@ namespace Puppeteer
 			try
 			{
 				string output = _actor.Handler.PerformCheckThenCmd(_scriptForChk, _script, parameters);
+				_writeBackTarget?.WriteBackOutputsFrom(parameters);
 				WritePlaybillIfNeeded();
 				return output;
 			}
@@ -244,6 +271,7 @@ namespace Puppeteer
 			try
 			{
 				string output = _actor.Handler.PerformCmd(_script, parameters);
+				_writeBackTarget?.WriteBackOutputsFrom(parameters);
 				WritePlaybillIfNeeded();
 				return output;
 			}
@@ -290,7 +318,9 @@ namespace Puppeteer
 
 			try
 			{
-				return _actor.Handler.PerformQry(_script, parameters);
+				string output = _actor.Handler.PerformQry(_script, parameters);
+				_writeBackTarget?.WriteBackOutputsFrom(parameters);
+				return output;
 			}
 			catch (Exception ex)
 			{

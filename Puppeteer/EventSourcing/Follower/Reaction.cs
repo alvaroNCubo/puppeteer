@@ -1213,15 +1213,15 @@ namespace Puppeteer.EventSourcing.Follower
 
 				_configureParameters?.Invoke(parameters);
 
-				// Optional `when:` guard. If configured, run the check
-				// first; only run the script if the check returned no
-				// error.
+				// Optional `when:` guard. If configured, run the check first; only run
+				// the script if the check did not CONDITION it, i.e. emitted no blocking
+				// EWI (Error/Warning). An advisory Information message does not skip the emit.
 				if (!string.IsNullOrEmpty(this.scriptForChk))
 				{
-					var checkResult = actorHandler.PerformChk(this.scriptForChk, parameters);
-					if (!string.IsNullOrEmpty(checkResult))
+					actorHandler.PerformChk(this.scriptForChk, parameters, out bool checkBlocked);
+					if (checkBlocked)
 					{
-						return; // check failed → skip the emit
+						return; // check conditioned the emit (Error/Warning) → skip it
 					}
 				}
 

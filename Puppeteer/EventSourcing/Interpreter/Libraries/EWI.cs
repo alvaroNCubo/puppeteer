@@ -13,6 +13,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			this.reason = reason;
 		}
 
+		// Severity semantics for check / `when:` guards: an Error or a Warning is a
+		// failure and therefore CONDITIONS (rejects) the command; an Information
+		// (rendered as "Message") is advisory and never conditions the command.
+		// Single source of truth — Output.HasBlockingEWI mirrors this at the
+		// rendered-tag level and CheckStatement.CanReject builds on it.
+		internal bool IsBlocking => this is Error || this is Warning;
+
 		internal void ValidateStatically()
 		{
 			if (!reason.ComputeType().Equals(typeof(string)))

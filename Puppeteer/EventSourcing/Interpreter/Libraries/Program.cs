@@ -63,6 +63,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal bool ReferencesNow { get; set; }
 		internal string LastExposeData { get; private set; }
 
+		// Set by the interpreted Execute() after each run: true iff the execution
+		// emitted an EWI of a blocking severity (Error/Warning). The check-then-command
+		// flow reads it right after ExecuteCheck to decide whether the command is
+		// conditioned, instead of the old "any output ⇒ block" rule (which wrongly
+		// treated an advisory Information/Message as a failure).
+		internal bool LastCheckBlocked { get; private set; }
+
 		// B.1: AST property + Expression<Func<AST>> compiled delegate. The
 		// Program IS the AST root (Program : AST). The AstFactory delegate is
 		// built from an Expression tree that captures this parsed instance and
@@ -399,6 +406,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             string result = output.ToString();
 			string exposeJson = output.GetExposeJson();
 			LastExposeData = string.IsNullOrEmpty(exposeJson) ? null : exposeJson;
+			// Capture BEFORE Return (which clears the buffers): only Error/Warning
+			// EWIs condition the command; an Information/Message does not.
+			LastCheckBlocked = output.HasBlockingEWI();
 
 			ExecutionOutput.Return(output);
 			if (clearParameters || output.HasEWIS())
@@ -712,10 +722,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             private readonly List<Id> allIds;
             private readonly HashSet<Id> parametersIds;
 			private readonly SymbolTable symbolTable;
+			private readonly bool isQuery;
 
 			internal ReferencesSolver(Program program, Parameters initialParameterSet)
             {
 				this.symbolTable = program.symbolTable;
+				this.isQuery = program.IsQuery;
 
 				// Collect LValues from assignments, excluding those that already exist as global variables
 				var lValuesFromAssignments = program.Collect<NewInstanceStatement>()
@@ -762,6 +774,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				foreach (var globalLValue in globalLValues)
 				{
 					globalLValue.Program = program;
+					RejectGlobalDeclarationInQuery(globalLValue);
 					globalLValue.DeclareAsGlobalVariable();
 					globalLValue.MarkAsLValue();
 					var symbol = symbolTable.Entry(globalLValue.Name);
@@ -783,6 +796,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 					if (id.Level == 0 && !id.IsParameter)
                     {
+                        RejectGlobalDeclarationInQuery(id);
                         id.DeclareAsGlobalVariable();
                     }
                     else if (id.Level >= programLevel && !id.IsGlobalVariable && !id.IsParameter)
@@ -937,6 +951,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					}
 				}
             }
+
+			// A query is read-only and never journaled, so it must not declare or write a
+			// top-level global variable — that would mutate actor state. This is the rule
+			// the parser used to enforce eagerly with "Global variable declarations are not
+			// allowed in queries", but the parser cannot tell a new-global declaration from
+			// an assignment to a pre-declared @Out parameter: the Lexer drops the '@' alias
+			// and the parameter set is unknown until reference resolution. By the time this
+			// runs each LValue's scope is resolved, so an Out/InOut parameter LValue is
+			// Scope.Parameter (declared earlier in the ctor) and never reaches the two
+			// DeclareAsGlobalVariable sites that call this — only genuine globals do.
+			// Restricted to Level 0 to match the original guard, which only fired at the
+			// top level (currLevel.Length == 0); assignments nested in a block were never
+			// rejected here.
+			private void RejectGlobalDeclarationInQuery(Id lValue)
+			{
+				if (isQuery && lValue.Level == 0)
+				{
+					throw new LanguageException($"Global variable declarations are not allowed in queries. Cannot assign to the global variable '{lValue.Name}' in a query because queries are read-only. If '{lValue.Name}' is meant to receive a computed result, declare it as an output parameter (Parameter.Out) and reference it as '@{lValue.Name}'.");
+				}
+			}
 
 			internal IEnumerable<Id> IdDeclarations()
 			{

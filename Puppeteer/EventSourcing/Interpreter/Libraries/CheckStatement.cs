@@ -17,6 +17,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			base.WasFiltered = true;
 		}
 
+		// True iff this check can actually reject the command: its reason is a
+		// blocking severity (Error/Warning). A check whose only reason is an
+		// Information (including `Notify Information`, which is a CheckStatement
+		// with an always-false condition) can never condition the command, so it
+		// does not count as a real guard.
+		internal bool CanReject => reason != null && reason.IsBlocking;
+
 		internal override void Execute(ExecutionOutput output)
 		{
 			object expressionValue = expression.Execute();

@@ -219,6 +219,20 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return this.writeOutput && ewis.Count > 0;
 		}
 
+		// True iff any accumulated EWI is of a blocking severity (Error/Warning).
+		// Information is rendered as "Message" (see EWI.Execute) and is advisory —
+		// it never conditions a check/`when:` guard. Mirrors EWI.IsBlocking at the
+		// rendered-tag level.
+		internal bool HasBlockingEWI()
+		{
+			if (!writeOutput) return false;
+			foreach (var ewi in ewis)
+			{
+				if (ewi.Item1 == "Error" || ewi.Item1 == "Warning") return true;
+			}
+			return false;
+		}
+
 		internal void AddEWI(string type, string value)
 		{
 			if (writeOutput) ewis.Add(new Tuple<string, string>(type, value));

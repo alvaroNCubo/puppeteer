@@ -915,8 +915,8 @@ namespace Puppeteer.EventSourcing
 			if (parserForRecovering == null) parserForRecovering = new Parser(libraries, symbolTable);
 			if (eventsQueue == null) eventsQueue = new BlockingCollection<EventData>(MAX_NORMAL_LOAD_POOL_SIZE);
 
-			BlockingCollection<Program> preparedQueue = new BlockingCollection<Program>(MAX_NORMAL_LOAD_POOL_SIZE);
-			BlockingCollection<Program> parsedQueue = new BlockingCollection<Program>(MAX_NORMAL_LOAD_POOL_SIZE);
+			BlockingCollection<RehydrationUnit> preparedQueue = new BlockingCollection<RehydrationUnit>(MAX_NORMAL_LOAD_POOL_SIZE);
+			BlockingCollection<RehydrationUnit> parsedQueue = new BlockingCollection<RehydrationUnit>(MAX_NORMAL_LOAD_POOL_SIZE);
 
 			rwLock.EnterWriteLock();
 
@@ -979,14 +979,14 @@ namespace Puppeteer.EventSourcing
 							try
 							{
 								long parseT0 = stageTiming ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-								Program rentedProgram = GenerateAndRentProgram(retornableEventData);
+								RehydrationUnit unit = GenerateAndRentProgram(retornableEventData);
 								if (stageTiming) LabInstrumentation.AddParseTicks(System.Diagnostics.Stopwatch.GetTimestamp() - parseT0);
-								// GenerateAndRentProgram returns null for orphan Invocations
-								// (actionId cache miss), an unreachable path post-Phase-4 by
-								// construction; it is silently skipped.
-								if (rentedProgram != null)
+								// GenerateAndRentProgram returns a default (null Program) unit for
+								// orphan Invocations (actionId cache miss), an unreachable path
+								// post-Phase-4 by construction; it is silently skipped.
+								if (unit.Program != null)
 								{
-									parsedQueue.Add(rentedProgram);
+									parsedQueue.Add(unit);
 								}
 							}
 							catch (Exception ex)
@@ -1022,14 +1022,24 @@ namespace Puppeteer.EventSourcing
 				{
 					try
 					{
-						foreach (Program rentedProgram in parsedQueue.GetConsumingEnumerable())
+						foreach (RehydrationUnit unit in parsedQueue.GetConsumingEnumerable())
 						{
-							long resolverEntryId = rentedProgram.EntryId;
+							Program rentedProgram = unit.Program;
+							long resolverEntryId = unit.EntryId;
 							string resolverScript = rentedProgram.Script;
 							try
 							{
 								long resolveT0 = stageTiming ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-								if (!actionCommands.ContainsAction(rentedProgram.Script))
+								if (unit.IsSharedCachedAction)
+								{
+									// Shared cached Action invocation: the per-invocation binding
+									// (LoadArguments + SolveParameters) is deferred to the single-threaded
+									// execution stage so a concurrent invocation of the same ActionId cannot
+									// clobber this one's arguments before it runs. Nothing to resolve here —
+									// references were resolved once when the Define populated the cache
+									// (AddKnownActionFromDefine).
+								}
+								else if (!actionCommands.ContainsAction(rentedProgram.Script))
 									// Rehydration = replay of events that were ALREADY statically validated
 									// when they ran live (the write path validates). Re-validating them
 									// here is redundant by definition — it would only find errors that would
@@ -1045,19 +1055,13 @@ namespace Puppeteer.EventSourcing
 									// full validation is skipped; with evals (rare) that propagation is preserved.
 									rentedProgram.SolveReferences(rentedProgram.Parameters, withStaticValidation: rentedProgram.HasEval);
 								else if (!rentedProgram.IsCompiledMode)
-									// Cached Action that will run INTERPRETED (AlwaysInterpreted actor, or a
-									// tell-bearing body). Its references were resolved once when the Define
-									// populated the cache (AddKnownActionFromDefine); rebind the @parameter Ids
-									// to THIS invocation's freshly-loaded argument values, mirroring the live
-									// interpreted cache-hit path (PrepareCommandProgram: NeedsToSolveParameters).
-									// Without this the interpreted walker (Perform -> Execute) reaches an unbound
-									// parameter Id and throws "Variable '<param>' has not been defined", skipping
-									// the invocation and silently losing its effect. Compiled cached Actions
-									// rebind lazily inside ExecuteExpression, so they are left untouched.
+									// A freshly-parsed ScriptEvent whose rendered text matches a cached
+									// Action (the promotion overlap). It owns its own Parameters, so rebinding
+									// them here is safe; mirrors the live interpreted cache-hit path.
 									rentedProgram.SolveParameters(rentedProgram.Parameters);
 								if (stageTiming) LabInstrumentation.AddResolveTicks(System.Diagnostics.Stopwatch.GetTimestamp() - resolveT0);
 
-								preparedQueue.Add(rentedProgram);
+								preparedQueue.Add(unit);
 							}
 							catch (Exception ex)
 							{
@@ -1087,14 +1091,31 @@ namespace Puppeteer.EventSourcing
 					{
 						long partialProgress = 0;
 						int fullProgressReached = 0;
-						foreach (Program rentedProgram in preparedQueue.GetConsumingEnumerable())
+						foreach (RehydrationUnit unit in preparedQueue.GetConsumingEnumerable())
 						{
-							long execEntryId = rentedProgram.EntryId;
+							Program rentedProgram = unit.Program;
+							long execEntryId = unit.EntryId;
 							string execScript = rentedProgram.Script;
 							bool executedOk = false;
 							try
 							{
 								long execT0 = stageTiming ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+								if (unit.IsSharedCachedAction)
+								{
+									// Bind THIS invocation's arguments to the shared cached program and
+									// run it, all inside this single-threaded stage. Because a later
+									// invocation of the same ActionId is still queued upstream (its args
+									// carried in its own RehydrationUnit, NOT yet applied), it cannot
+									// overwrite these values before this invocation executes — which is
+									// exactly the collapse that lost every earlier in-flight tell identity.
+									ApplyActionInvocationArguments(rentedProgram, unit.ActionArguments, unit.OccurredAt, unit.EntryId);
+									if (!rentedProgram.IsCompiledMode)
+										// Interpreted cached Action: rebind the @parameter Ids to this
+										// invocation's freshly-loaded values before the interpreted walk
+										// (previously done in the resolver stage). Compiled cached Actions
+										// rebind lazily inside ExecuteExpression.
+										rentedProgram.SolveParameters(rentedProgram.Parameters);
+								}
 								Perform(rentedProgram, rentedProgram.Parameters);
 								if (stageTiming) LabInstrumentation.AddExecuteTicks(System.Diagnostics.Stopwatch.GetTimestamp() - execT0);
 								executedOk = true;
@@ -1396,9 +1417,70 @@ namespace Puppeteer.EventSourcing
 			}
 		}
 
-		internal Program GenerateAndRentProgram(EventData eventData)
+		// One unit of work flowing through the rehydration pipeline (parse -> resolve
+		// -> exec). It distinguishes the two replay shapes because they have opposite
+		// ownership of the mutable execution state:
+		//
+		//  - ScriptEvent: a FRESH Program that OWNS its own rented Parameters. It is
+		//    safe to bind/execute it in any stage — no other unit shares it.
+		//
+		//  - Action invocation: the SHARED cached Program (one instance per ActionId,
+		//    reused across every invocation). Its Parameters must NOT be mutated in the
+		//    concurrent parse/resolve stages: multiple invocations of the same ActionId
+		//    are in flight at once, and an in-place LoadArguments for a LATER invocation
+		//    would overwrite the values an EARLIER one has not executed yet — collapsing
+		//    every replayed invocation to the last one's values (the multi-event tell
+		//    dedup bug). So the raw per-invocation arguments ride along here and are bound
+		//    to the shared Program only inside the single-threaded execution stage, where
+		//    LoadArguments -> (SolveParameters) -> Perform runs to completion for one
+		//    invocation before the next begins.
+		internal readonly struct RehydrationUnit
 		{
-			Program program;
+			internal readonly Program Program;
+			internal readonly bool IsSharedCachedAction;
+			internal readonly string ActionArguments;
+			internal readonly DateTime OccurredAt;
+			internal readonly long EntryId;
+
+			// ScriptEvent: fresh, self-owned program (Now/EntryId already applied).
+			internal RehydrationUnit(Program program, long entryId)
+			{
+				Program = program;
+				IsSharedCachedAction = false;
+				ActionArguments = null;
+				OccurredAt = default;
+				EntryId = entryId;
+			}
+
+			// Action invocation over the shared cached program: defer the per-invocation
+			// binding (args + Now + EntryId) to the execution stage.
+			internal RehydrationUnit(Program sharedProgram, string actionArguments, DateTime occurredAt, long entryId)
+			{
+				Program = sharedProgram;
+				IsSharedCachedAction = true;
+				ActionArguments = actionArguments;
+				OccurredAt = occurredAt;
+				EntryId = entryId;
+			}
+		}
+
+		// Apply a shared cached-Action invocation's per-invocation state — the argument
+		// values, the journaled Now (re-injected from OccurredAt), and the EntryId — to
+		// the shared cached Program. This MUST run single-threaded with respect to that
+		// Program: the rehydration EXEC stage and the serial follower replay both satisfy
+		// this. It is deliberately NOT called from the concurrent parse/resolve stages,
+		// where a later invocation of the same ActionId would overwrite an earlier one's
+		// arguments before it executed (the multi-event tell dedup collapse). It does not
+		// call SolveParameters — the callers add that where their execution model needs it.
+		internal void ApplyActionInvocationArguments(Program sharedProgram, string arguments, DateTime occurredAt, long entryId)
+		{
+			sharedProgram.Parameters.LoadArguments(arguments);
+			sharedProgram.Parameters["Now", typeof(DateTime)] = occurredAt;
+			sharedProgram.EntryId = entryId;
+		}
+
+		internal RehydrationUnit GenerateAndRentProgram(EventData eventData)
+		{
 			switch (eventData)
 			{
 				case ScriptEventData executable:
@@ -1407,7 +1489,7 @@ namespace Puppeteer.EventSourcing
 
 					parserForRecovering.SetSource(executable.Script);
 
-					program = parserForRecovering.Rehydrate();
+					Program program = parserForRecovering.Rehydrate();
 
 					// Symmetry with PrepareCommandProgram (ActorHandler.cs:1209): the
 					// live path always calls SetContextInfo() after parsing so that
@@ -1432,7 +1514,13 @@ namespace Puppeteer.EventSourcing
 
 					program.SolveParameters(program.Parameters);
 
-					break;
+					// Now is a SYSTEM parameter excluded from the journal; it is re-injected
+					// from the journaled OccurredAt. Safe to apply here because this program
+					// instance is exclusive to this event.
+					program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
+					program.EntryId = eventData.EntryId;
+
+					return new RehydrationUnit(program, eventData.EntryId);
 
 				case ActionEventData executable:
 
@@ -1448,28 +1536,19 @@ namespace Puppeteer.EventSourcing
 					// a null Program (subsequent code is short-circuited).
 					if (!actionCommands.TryGetValue(executable.ActionId, out CommandCacheEntry commandCache))
 					{
-						return null;
+						return default;
 					}
 
-					program = commandCache.Program;
+					// Do NOT LoadArguments into the shared cached program here. This runs in
+					// the concurrent parser stage while other invocations of the SAME ActionId
+					// are still queued for execution; an in-place mutation would clobber their
+					// not-yet-executed values. The binding is deferred to the single-threaded
+					// execution stage (see the executionTask), carrying the raw args along.
+					return new RehydrationUnit(commandCache.Program, executable.Arguments, eventData.OccurredAt, eventData.EntryId);
 
-					program.Parameters.LoadArguments(executable.Arguments);
-
-					break;
 				default:
 					throw new LanguageException($"Unsupported event data type: {eventData.GetType().Name}");
 			}
-
-			// Now is a SYSTEM parameter excluded from the journal; it is re-injected from the
-			// journaled OccurredAt for Script (V1) and Action (V2). It travels in program.Parameters
-			// up to the execution stage of the rehydration pipeline, where the first
-			// Perform runs ExecuteExpression -> SolveReferences(program.Parameters) and @Now
-			// resolves as a parameter.
-			program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
-
-			program.EntryId = eventData.EntryId;
-
-			return program;
 		}
 
 
@@ -2905,6 +2984,16 @@ namespace Puppeteer.EventSourcing
 		// and the Program structure is already resolved from the original cache miss.
 		internal string PerformChk(string script, Parameters parameters)
 		{
+			return PerformChk(script, parameters, out _);
+		}
+
+		// Overload that also reports whether the check CONDITIONS the command, i.e.
+		// whether it emitted a blocking EWI (Error/Warning). Callers that gate a
+		// command / emit on the check (PerformCheckThenCmd, reaction `when:`) must
+		// use `blocked` rather than "output non-empty", so an advisory Information
+		// message does not skip the command.
+		internal string PerformChk(string script, Parameters parameters, out bool blocked)
+		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 			ArgumentNullException.ThrowIfNull(parameters);
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
@@ -2962,6 +3051,9 @@ namespace Puppeteer.EventSourcing
 			try
 			{
 				result = program.ExecuteCheck();
+				// Read the blocking flag immediately after execution, still under the
+				// read lock — same pattern as dateOfLastActivity below.
+				blocked = program.LastCheckBlocked;
 
 				dateOfLastActivity = program.Now;
 
@@ -3014,9 +3106,11 @@ namespace Puppeteer.EventSourcing
 			if (scriptForCmd.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (scriptForChk.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Check script exceeds the maximun length");
 
-			// Phase 1: check without blocking (read lock). If it fails, the write lock is not taken.
-			var chkResult = PerformChk(scriptForChk, parameters);
-			if (!String.IsNullOrEmpty(chkResult))
+			// Phase 1: check without blocking (read lock). If it CONDITIONS the command
+			// (emitted an Error/Warning), the write lock is not taken. An advisory
+			// Information message does not condition the command.
+			var chkResult = PerformChk(scriptForChk, parameters, out bool chkBlocked);
+			if (chkBlocked)
 			{
 				return chkResult;
 			}
@@ -3094,7 +3188,7 @@ namespace Puppeteer.EventSourcing
 					{
 						// Re-check under the write lock: verify the state has not changed since phase 1
 						chkResult = programChk.ExecuteCheck();
-						if (!String.IsNullOrEmpty(chkResult))
+						if (programChk.LastCheckBlocked)
 						{
 							return chkResult;
 						}

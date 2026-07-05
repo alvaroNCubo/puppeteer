@@ -54,6 +54,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal bool HasEWIS() => printBuffer.HasEWIS();
 
+		// True iff the check emitted an EWI that conditions the command (Error/Warning).
+		internal bool HasBlockingEWI() => printBuffer.HasBlockingEWI();
+
 		public override string ToString() => GetPrintJson();
 
 		internal void OpenForEach()

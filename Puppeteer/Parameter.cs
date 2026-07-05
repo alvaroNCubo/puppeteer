@@ -338,6 +338,18 @@ namespace Puppeteer
 			}
 		}
 
+		// Post-execution write-back: store a computed result into this Out/InOut
+		// parameter's symbol, bypassing the Value setter's declaration guards. The Out
+		// setter forbids assigning a non-default value (it enforces the declaration
+		// contract `[Parameter.Out, name, type] = default(...)`); that guard does not
+		// apply here, where the framework is propagating a result back to the caller
+		// after Perform. Used by the V2 fluent WithParameters(Parameters) path, whose
+		// pool-rented copy holds the computed value the caller's instance must receive.
+		internal void WriteBackComputedValue(object value)
+		{
+			instance.value = value;
+		}
+
 		// Perf improvement B: fast path for LoadArguments. The value already arrives boxed
 		// EXACTLY as ParameterType (the journal parser produces the exact type:
 		// int.Parse->int, etc.), so ImplicitCast (a value.GetType() + chain of
