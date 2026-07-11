@@ -53,13 +53,23 @@ namespace Puppeteer
 		// without reactions.
 		public Action<Actor> ConfigureReactions { get; }
 
+		// Whether the shadow carries the primary's Playbill (audit metadata) alongside
+		// the journal replay. Default false: a shadow replays the journal only and gets
+		// NO playbill — the isolated-experiment case, where the audit envelope is noise.
+		// Set true for a forensic shadow that must reproduce who/where context: on
+		// SyncUntil, the primary's playbill schemas + records up to the replay ceiling
+		// are copied into the shadow's OWN playbill store (never the primary's). The
+		// hosting Performance must have declared a Playbill schema, else Shadow() throws.
+		public bool CarryPlaybill { get; }
+
 		public ShadowConfig(
 			string id,
 			DatabaseType shadowStorageType,
 			string shadowStorageConnection,
 			ShadowMode mode = ShadowMode.PointInTime,
 			TimeSpan? ttl = null,
-			Action<Actor> configureReactions = null)
+			Action<Actor> configureReactions = null,
+			bool carryPlaybill = false)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(id);
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(shadowStorageConnection);
@@ -72,6 +82,7 @@ namespace Puppeteer
 			this.Mode = mode;
 			this.Ttl = ttl;
 			this.ConfigureReactions = configureReactions;
+			this.CarryPlaybill = carryPlaybill;
 		}
 	}
 }

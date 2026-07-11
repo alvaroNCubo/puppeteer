@@ -2,7 +2,6 @@ using Puppeteer.Tell;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 
 namespace Puppeteer.EventSourcing.Interpreter
 {
@@ -30,6 +29,29 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// HashSet<string>-shaped appliedUpgrades dict still fits there.
 		private readonly HashSet<long> appliedImplicitTellHashes = new HashSet<long>();
 		private readonly HashSet<string> appliedExplicitTellIds = new HashSet<string>(StringComparer.Ordinal);
+
+		// Transient (per observed event): the declared parameter NAMES of the ActorV2
+		// Action a Reaction is currently matching, taken from the cached Action's
+		// AUTHORITATIVE signature. Set by the Reaction before matching an ActionEvent and
+		// read by DotAccess.GetArgumentValues to classify a $-capture placeholder: a name in
+		// this set is a DECLARED PARAMETER (a legitimate capturable position whose value is
+		// merely transiently unresolved → graceful no-match), whereas a name NOT in it is a
+		// genuine global/local VARIABLE (an authoring error → hard PatternCaptureException).
+		// The re-parsed matching program's own Parameters is NOT authoritative in the
+		// resolution-failure path (it re-parses signature-less), which is why the name set
+		// must come from the cache via this channel. A Reaction processes events
+		// sequentially, so a plain field (not thread-local) is safe.
+		internal HashSet<string> CurrentActionParameterNames { get; set; }
+
+		// Transient (per observed event): the invocation's argument VALUES for the ActorV2
+		// Action a Reaction is currently matching. Set by the Reaction before matching an
+		// ActionEvent and read by DotAccess.GetArgumentValues so an observed @parameter's
+		// value comes from the INVOCATION (the journaled Arguments) rather than from
+		// executing a bound Id on the program. Decoupling the value read from the program's
+		// per-instance parameter binding is what lets the resolved Action program be shared
+		// read-only (no clone, no re-parse) — see notes/reactions-resolution-reuse.md. Null
+		// for non-Action events (then value reads fall back to the interpreted path).
+		internal Parameters CurrentActionArguments { get; set; }
 
 		// Map from envelope.Id (the string the transport delivers in tell + ack) to
 		// the journal entry id where the originating tell sentence was persisted.
@@ -76,6 +98,18 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// in pendingTells, so it needs no recovery record. Keyed by envelope id.
 		private readonly Dictionary<string, TellRecoveryInfo> tellRecoveryByEnvelopeId = new Dictionary<string, TellRecoveryInfo>(StringComparer.Ordinal);
 
+		// Red-black takeover re-delivery: the FULL envelope of a tell reconstructed on
+		// the replay branch, retained so the node that takes over the shared journal can
+		// re-issue a still-pending tell at UnlockAndRunAlive (the outgoing node may have
+		// powered off before its transport flushed the send buffer). Distinct from
+		// tellRecoveryByEnvelopeId, which keeps only the logical verdict facts: re-issuing
+		// needs the whole envelope (message, ordered values, addressee, check). Populated
+		// on the RecoveringState branch only; snapshotted by ActorHandler.ReissuePendingTells
+		// at takeover. The lock guards the dictionary against the background catch-up loop
+		// (which may still be replaying) racing the takeover collect on the host thread.
+		private readonly Dictionary<string, TellEnvelope> reissueEnvelopeByEnvelopeId = new Dictionary<string, TellEnvelope>(StringComparer.Ordinal);
+		private readonly object tellReissueLock = new object();
+
 		// Buffer of TellEnvelope produced during program.Execute(). The handler drains
 		// it post-journal-write, outside the actor's write lock, so transport latency
 		// does not block subsequent commands. Plan 5 introduces the buffer; Plan 6
@@ -115,6 +149,17 @@ namespace Puppeteer.EventSourcing.Interpreter
 		// ActorHandler.CausationTellCheck sets/clears it around that PerformCmd.
 		// It is not evaluated here; it travels to the receiver to run as CheckThenCommand.
 		internal string CurrentCausationCheck { get; set; }
+
+		// Transient causal provenance of the Reaction whose Causation body is running:
+		// the identifier of the journal entry that triggered the Reaction, and the
+		// Reaction's name. TellStatement.Execute stamps them onto the TellEnvelope so a
+		// tell carries an EXPLICIT back-reference to the act that caused it (the causal
+		// edge that today is only inferable from journal order + which Reaction fired).
+		// This is the durable causal identity of the utterance — the anchor of
+		// tell-native observability. ActorHandler.CausationTell* set/clear these around
+		// the body's PerformCmd, mirroring CurrentCausationCheck.
+		internal string CurrentCausationCausalEventId { get; set; }
+		internal string CurrentCausationReactionName { get; set; }
 
 		internal IEnumerable<string> Symbols
 		{
@@ -220,17 +265,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		internal static VariableSymbol IsolatedStorage(string name)
 		{
 			return IsolatedStorage(name, null, typeof(object));
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		internal static VariableSymbol IsolatedStorage(string name, object value, Type type)
 		{
 			VariableSymbol s = new VariableSymbol(name, value, type);
@@ -431,6 +470,41 @@ namespace Puppeteer.EventSourcing.Interpreter
 			return pending;
 		}
 
+		// Retain the full envelope of a replayed tell so a red-black takeover can
+		// re-issue it. Called on the RecoveringState branch only. Idempotent:
+		// re-registering the same id overwrites with an identical envelope.
+		internal void RegisterReissueEnvelope(string envelopeId, TellEnvelope envelope)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(envelopeId);
+			lock (tellReissueLock)
+			{
+				reissueEnvelopeByEnvelopeId[envelopeId] = envelope;
+			}
+		}
+
+		// The still-PENDING tells reconstructed from the journal, as full envelopes:
+		// those captured during replay whose id is neither acked nor not-delivered. This
+		// is the set a takeover (UnlockAndRunAlive) re-issues through the transport;
+		// idempotent at the addressee via the tell's `once` id. Snapshots the dictionary
+		// under the lock (the background catch-up loop may still register more) and then
+		// filters, so the caller never enumerates a dictionary being mutated.
+		internal IReadOnlyList<TellEnvelope> CollectPendingReissueEnvelopes()
+		{
+			List<KeyValuePair<string, TellEnvelope>> snapshot;
+			lock (tellReissueLock)
+			{
+				snapshot = new List<KeyValuePair<string, TellEnvelope>>(reissueEnvelopeByEnvelopeId);
+			}
+			List<TellEnvelope> pending = new List<TellEnvelope>();
+			foreach (KeyValuePair<string, TellEnvelope> entry in snapshot)
+			{
+				if (ackedTellEnvelopeIds.Contains(entry.Key)) continue;
+				if (notDeliveredTellEnvelopeIds.Contains(entry.Key)) continue;
+				pending.Add(entry.Value);
+			}
+			return pending;
+		}
+
 		internal void EnqueuePendingTell(TellEnvelope envelope)
 		{
 			pendingTells.Enqueue(envelope);
@@ -450,9 +524,6 @@ namespace Puppeteer.EventSourcing.Interpreter
 		internal object value;
 		internal Type type;
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		internal VariableSymbol(string name, object value, Type type)
 		{
 			this.name = name;

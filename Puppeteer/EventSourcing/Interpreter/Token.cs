@@ -59,6 +59,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		lBracket,
 		rBracket,
 		ellipsis,
+		range,
 		question
 	}
 

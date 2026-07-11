@@ -90,25 +90,39 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 		{
 			using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, READ_BUFFER_SIZE, FileOptions.SequentialScan))
 			{
-				if (fs.Length < JournalWriter.HEADER_SIZE) return lastProcessedEntryId;
+				// Snapshot the file length ONCE. FileStream.Length is not free here: the
+				// handle is opened FileShare.ReadWrite (a writer may still hold it), so .NET
+				// re-queries the OS for the size on every getter instead of trusting a cached
+				// value. Reading it per record — plus fs.Position in the loop condition and the
+				// bounds check — cost ~2 syscalls per record (the dominant per-event read cost:
+				// ~0.8us/record => ~80ms per 100k). We instead track the logical position in
+				// `pos` and compare against the snapshot. This reads the consistent prefix that
+				// existed when the file was opened; any records appended during the read are
+				// picked up by the follower's catch-up pass (ReplayPendingEventsForRedBlack),
+				// exactly as before — ReadAll already snapshots the index up front.
+				long fileLength = fs.Length;
+				if (fileLength < JournalWriter.HEADER_SIZE) return lastProcessedEntryId;
 				fs.Seek(JournalWriter.HEADER_SIZE, SeekOrigin.Begin);
 
-				while (fs.Position < fs.Length)
+				long pos = JournalWriter.HEADER_SIZE;
+				Span<byte> lenBuf = stackalloc byte[4];
+				while (pos < fileLength)
 				{
 					if (canContinue != null && !canContinue()) break;
 
-					byte[] lenBuf = new byte[4];
-					int read = fs.Read(lenBuf, 0, 4);
+					int read = fs.Read(lenBuf);
 					if (read < 4) break;
+					pos += 4;
 
-					int recordLen = BitConverter.ToInt32(lenBuf, 0);
-					if (recordLen <= 0 || fs.Position + recordLen > fs.Length) break;
+					int recordLen = BitConverter.ToInt32(lenBuf);
+					if (recordLen <= 0 || pos + recordLen > fileLength) break;
 
 					byte[] recordBody = ArrayPool<byte>.Shared.Rent(recordLen);
 					try
 					{
 						read = fs.Read(recordBody, 0, recordLen);
 						if (read < recordLen) break;
+						pos += recordLen;
 
 						if (!BinaryEventCodec.ValidateCrc(recordBody, recordLen))
 						{
@@ -117,7 +131,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 							// IPuppeteerLogger.Error so it is visible on stderr (ConsoleLogger
 							// default) or on the sink the host injected via Performance.Logger(...).
 							client.Logger.Error(
-								$"[REHYDRATION] CRC mismatch in file {filePath} at position {fs.Position - recordLen}. Skipping rest of file.",
+								$"[REHYDRATION] CRC mismatch in file {filePath} at position {pos - recordLen}. Skipping rest of file.",
 								new System.IO.InvalidDataException("CRC mismatch detected"));
 							break;
 						}

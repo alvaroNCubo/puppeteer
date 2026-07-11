@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Puppeteer;
 using Puppeteer.EventSourcing.Follower;
+using Puppeteer.EventSourcing.Playbill;
 
 namespace Choreography.Theater
 {
@@ -29,10 +30,26 @@ namespace Choreography.Theater
         private readonly List<Task> reactionTasks = new List<Task>();
         private bool disposed;
 
+        // Playbill carry (opt-in via ShadowConfig.CarryPlaybill). Both null when off.
+        private Playbill primaryPlaybill;
+        private Playbill shadowPlaybill;
+
         internal ShadowPerformance(Puppeteer.Shadow shadow)
         {
             this.shadow = shadow ?? throw new ArgumentNullException(nameof(shadow));
         }
+
+        // Wired by Performance.Shadow when ShadowConfig.CarryPlaybill is on: `source` is
+        // the primary's playbill, `target` the shadow's own (shadow name + shadow storage).
+        internal void EnablePlaybillCarry(Playbill source, Playbill target)
+        {
+            primaryPlaybill = source ?? throw new ArgumentNullException(nameof(source));
+            shadowPlaybill = target ?? throw new ArgumentNullException(nameof(target));
+        }
+
+        // The shadow's own playbill when CarryPlaybill is on; null otherwise. Lets a
+        // forensic caller query the carried audit context after SyncUntil.
+        public Playbill CarriedPlaybill => shadowPlaybill;
 
         // The underlying shadow actor (V1/V2 family same as the primary). Exposed to
         // declare experimental reactions and, in V1, to drive it directly.
@@ -81,6 +98,34 @@ namespace Choreography.Theater
         {
             ThrowIfDisposed();
             shadow.SyncUntil(toEntryId);
+            CopyCarriedPlaybill(toEntryId);
+        }
+
+        // When CarryPlaybill is on, copy the primary's playbill schemas + the records up
+        // to the replay ceiling into the shadow's own playbill store. Records above the
+        // ceiling are skipped (they are not part of what the shadow replayed). Idempotent:
+        // a duplicate EntryId on a re-sync is swallowed, mirroring the Phase 5 apply path.
+        private void CopyCarriedPlaybill(long toEntryId)
+        {
+            if (shadowPlaybill == null) return; // carry not enabled (default)
+
+            foreach (var (name, declarations) in primaryPlaybill.ListSchemas())
+                shadowPlaybill.RegisterSchema(name, declarations); // idempotent by contract
+
+            var records = new List<PlaybillRecord>();
+            primaryPlaybill.ReadRecordsAfter(0, records);
+            foreach (var record in records)
+            {
+                if (record.EntryId > toEntryId) continue;
+                try
+                {
+                    shadowPlaybill.WriteRecordRaw(record.EntryId, record.SchemaName, record.SerializedParameters);
+                }
+                catch (LanguageException)
+                {
+                    // Duplicate EntryId (re-sync) or unknown schema — idempotent, skip.
+                }
+            }
         }
 
         // S2 — Continuous shadowing. STUB in S1.

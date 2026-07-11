@@ -83,6 +83,15 @@ namespace Puppeteer
             set { handler.SuppressReactionJournaling = value; }
         }
 
+        // Passthrough so the hosting layer (Choreography, without InternalsVisibleTo
+        // of Puppeteer) can fence the actor on join and lift it on handover. IsAlive
+        // reads through to this gate, keeping readiness single-sourced in the core.
+        public bool Fenced
+        {
+            get { return handler.Fenced; }
+            set { handler.Fenced = value; }
+        }
+
         // Wrapper so Choreography (without InternalsVisibleTo of Puppeteer)
         // can configure the live-role provider used by the ReactionActivation
         // gate. The P2P Stage passes () => IsDirector; the Theater Performance
@@ -244,6 +253,11 @@ namespace Puppeteer
         }
 
         public bool IsAlive => handler.IsAlive;
+
+        // Diagnostics: true when a red-black catch-up was suspended because the joining
+        // version could not re-apply a journaled Action. Lets a host distinguish "still
+        // catching up" from "suspended" for readiness/alerting.
+        public bool CatchUpFailed => handler.CatchUpFailed;
 
         public string LockWhileNotSyncronized()
         {

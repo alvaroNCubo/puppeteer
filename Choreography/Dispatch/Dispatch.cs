@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Choreography.Input;
 using Choreography.Observability;
+using Choreography.Transport.Brokered;
 using Puppeteer;
 
 namespace Choreography.Dispatch
@@ -106,6 +107,14 @@ namespace Choreography.Dispatch
         // the origin de-duplicates the ack by tell id.
         public void Receive(string messageId, string rawMessage, Action<bool> onCompleted)
         {
+            Receive(messageId, rawMessage, onCompleted, traceContext: null);
+        }
+
+        // Overload that additionally carries the W3C trace context extracted from the
+        // input medium (ephemeral observability). When non-null it re-parents the
+        // handler span onto the upstream producer's trace; never journaled.
+        internal void Receive(string messageId, string rawMessage, Action<bool> onCompleted, string traceContext)
+        {
             ArgumentNullException.ThrowIfNull(messageId);
             ArgumentNullException.ThrowIfNull(rawMessage);
             if (rawMessage.Length == 0) throw new ArgumentException("Message cannot be empty", nameof(rawMessage));
@@ -123,7 +132,7 @@ namespace Choreography.Dispatch
             if (!handlers.TryGetValue(typeId, out var handler))
                 throw new LanguageException($"No handler registered for message type {typeId}");
 
-            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, null, null, null, onCompleted);
+            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, null, null, null, onCompleted, traceContext);
             workQueue.Add(workItem);
         }
 
@@ -169,7 +178,13 @@ namespace Choreography.Dispatch
                 if (command is not DispatchCommand cmd) return;   // routing dropped it
                 if (cmd.MessageId == null || string.IsNullOrEmpty(cmd.RawMessage)) return;
 
-                Receive(cmd.MessageId, cmd.RawMessage);
+                // Carry any W3C trace context the medium delivered in the signal headers
+                // so a Kafka-fed handler continues the upstream producer's trace. Generic
+                // (header lookup), not Kafka-specific; absent -> no re-parent.
+                string traceContext = null;
+                signal.Headers?.TryGetValue(BrokerTellWire.HeaderTraceParent, out traceContext);
+
+                Receive(cmd.MessageId, cmd.RawMessage, onCompleted: null, traceContext: traceContext);
             });
 
             sourceSubscriptions.Add(subscription);
@@ -195,7 +210,7 @@ namespace Choreography.Dispatch
             if (!handlers.TryGetValue(typeId, out var handler))
                 throw new LanguageException($"No handler registered for message type {typeId}");
 
-            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, sagaName, stepName, instanceKey, null);
+            var workItem = new DispatchWorkItem(handler, rawMessage, messageId, sagaName, stepName, instanceKey, null, null);
             workQueue.Add(workItem);
         }
 
@@ -238,7 +253,8 @@ namespace Choreography.Dispatch
                 workItem.Handler.HandlerName,
                 workItem.SagaName,
                 workItem.StepName,
-                workItem.InstanceKey);
+                workItem.InstanceKey,
+                workItem.TraceContext);
 
             bool succeeded = false;
             try
@@ -317,9 +333,12 @@ namespace Choreography.Dispatch
             internal readonly string StepName;
             internal readonly string InstanceKey;
             internal readonly Action<bool> OnCompleted;
+            // Ephemeral W3C trace context from the input medium; null when tracing is
+            // off or the signal carried none. Used only to re-parent the handler span.
+            internal readonly string TraceContext;
 
             internal DispatchWorkItem(IDispatchHandler handler, string rawMessage, string messageId,
-                string sagaName, string stepName, string instanceKey, Action<bool> onCompleted)
+                string sagaName, string stepName, string instanceKey, Action<bool> onCompleted, string traceContext)
             {
                 Handler = handler;
                 RawMessage = rawMessage;
@@ -328,6 +347,7 @@ namespace Choreography.Dispatch
                 StepName = stepName;
                 InstanceKey = instanceKey;
                 OnCompleted = onCompleted;
+                TraceContext = traceContext;
             }
         }
     }

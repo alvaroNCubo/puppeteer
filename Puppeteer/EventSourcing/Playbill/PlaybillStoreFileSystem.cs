@@ -39,6 +39,8 @@ namespace Puppeteer.EventSourcing.Playbill
 		internal PlaybillStoreFileSystem(string actorName, string connectionString, IPuppeteerLogger logger)
 			: base(actorName, connectionString, logger)
 		{
+			StorageActorName.ValidateFileSystemName(actorName);
+
 			var parsed = new FileSystemConnectionString(connectionString);
 			string actorBase = Path.Combine(parsed.Path, actorName);
 			this.playbillDir = Path.Combine(actorBase, "playbill");

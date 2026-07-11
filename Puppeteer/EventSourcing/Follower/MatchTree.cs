@@ -458,6 +458,9 @@ namespace Puppeteer.EventSourcing.Follower
 				engine.IncrementSeekEntered();
 
 				var parameters = actorHandler.ParametersPool.Rent();
+				// Lifecycle guard (see TryMatchAtRoot): once transferred to a node, PruneNode is the
+				// bag's sole releaser; the catch must not return it again.
+				bool bagHandled = false;
 				try
 				{
 					// Copy the accumulated parameters from the parent.
@@ -494,6 +497,7 @@ namespace Puppeteer.EventSourcing.Follower
 						child.EntryId = eventData.EntryId;
 						child.OccurredAt = eventData.OccurredAt;
 						child.CapturedParams = parameters;
+						bagHandled = true; // child owns the bag now; its lifecycle is PruneNode's
 						child.Engine = engine;
 						child.CurrentDepth = level;
 						child.Parent = node;
@@ -523,12 +527,16 @@ namespace Puppeteer.EventSourcing.Follower
 						// Early pruning: no match, return parameters to the pool.
 						parameters.PurgeUserParameters();
 						actorHandler.ParametersPool.Return(parameters);
+						bagHandled = true;
 					}
 				}
 				catch
 				{
-					parameters.PurgeUserParameters();
-					actorHandler.ParametersPool.Return(parameters);
+					if (!bagHandled)
+					{
+						parameters.PurgeUserParameters();
+						actorHandler.ParametersPool.Return(parameters);
+					}
 					throw;
 				}
 			}
@@ -556,6 +564,11 @@ namespace Puppeteer.EventSourcing.Follower
 			engine.IncrementSeekEntered();
 
 			var parameters = actorHandler.ParametersPool.Rent();
+			// Lifecycle guard: once this bag is transferred to a MatchNode (node.CapturedParams),
+			// the NODE owns it and PruneNode returns it to the pool EXACTLY ONCE. The catch below
+			// must then NOT return it again — a double-return plants a duplicate on the pool free
+			// list, which a later Rent hands to two owners at once, wiping a live node's captures.
+			bool bagHandled = false;
 			try
 			{
 				bool allMatched = true;
@@ -590,6 +603,7 @@ namespace Puppeteer.EventSourcing.Follower
 					node.EntryId = eventData.EntryId;
 					node.OccurredAt = eventData.OccurredAt;
 					node.CapturedParams = parameters;
+					bagHandled = true; // node owns the bag now; its lifecycle is PruneNode's
 					node.Engine = engine;
 					node.CurrentDepth = 0;
 					node.Parent = null;
@@ -613,7 +627,19 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 						System.Diagnostics.Debug.WriteLine($"[MatchTree] COMPLETE MATCH (single engine) at EntryId={eventData.EntryId}, IsFinalSeek={isFinalSeek}");
 #endif
-						ExecuteCompleteMatch(node);
+						try
+						{
+							ExecuteCompleteMatch(node);
+						}
+						catch
+						{
+							// The matched node's action failed. Prune the node so its bag returns to
+							// the pool EXACTLY ONCE and it stops referencing a pooled instance that a
+							// later stale-prune would return a second time (the double-return that
+							// corrupts the pool). Retry is driven by the unconfirmed checkpoint.
+							PruneNode(node);
+							throw;
+						}
 					}
 				}
 				else
@@ -624,13 +650,18 @@ namespace Puppeteer.EventSourcing.Follower
 					// No match: return parameters to the pool.
 					parameters.PurgeUserParameters();
 					actorHandler.ParametersPool.Return(parameters);
+					bagHandled = true;
 				}
 			}
 			catch
 			{
-				// On error, make sure parameters are returned to the pool.
-				parameters.PurgeUserParameters();
-				actorHandler.ParametersPool.Return(parameters);
+				// Return the bag ONLY if it was not transferred to a node (a pre-node failure).
+				// Once a node owns it, PruneNode is its sole releaser.
+				if (!bagHandled)
+				{
+					parameters.PurgeUserParameters();
+					actorHandler.ParametersPool.Return(parameters);
+				}
 				throw;
 			}
 		}
@@ -645,6 +676,10 @@ namespace Puppeteer.EventSourcing.Follower
 			engine.IncrementSeekEntered();
 
 			var parameters = actorHandler.ParametersPool.Rent();
+			// Lifecycle guard (see TryMatchAtRoot): the catch must not return `parameters` once it
+			// has been returned already (folded into an existing Many node) or transferred to a new
+			// node — a double-return corrupts the shared pool.
+			bool bagHandled = false;
 			try
 			{
 				if (parent != null)
@@ -718,6 +753,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 					parameters.PurgeUserParameters();
 					actorHandler.ParametersPool.Return(parameters);
+					bagHandled = true; // folded into the existing Many node; do not return again in catch
 
 					if (coverage)
 					{
@@ -748,6 +784,7 @@ namespace Puppeteer.EventSourcing.Follower
 				node.EntryId = eventData.EntryId;
 				node.OccurredAt = eventData.OccurredAt;
 				node.CapturedParams = parameters;
+				bagHandled = true; // node owns the bag now; its lifecycle is PruneNode's
 				node.Engine = engine;
 				node.CurrentDepth = level;
 				node.Parent = parent;
@@ -786,8 +823,11 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			catch
 			{
-				parameters.PurgeUserParameters();
-				actorHandler.ParametersPool.Return(parameters);
+				if (!bagHandled)
+				{
+					parameters.PurgeUserParameters();
+					actorHandler.ParametersPool.Return(parameters);
+				}
 				throw;
 			}
 		}
@@ -1160,6 +1200,9 @@ namespace Puppeteer.EventSourcing.Follower
 				engine.IncrementSeekEntered();
 
 				var parameters = actorHandler.ParametersPool.Rent();
+				// Lifecycle guard (see TryMatchAtRoot): once transferred to a node, PruneNode is the
+				// bag's sole releaser; the catch must not return it again.
+				bool bagHandled = false;
 				try
 				{
 					// Copy the accumulated parameters from the parent.
@@ -1196,6 +1239,7 @@ namespace Puppeteer.EventSourcing.Follower
 						child.EntryId = eventData.EntryId;
 						child.OccurredAt = eventData.OccurredAt;
 						child.CapturedParams = parameters;
+						bagHandled = true; // child owns the bag now; its lifecycle is PruneNode's
 						child.Engine = engine;
 						child.CurrentDepth = level;
 						child.Parent = node;
@@ -1225,12 +1269,16 @@ namespace Puppeteer.EventSourcing.Follower
 						// No match: return parameters to the pool.
 						parameters.PurgeUserParameters();
 						actorHandler.ParametersPool.Return(parameters);
+						bagHandled = true;
 					}
 				}
 				catch
 				{
-					parameters.PurgeUserParameters();
-					actorHandler.ParametersPool.Return(parameters);
+					if (!bagHandled)
+					{
+						parameters.PurgeUserParameters();
+						actorHandler.ParametersPool.Return(parameters);
+					}
 					throw;
 				}
 			}
@@ -1373,6 +1421,7 @@ namespace Puppeteer.EventSourcing.Follower
 			try
 			{
 				CollectAllParametersFromChain(leafNode, allParameters);
+
 
 #if DEBUG
 				if (reactionAction.ActionType == ReactionActionType.Metadata && reactionAction.MetadataKind == MetadataKind.Elide)
@@ -1893,6 +1942,7 @@ namespace Puppeteer.EventSourcing.Follower
 				destination[param.Name, param.ParameterType] = param.GetValue();
 			}
 		}
+
 
 		// PHASE 2: walks the Parent chain until it finds a MatchNode whose engine has the given name.
 		private static MatchNode FindAncestorBySeekName(MatchNode start, string seekName)

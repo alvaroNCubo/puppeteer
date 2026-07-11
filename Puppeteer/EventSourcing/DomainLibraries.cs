@@ -198,6 +198,11 @@ namespace Puppeteer.EventSourcing
 
 		internal int TypeCount => typesByName.Count;
 
+		// All domain types known to the library (one per distinct simple name, first-wins).
+		// Used by static pattern validation to scan a receiver type's descendants and the
+		// static classes that may declare extension methods over it.
+		internal IEnumerable<Type> AllTypes => typesByName.Values;
+
 		// Simple names of the assemblies ingested into this library. Used only by
 		// NewInstance diagnostics when reporting a missing class.
 		internal IReadOnlyList<string> LoadedAssemblyNames => ingestedAssemblyNames;

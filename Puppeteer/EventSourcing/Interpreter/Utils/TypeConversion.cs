@@ -31,6 +31,31 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 			{
 				result = System.Decimal.ToDouble((decimal)value);
 			}
+			// string -> char: a DTO often carries a char as a single-character string. A length-1
+			// string coerces to its one char; any other length is a clear error (never a silent
+			// truncation). Mirrors the string<->enum coercion applied at the parameter boundary.
+			else if (actual == typeof(string) && target == typeof(char))
+			{
+				result = StringToChar((string)value);
+			}
+			// Collection analog: string[] / List<string> / IEnumerable<string> -> char[] or List<char>,
+			// coercing each element the same way (length-1 per element, else a clear error). Guarded on a
+			// string element source so a List<char>/char[] source falls through to the generic handling below.
+			else if (target.IsArray && target.GetElementType() == typeof(char) && IsStringCollection(actual))
+			{
+				List<char> chars = new List<char>();
+				foreach (var element in (IEnumerable)value) chars.Add(StringToChar((string)element));
+				char[] res = new char[chars.Count];
+				for (int i = 0; i < chars.Count; i++) res[i] = chars[i];
+				return res;
+			}
+			else if (target.IsGenericType && target.GetGenericTypeDefinition() == typeof(List<>)
+					 && target.GetGenericArguments()[0] == typeof(char) && IsStringCollection(actual))
+			{
+				List<char> res = new List<char>();
+				foreach (var element in (IEnumerable)value) res.Add(StringToChar((string)element));
+				return res;
+			}
 			else if (target.IsArray && actual == typeof(List<int>))
 			{
 				List<int> typedValue = value as List<int>;
@@ -226,6 +251,28 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 				result = value;
 			}
 			return result;
+		}
+
+		// True when the value is a collection whose element type is string (string[], List<string>,
+		// IEnumerable<string>, ...) — the sources we coerce element-wise into a char collection. A
+		// bare string is itself IEnumerable<char>, so it is explicitly excluded.
+		private static bool IsStringCollection(Type actual)
+		{
+			if (actual == typeof(string)) return false;
+			if (actual.IsArray) return actual.GetElementType() == typeof(string);
+			if (actual.IsGenericType && actual.GetGenericArguments().Length == 1)
+				return actual.GetGenericArguments()[0] == typeof(string) && typeof(IEnumerable).IsAssignableFrom(actual);
+			return false;
+		}
+
+		// A single-character string -> its char. Any other length (0 or >1) is a clear
+		// LanguageException rather than a silent truncation to the first character.
+		internal static char StringToChar(string value)
+		{
+			if (value == null) throw new LanguageException("Cannot convert a null string to char.");
+			if (value.Length != 1)
+				throw new LanguageException($"Cannot convert the string \"{value}\" to a single character: expected exactly 1 character but got {value.Length}.");
+			return value[0];
 		}
 
 		private static bool IsNumeric(Type t)

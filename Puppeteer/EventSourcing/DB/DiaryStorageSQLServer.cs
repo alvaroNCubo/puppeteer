@@ -30,6 +30,8 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal DiaryStorageSQLServer(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
 		{
+			StorageActorName.ValidateSqlIdentifier(Name, "SQL Server");
+
 			sqlServerWriteScriptCommand = "insert into " + Name + " (id, OccurredAt,Script) values (@id, @OccurredAt,@script)";
 
 			// Define rows materialise the action's Statement directly inside the

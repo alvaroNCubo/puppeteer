@@ -20,14 +20,14 @@
 -- -----------------------------------------------------------------------------
 -- Step 1: Create Playbill tables (idempotent)
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS PlaybillSchemas (
+CREATE TABLE IF NOT EXISTS `<ActorName>_PlaybillSchemas` (
     SchemaName    VARCHAR(64)    NOT NULL,
     Declarations  VARCHAR(2000)  NOT NULL,
     CreatedAt     DATETIME       NOT NULL,
     PRIMARY KEY (SchemaName)
 ) ENGINE=InnoDB CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS PlaybillRecords (
+CREATE TABLE IF NOT EXISTS `<ActorName>_PlaybillRecords` (
     EntryId               BIGINT         NOT NULL,
     SchemaName            VARCHAR(64)    NOT NULL,
     SerializedParameters  VARCHAR(2000)  NOT NULL,
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS PlaybillRecords (
 -- -----------------------------------------------------------------------------
 -- Step 2: Register the "RestApi" schema (idempotent via INSERT IGNORE)
 -- -----------------------------------------------------------------------------
-INSERT IGNORE INTO PlaybillSchemas (SchemaName, Declarations, CreatedAt)
+INSERT IGNORE INTO `<ActorName>_PlaybillSchemas` (SchemaName, Declarations, CreatedAt)
 VALUES ('RestApi', 'In,ip:string,In,user:string', NOW());
 
 
@@ -63,7 +63,7 @@ VALUES ('RestApi', 'In,ip:string,In,user:string', NOW());
 -- INSERT IGNORE skips rows where the EntryId already has a PlaybillRecord
 -- (idempotent re-run safe).
 -- -----------------------------------------------------------------------------
-INSERT IGNORE INTO PlaybillRecords (EntryId, SchemaName, SerializedParameters)
+INSERT IGNORE INTO `<ActorName>_PlaybillRecords` (EntryId, SchemaName, SerializedParameters)
 SELECT
     id AS EntryId,
     'RestApi' AS SchemaName,
@@ -97,6 +97,6 @@ WHERE Ip IS NOT NULL OR `User` IS NOT NULL;
 -- -----------------------------------------------------------------------------
 -- SELECT COUNT(*) AS LegacyRowsWithIpOrUser FROM `<ActorName>`
 --   WHERE Ip IS NOT NULL OR `User` IS NOT NULL;
--- SELECT COUNT(*) AS PlaybillRecordsForRestApi FROM PlaybillRecords
+-- SELECT COUNT(*) AS PlaybillRecordsForRestApi FROM `<ActorName>_PlaybillRecords`
 --   WHERE SchemaName = 'RestApi';
 -- -- Both counts should match (modulo any pre-existing PlaybillRecords).

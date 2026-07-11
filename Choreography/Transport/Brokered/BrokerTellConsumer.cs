@@ -17,7 +17,13 @@ namespace Choreography.Transport.Brokered
 		string Addressee,
 		string AddresseeInstanceId,
 		string Arguments,
-		string Check);
+		string Check,
+		// W3C trace context extracted off the wire (ephemeral observability). When
+		// present, the receiver opens its uptake span as a CHILD of this remote trace
+		// so the sender's and receiver's work share ONE distributed trace. Null when
+		// the sender injected none (tracing off). Never journaled.
+		string TraceParent = null,
+		string TraceState = null);
 
 	// Receiver (B) side of a broker tell conversation: consumes the tell topic
 	// through an IInputSource, hands each tell to the host's handler, and — only
@@ -48,31 +54,39 @@ namespace Choreography.Transport.Brokered
 		private readonly IInputSource source;
 		private readonly string ackTopic;
 		private readonly IPuppeteerLogger logger;
+
+		// Decodes the record value back into the ordered-arguments string the host
+		// applies to its command. MUST be the same codec the origin's
+		// BrokerTellTransport encoded with, so the payload round-trips A -> B.
+		// Defaults to today's behaviour (the wire value is the arguments verbatim).
+		private readonly ITellPayloadCodec codec;
 		private readonly object startLock = new object();
 		private IDisposable subscription;
 		private bool disposed;
 
 		// Convenience binding to a broker topic: the receiver draws from a
 		// BrokerInputSource over the broker, and acks back onto the same broker.
-		public BrokerTellConsumer(IMessageBroker broker, string topic, IPuppeteerLogger logger = null)
+		public BrokerTellConsumer(IMessageBroker broker, string topic, IPuppeteerLogger logger = null, ITellPayloadCodec payloadCodec = null)
 		{
 			this.broker = broker ?? throw new ArgumentNullException(nameof(broker));
 			ArgumentException.ThrowIfNullOrWhiteSpace(topic);
 			this.ackTopic = BrokerTellWire.AckTopicOf(topic);
 			this.logger = logger;
 			this.source = new BrokerInputSource(broker, topic);
+			this.codec = payloadCodec ?? DefaultTellPayloadCodec.Instance;
 		}
 
 		// Explicit-seam binding: consume from any IInputSource, ack onto the given
 		// broker/topic. Lets a host compose a different input medium (or a decorated
 		// source) while keeping Tell's ack-after-commit contract.
-		public BrokerTellConsumer(IInputSource source, IMessageBroker ackBroker, string ackTopic, IPuppeteerLogger logger = null)
+		public BrokerTellConsumer(IInputSource source, IMessageBroker ackBroker, string ackTopic, IPuppeteerLogger logger = null, ITellPayloadCodec payloadCodec = null)
 		{
 			this.source = source ?? throw new ArgumentNullException(nameof(source));
 			this.broker = ackBroker ?? throw new ArgumentNullException(nameof(ackBroker));
 			ArgumentException.ThrowIfNullOrWhiteSpace(ackTopic);
 			this.ackTopic = ackTopic;
 			this.logger = logger;
+			this.codec = payloadCodec ?? DefaultTellPayloadCodec.Instance;
 		}
 
 		// Register the host's receiver. The handler applies the tell's arguments to
@@ -142,7 +156,7 @@ namespace Choreography.Transport.Brokered
 				&& kind == BrokerTellWire.KindTell;
 		}
 
-		private static ReceivedTell ToReceived(InputSignal signal)
+		private ReceivedTell ToReceived(InputSignal signal)
 		{
 			IReadOnlyDictionary<string, string> h = signal.Headers;
 			return new ReceivedTell(
@@ -150,8 +164,10 @@ namespace Choreography.Transport.Brokered
 				MessageName: Header(h, BrokerTellWire.HeaderMessage),
 				Addressee: Header(h, BrokerTellWire.HeaderAddressee),
 				AddresseeInstanceId: Header(h, BrokerTellWire.HeaderAddresseeInstance),
-				Arguments: signal.Value,
-				Check: Header(h, BrokerTellWire.HeaderCheck));
+				Arguments: codec.Decode(signal.Value),
+				Check: Header(h, BrokerTellWire.HeaderCheck),
+				TraceParent: Header(h, BrokerTellWire.HeaderTraceParent),
+				TraceState: Header(h, BrokerTellWire.HeaderTraceState));
 		}
 
 		private static string Header(IReadOnlyDictionary<string, string> headers, string key)

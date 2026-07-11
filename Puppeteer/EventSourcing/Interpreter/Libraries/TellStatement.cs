@@ -361,11 +361,37 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			patternAst.RegisterTellStatement(MessageName, Addressee, instanceValue, withValues, envelopeId, position++);
 		}
 
+		// Build the outbound envelope for this utterance. Used by both the live branch
+		// (enqueued to PendingTells for post-commit delivery) and the replay branch
+		// (retained for a possible red-black takeover re-delivery, never enqueued). The
+		// `with` VALUES resolve from Program.Parameters, which replay has already loaded
+		// with the journaled invocation arguments — so a replay-built envelope carries
+		// the same payload the live one did.
+		private TellEnvelope BuildEnvelope(string envelopeId, object instanceValue)
+		{
+			return new TellEnvelope(
+				Id: envelopeId,
+				MessageName: MessageName,
+				Addressee: Addressee,
+				AddresseeInstanceId: instanceValue?.ToString(),
+				// Explicit causal back-reference: the entry that triggered the Reaction
+				// whose body emitted this tell, and that Reaction's name. Set by
+				// ExecuteCausation around this PerformCmd; null when the tell is not
+				// emitted from a Causation body. This is the durable causal identity of
+				// the utterance — the anchor of tell-native observability.
+				CausalEventId: SymbolTable.CurrentCausationCausalEventId,
+				ReactionName: SymbolTable.CurrentCausationReactionName,
+				Check: SymbolTable.CurrentCausationCheck,
+				Values: CollectWithValues(WithArgs));
+		}
+
 		internal override void Execute(ExecutionOutput output)
 		{
-			// Replay short-circuit: mark the dedup entry so live executes after
-			// recovery are no-ops, but do NOT enqueue an envelope — the transport must
-			// not see ghost messages from rehydration.
+			// Replay short-circuit: mark the dedup entry so live executes after recovery
+			// are no-ops, and retain the full envelope for a possible red-black takeover
+			// re-delivery — but do NOT enqueue it to PendingTells: the transport must not
+			// see ghost messages from rehydration. The retained envelope is delivered only
+			// if a takeover (UnlockAndRunAlive, primary) finds the tell still pending.
 			if (SymbolTable.RecoveringState)
 			{
 				object instanceValueReplay = EvaluateExpr(AddresseeInstanceId);
@@ -375,6 +401,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					SymbolTable.MarkExplicitTellApplied(onceIdReplay);
 					RegisterTellEntryForElision(onceIdReplay);
 					RegisterTellRecoveryInfo(onceIdReplay, Addressee, instanceValueReplay);
+					SymbolTable.RegisterReissueEnvelope(onceIdReplay, BuildEnvelope(onceIdReplay, instanceValueReplay));
 				}
 				else
 				{
@@ -383,6 +410,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					SymbolTable.MarkImplicitTellApplied(hashReplay);
 					RegisterTellEntryForElision(envelopeIdReplay);
 					RegisterTellRecoveryInfo(envelopeIdReplay, Addressee, instanceValueReplay);
+					SymbolTable.RegisterReissueEnvelope(envelopeIdReplay, BuildEnvelope(envelopeIdReplay, instanceValueReplay));
 				}
 				return;
 			}
@@ -400,15 +428,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				string onceId = ResolveOnceIdentity();
 				if (SymbolTable.IsExplicitTellApplied(onceId)) return;
 
-				TellEnvelope envelopeOnce = new TellEnvelope(
-					Id: onceId,
-					MessageName: MessageName,
-					Addressee: Addressee,
-					AddresseeInstanceId: instanceValue?.ToString(),
-					CausalEventId: null,
-					ReactionName: null,
-					Check: SymbolTable.CurrentCausationCheck,
-					Values: CollectWithValues(WithArgs));
+				TellEnvelope envelopeOnce = BuildEnvelope(onceId, instanceValue);
 
 				SymbolTable.MarkExplicitTellApplied(onceId);
 				SymbolTable.EnqueuePendingTell(envelopeOnce);
@@ -421,15 +441,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (SymbolTable.IsImplicitTellApplied(hash)) return;
 
 			string envelopeId = FormatContentHash(hash);
-			TellEnvelope envelope = new TellEnvelope(
-				Id: envelopeId,
-				MessageName: MessageName,
-				Addressee: Addressee,
-				AddresseeInstanceId: instanceValue?.ToString(),
-				CausalEventId: null,
-				ReactionName: null,
-				Check: SymbolTable.CurrentCausationCheck,
-				Values: CollectWithValues(WithArgs));
+			TellEnvelope envelope = BuildEnvelope(envelopeId, instanceValue);
 
 			SymbolTable.MarkImplicitTellApplied(hash);
 			SymbolTable.EnqueuePendingTell(envelope);

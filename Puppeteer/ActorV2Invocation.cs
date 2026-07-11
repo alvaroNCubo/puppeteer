@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using Puppeteer.EventSourcing.Playbill;
 
 namespace Puppeteer
@@ -109,9 +108,6 @@ namespace Puppeteer
 			_writeBackTarget = writeBackTarget;
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public ActorV2Invocation WithParameters(Action<Parameters> configure)
 		{
 			ArgumentNullException.ThrowIfNull(configure);
@@ -137,9 +133,6 @@ namespace Puppeteer
 		// otherwise die with the copy when it returns to the pool. After Perform the
 		// Perform* methods copy those results back into source (see WriteBackOutputsFrom),
 		// so `p[name].GetValue()` on the caller's own instance observes the computed value.
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public ActorV2Invocation WithParameters(Parameters source)
 		{
 			ArgumentNullException.ThrowIfNull(source);
@@ -160,9 +153,6 @@ namespace Puppeteer
 				_playbill, _playbillSchemaName, _playbillValues, writeBackTarget: source);
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public ActorV2Invocation WithParameters(RentedParameter rentedParameter, Action<Parameters> configure)
 		{
 			ArgumentNullException.ThrowIfNull(configure);
@@ -205,6 +195,11 @@ namespace Puppeteer
 			PreInitializeDefaults(playbillValues);
 
 			configure(playbillValues);
+
+			// A playbill carries audit metadata — frozen In values only. Reject any
+			// Out/InOut/Eval the configure callback may have injected via the raw
+			// Parameters indexer (which otherwise creates a slot of any modifier).
+			PlaybillParameterGuard.EnsureInputOnly(playbillValues, _playbillSchemaName);
 
 			return new ActorV2Invocation(_actor, _scriptForChk, _script, _parameters, _parametersAutoRented, _parametersKeyed,
 				_playbill, _playbillSchemaName, playbillValues);
@@ -300,9 +295,6 @@ namespace Puppeteer
 			}
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public string PerformQuery()
 		{
 			if (string.IsNullOrEmpty(_script)) throw new LanguageException($"{nameof(PerformQuery)} must be used with a script to be executed.");

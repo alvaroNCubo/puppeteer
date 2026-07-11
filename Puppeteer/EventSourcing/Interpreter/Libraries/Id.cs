@@ -24,6 +24,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			this.level = level;
 		}
 
+		// The SymbolTable this Id resolves against. Exposed so the pattern-matching value
+		// extraction (DotAccess.GetArgumentValues) can consult transient per-event context
+		// hung on the table (e.g. the current Action's declared parameter names) without
+		// threading it through the AST-walk signatures.
+		internal SymbolTable SymbolTable => symbolTable;
+
 		internal string Name
 		{
 			get

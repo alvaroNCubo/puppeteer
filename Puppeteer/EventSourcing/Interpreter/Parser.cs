@@ -28,6 +28,13 @@ namespace Puppeteer.EventSourcing.Interpreter
         // ValidateStatically does not have to walk the AST looking for evals.
         private bool hasEvalInProgram;
 
+        // True while re-parsing a journaled script during rehydration (Parser.Rehydrate).
+        // Set at the start of ParseProgram. Journal replay OVERLOADS isCheck to mean "don't
+        // need output" and re-parses ordinary COMMANDS, so the read-only-context guards
+        // (which reject the journal-writing constructs 'expose' and 'upgrade' in a check)
+        // must NOT fire on replay — a replayed command may legitimately contain them.
+        private bool parsingRehydration;
+
 		static Parser()
 		{
 			primitiveTypes["int"] = typeof(int);
@@ -51,7 +58,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		internal Program Parse(bool isQuery, bool isCheck)
 		{
-			Program result = ParseProgram(Array.Empty<int>(), isQuery, isCheck);
+			Program result = ParseProgram(Array.Empty<int>(), isQuery, isCheck, isRehydration: false);
 			if (isCheck)
 			{
 				// A check script that cannot reject the command is an always-pass
@@ -87,7 +94,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			bool rehydrateDontNeedOutput = true;
 			bool rehydrateAlwaysIsCommand = false;
-			Program result = ParseProgram(Array.Empty<int>(), isQuery: rehydrateAlwaysIsCommand, isCheck: rehydrateDontNeedOutput);
+			Program result = ParseProgram(Array.Empty<int>(), isQuery: rehydrateAlwaysIsCommand, isCheck: rehydrateDontNeedOutput, isRehydration: true);
 			return result;
 		}
 
@@ -95,7 +102,9 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			bool previousIsEval = symbolTable.InEvalMode;
 			symbolTable.InEvalMode = true;
-			Program result = ParseProgram(currLevel, isQuery, isCheck);
+			// An Eval body re-parsed at runtime does not carry the rehydration mark; when it
+			// runs during replay the RecoveringState signal covers it (see IsReadOnlyUserContext).
+			Program result = ParseProgram(currLevel, isQuery, isCheck, isRehydration: false);
 			symbolTable.InEvalMode = previousIsEval;
 			return result;
 		}
@@ -106,10 +115,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 			this.source = source;
 		}
 
-		private Program ParseProgram(int[] currLevel, bool isQuery, bool isCheck)
+		private Program ParseProgram(int[] currLevel, bool isQuery, bool isCheck, bool isRehydration)
 		{
             upgradeNamesInProgram.Clear();
             hasEvalInProgram = false;
+            parsingRehydration = isRehydration;
             List<Statement> statements = new List<Statement>();
             while (lexer.CurrentToken.Type != TokenType.eof)
 			{
@@ -132,7 +142,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 }
             }
 			lexer.Accept(TokenType.eof);
-			Program resultingProgram = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck);
+			Program resultingProgram = new Program(libraries, this.source, symbolTable, statements, currLevel, isQuery, isCheck, isRehydration);
 			resultingProgram.HasEval = hasEvalInProgram;
 			// Lever 1 of the Now optimization: precompute (once per parse, outside the
 			// hot path) whether the program references the SYSTEM Now parameter. Conservative with
@@ -437,6 +447,17 @@ namespace Puppeteer.EventSourcing.Interpreter
                 throw new LanguageException("'upgrade' is not valid in PerformQuery. It can only be used in PerformCmd because it persists actor state.");
             }
 
+            // 'upgrade' seeds/migrates the actor by creating journaled globals, so it
+            // writes the journal. A check is read-only (like a query): it takes no write
+            // lock and persists nothing. Reject 'upgrade' here for the same reason
+            // 'expose' and 'tell' are rejected in read-only contexts -- it is a
+            // command-only construct. Skip during rehydration, which re-parses journaled
+            // COMMANDS (that legitimately carry 'upgrade') with isCheck overloaded.
+            if (isCheck && !parsingRehydration)
+            {
+                throw new LanguageException("'upgrade' is not valid inside a check. It can only be used in PerformCmd because it persists actor state (it creates journaled globals).");
+            }
+
             lexer.Accept(TokenType.upgrade);
             lexer.Accept(TokenType.lParen);
 
@@ -565,8 +586,20 @@ namespace Puppeteer.EventSourcing.Interpreter
         // ruled out as out-of-scope for Phase 1.
         //
         // NO parameter-order normalization (signed at the start of Phase 1: order is semantically
-        // significant because callsite arguments are positionally bound). Modifiers
-        // (In/Out/InOut/Eval) are out of scope for Phase 1.
+        // significant because callsite arguments are positionally bound).
+        //
+        // Each entry is `[out|inout ]name:type`. An optional lowercase `out`/`inout` keyword
+        // carries the parameter modifier; with no keyword the parameter is In (the default,
+        // and the shape of every pre-existing journal). `out`/`inout` lex as plain
+        // identifiers (they are not reserved tokens), so a modified entry surfaces as two
+        // consecutive id tokens before the ':'. Disambiguation without lookahead: after
+        // accepting the first id, if the next token is ':' the id was the parameter NAME
+        // (In); otherwise it was the modifier keyword and the following id is the name. A
+        // parameter legitimately NAMED `out`/`inout` is therefore still parsed correctly —
+        // its ':' comes immediately after it. The modifier is re-emitted canonically so the
+        // ParametersText round-trips (and CanonicalDeclarationsToParametersString can lift
+        // it into the Parameters ctor grammar). `in`/`eval` are NOT accepted as keywords
+        // here (they are reserved tokens and are never emitted): In and Eval are prefix-less.
         private string ParseDefineActionParameterList()
         {
             StringBuilder sb = new StringBuilder();
@@ -582,10 +615,37 @@ namespace Puppeteer.EventSourcing.Interpreter
 
                 if (lexer.CurrentToken.Type != TokenType.id)
                 {
-                    throw new LanguageException($"'define action' parameter expects an identifier (e.g. id:int or @id:int) but found token type '{lexer.CurrentToken.Type}' with lexeme '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                    throw new LanguageException($"'define action' parameter expects an identifier (e.g. id:int, @id:int, out id:int) but found token type '{lexer.CurrentToken.Type}' with lexeme '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
                 }
-                sb.Append(lexer.CurrentLexeme());
+                string firstLexeme = lexer.CurrentLexeme().ToString();
                 lexer.Accept(TokenType.id);
+
+                // If the ':' does not follow immediately, the first id was a modifier keyword
+                // and the real name is the next id.
+                if (lexer.CurrentToken.Type != TokenType.colon)
+                {
+                    if (string.Equals(firstLexeme, Parameters.OutModifierKeyword, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(firstLexeme, Parameters.InOutModifierKeyword, StringComparison.OrdinalIgnoreCase))
+                    {
+                        sb.Append(firstLexeme.ToLowerInvariant());
+                        sb.Append(' ');
+                    }
+                    else
+                    {
+                        throw new LanguageException($"'define action' parameter modifier '{firstLexeme}' is not valid (expected 'out' or 'inout') at line {Row()}, column {Column()}.", firstLexeme, Row(), Column());
+                    }
+
+                    if (lexer.CurrentToken.Type != TokenType.id)
+                    {
+                        throw new LanguageException($"'define action' parameter expects a name after modifier '{firstLexeme}' but found token type '{lexer.CurrentToken.Type}' with lexeme '{lexer.CurrentLexeme()}' at line {Row()}, column {Column()}.", lexer.CurrentLexeme().ToString(), Row(), Column());
+                    }
+                    sb.Append(lexer.CurrentLexeme());
+                    lexer.Accept(TokenType.id);
+                }
+                else
+                {
+                    sb.Append(firstLexeme);
+                }
 
                 lexer.Accept(TokenType.colon);
                 sb.Append(':');
@@ -1214,20 +1274,34 @@ namespace Puppeteer.EventSourcing.Interpreter
         private AstExpression ParseList(int[] currLevel)
         {
             lexer.Accept(TokenType.begin);
-            bool shouldExit = false;
-            bool nextClosesList = lexer.CurrentToken.Type == TokenType.end;
-            if (nextClosesList)
+
+            // Empty collection literal {}.
+            if (lexer.CurrentToken.Type == TokenType.end)
             {
-                shouldExit = true;
+                lexer.Accept(TokenType.end);
+                return new LiteralList(new AstExpression[0]);
             }
 
-            List<AstExpression> elementos = new List<AstExpression>();
+            AstExpression first = ParseLogicalExpression(currLevel);
+
+            // Range literal {start..end}: an inclusive, ascending integer sequence.
+            // The '..' after the first element selects the range form over the
+            // collection form. See docs/rfc/foreach-range-literal.md.
+            if (lexer.CurrentToken.Type == TokenType.range)
+            {
+                lexer.Accept(TokenType.range);
+                AstExpression rangeEnd = ParseLogicalExpression(currLevel);
+                lexer.Accept(TokenType.end);
+                return new LiteralRange(first, rangeEnd);
+            }
+
+            // Collection literal {a, b, c}.
+            List<AstExpression> elementos = new List<AstExpression> { first };
+            bool shouldExit = lexer.CurrentToken.Type == TokenType.end;
             while (!shouldExit)
             {
-                AstExpression argument = ParseLogicalExpression(currLevel);
-                elementos.Add(argument);
                 bool nextIsComma = lexer.CurrentToken.Type == TokenType.comma;
-                nextClosesList = lexer.CurrentToken.Type == TokenType.end;
+                bool nextClosesList = lexer.CurrentToken.Type == TokenType.end;
                 if (nextClosesList)
                 {
                     shouldExit = true;
@@ -1235,6 +1309,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 else if (nextIsComma)
                 {
                     lexer.Accept();
+                    elementos.Add(ParseLogicalExpression(currLevel));
                 }
                 else
                 {

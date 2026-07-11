@@ -3,7 +3,6 @@ using Puppeteer.EventSourcing.Interpreter.Libraries;
 using Puppeteer.EventSourcing.Interpreter.Utils;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -15,7 +14,9 @@ namespace Puppeteer
 	public sealed class Parameter
 	{
 		private readonly VariableSymbol instance = null;
-		private object instanceViejo = null;
+		// The In parameter's caller-supplied value, preserved so Clear() can restore it after
+		// execution (an In param dirtied by the body is reset to its input for the caller).
+		private object previousInstanceValue = null;
 		private readonly string name;
 		private readonly Type parameterType;
 		private readonly bool isNullableParameter;
@@ -33,9 +34,6 @@ namespace Puppeteer
 
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		internal Parameter(int parameterModifier, string name, Type type)
 		{
 			ArgumentNullException.ThrowIfNull(name);
@@ -67,9 +65,6 @@ namespace Puppeteer
 			return underlyingType ?? type;
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		internal static bool IsValidParameterName(string name)
 		{
 			bool isFirst = true;
@@ -142,17 +137,44 @@ namespace Puppeteer
 					}
 					else
 					{
-						instance.value = value;
-						instanceViejo = value;
+						// A char parameter fed a single-character string stores the coerced char (the
+						// ImplicitCast result), so the stored value matches the declared type. Compiled
+						// mode reads the slot as (char)value, which would fail to unbox a string; storing
+						// the char keeps `typeof(char)` with a 1-char string value working in both modes.
+						object toStore = (parameterType == typeof(char) && value is string) ? result : value;
+						instance.value = toStore;
+						previousInstanceValue = toStore;
 					}
 				}
 				else if (parameterModifier == InOut)
 				{
-					if (value == null) throw new LanguageException($"Parameter '{name}' can not be null");
+					// InOut mirrors In: a nullable InOut (declared `int?`, or a reference type)
+					// accepts null on both the input and the output side; a non-nullable InOut
+					// (plain value type) still rejects null as a required-value guard.
+					if (value == null)
+					{
+						if (!isNullableParameter)
+							throw new LanguageException($"Parameter '{name}' can not be null");
+
+						instance.value = null;
+						return;
+					}
 					instance.value = value;
 				}
 				else if (parameterModifier == Out)
 				{
+					// `= null` is the legible "empty output slot" placeholder for ANY Out type
+					// (including value types like int/bool/DateTime/decimal). It reads as "no input
+					// here; the actor fills this slot". Guard before the unboxing casts below, which
+					// would otherwise throw NullReferenceException on (int)null / (bool)null / etc.
+					if (value == null) { instance.value = null; return; }
+
+					// Existing non-default-value guard, preserved verbatim. NOTE: due to a
+					// dangling-`else` the whole chain is nested under the int branch, so in practice
+					// it only rejects a non-default value for an int Out; for string/bool/DateTime/
+					// decimal it never runs (e.g. string Out is seeded `= ""` elsewhere, which is not
+					// default(string)==null). Left as-is on purpose — callers rely on that leniency;
+					// the readability win here is the `= null` placeholder above, not tightening this.
 					if (parameterType == typeof(int)) if ((int)value != default(int)) throw new LanguageException($"Parameter '{name}' can not have a defaultdata");
 						else if (parameterType == typeof(string)) if ((string)value != default(string)) throw new LanguageException($"Parameter '{name}' can not have a defaultdata");
 							else if (parameterType == typeof(bool)) if ((bool)value != default(bool)) throw new LanguageException($"Parameter '{name}' can not have a defaultdata");
@@ -261,6 +283,14 @@ namespace Puppeteer
 			if (instance.type != typeof(T))
 				throw new InvalidCastException($"Parameter '{name}' type mismatch: expected {instance.type.Name}, got {typeof(T).Name}");
 
+			// An Out slot seeded with the `= null` placeholder and never assigned by the body
+			// reads back as default(T). This preserves the pre-existing "unassigned Out reads as
+			// default(T)" behavior from when the seed was `= 0` / default(T): a null value type
+			// would otherwise throw on the (T)null unboxing below. Reference-type T handles null
+			// natively (returns null), so only value types need the coalesce.
+			if (instance.value == null && typeof(T).IsValueType)
+				return default(T);
+
 			return (T)instance.value;
 		}
 
@@ -298,7 +328,23 @@ namespace Puppeteer
 			{
 				var objectField = typeof(VariableSymbol).GetField(nameof(VariableSymbol.value), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 				var valueExpr = Expression.Field(parameterDeclaration, objectField);
-				var convertedValueExpr = Expression.Convert(valueExpr, this.ParameterType);
+				Expression convertedValueExpr = Expression.Convert(valueExpr, this.ParameterType);
+
+				// A value-type parameter slot can legitimately hold null: an Out slot carries the
+				// `= null` empty '?' placeholder until (and unless) the body assigns it, and a
+				// nullable In/InOut slot may be null too. Reading such a slot as an r-value must
+				// yield default(T), matching Parameter.GetValue<T>() and the interpreted path
+				// (which returns the raw null and lets reflection coalesce it to default(T) for a
+				// value-type target). Without this guard, Expression.Convert(null, T) unboxes null
+				// and throws NullReferenceException inside the compiled delegate — an NRE where
+				// interpreted execution succeeds. Reference-type parameters need no guard: Convert
+				// leaves null as null.
+				if (this.ParameterType.IsValueType)
+				{
+					var slotIsNull = Expression.Equal(valueExpr, Expression.Constant(null, typeof(object)));
+					convertedValueExpr = Expression.Condition(slotIsNull, Expression.Default(this.ParameterType), convertedValueExpr);
+				}
+
 				RValueReferenceExpression = convertedValueExpr;
 			}
 
@@ -334,8 +380,32 @@ namespace Puppeteer
 		{
 			if (parameterModifier == Parameter.In)
 			{
-				instance.value = instanceViejo;
+				instance.value = previousInstanceValue;
 			}
+		}
+
+		private object originalSnapshot = null;
+		private bool hasOriginalSnapshot = false;
+
+		// Two-phase (check-then-command) support: record the parameter's CURRENT value as
+		// its "original" so it can be restored before each check run. A check script runs
+		// twice (ReadLock pre-check, WriteLock re-check) and the author does not know that,
+		// so any parameter the check dirties must be reset to the caller-supplied value
+		// before each run — otherwise the ReadLock run's writes would bleed into the
+		// WriteLock run. Independent of Clear()'s post-execution In-restore role.
+		internal void SnapshotOriginal()
+		{
+			originalSnapshot = instance.value;
+			hasOriginalSnapshot = true;
+		}
+
+		// Restore the value captured by SnapshotOriginal. Eval is excluded: its value is
+		// re-evaluated fresh at command-time (WriteLock), not restored from a snapshot.
+		internal void RestoreOriginal()
+		{
+			if (parameterModifier == Eval) return;
+			if (!hasOriginalSnapshot) return;
+			instance.value = originalSnapshot;
 		}
 
 		// Post-execution write-back: store a computed result into this Out/InOut
@@ -362,7 +432,7 @@ namespace Puppeteer
 			if (parameterModifier == In)
 			{
 				instance.value = value;
-				instanceViejo = value;
+				previousInstanceValue = value;
 			}
 			else if (parameterModifier == InOut)
 			{

@@ -135,6 +135,21 @@ namespace Puppeteer.EventSourcing.DB
 			AddActionEvent(actionId, arguments, occurredAt);
 		}
 
+		// Rule 1 test seam: inject a domain-call event as a V2 Action. Domain
+		// reactions observe ActorV2 Actions, never literal Scripts, so feature
+		// tests that used AddScriptEvent by convenience migrate to this: it
+		// auto-assigns a fresh actionId and carries a dummy @param (which forces
+		// Action journaling) while leaving the body's domain calls and literals
+		// untouched, so pattern matching / capture / seeking behave identically
+		// to the old Script injection. Each event must be self-contained (create
+		// its own receivers): an Action does not share globals with prior Actions.
+		private int nextDomainActionId = 1_000_000;
+		internal void AddDomainActionEvent(string script, DateTime? occurredAt = null)
+		{
+			ArgumentNullException.ThrowIfNull(script);
+			AddActionEventWithRegistration(nextDomainActionId++, script, "In,dummy:int", "dummy=1", occurredAt);
+		}
+
 		internal void Clear()
 		{
 			foreach (var evt in events)

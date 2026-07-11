@@ -151,6 +151,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// chooses the source of the name according to the argument's type.
 				argExpr = AstExpression.ParseEnumArgExpression(parameterType, arguments[i], parametersParam);
 			}
+			else if (NullLiteralFitsReference(arguments[i], parameterType))
+			{
+				// A null literal binds directly to a reference-type (or Nullable<T>) parameter.
+				// Routing it through TypeConversion.ImplicitCast would dereference the null value
+				// (value.GetType()) at runtime, so emit the typed null constant instead.
+				argExpr = Expression.Constant(null, parameterType);
+			}
 			else
 			{
 				argExpr = arguments[i].ExecuteExpression(parametersParam);
@@ -499,11 +506,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 }
                 else
                 {
+                    // A `null` literal is typed as typeof(object), which AreCompatible rejects against
+                    // a reference-type parameter. Mirror the C# rule (and the method-call path): a null
+                    // literal binds to any reference type or Nullable<T>, never to a non-nullable value
+                    // type. Without this, `Foo(obj, null)` fails static validation while `obj.Bar(null)`
+                    // does not — an asymmetry between constructors and methods.
+                    if (NullLiteralFitsReference(arguments[i], paramType)) continue;
                     Type argType = arguments[i].ComputeType();
                     if (!AreCompatible(argType, paramType)) return false;
                 }
             }
             return true;
+        }
+
+        // A `null` literal (typed as object) is assignable to any reference-type parameter and to
+        // Nullable<T>, but never to a non-nullable value type. Scoped to the literal null node so
+        // constructor overload resolution stays as strict as before for every other argument.
+        private static bool NullLiteralFitsReference(AstExpression argument, Type parameterType)
+        {
+            if (!(argument is LiteralNull)) return false;
+            return !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
         }
 
         // Match of a params constructor: last parameter is params, at least N-1 arguments, the

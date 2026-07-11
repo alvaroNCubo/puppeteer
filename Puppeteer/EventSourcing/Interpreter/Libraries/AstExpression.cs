@@ -310,6 +310,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return Convert.ToDecimal(evaluatedArgument);
 			}
+			// A length-1 string coerces to char at the parameter boundary (DTOs carry a char as a
+			// single-character string). ImplicitCast enforces the length-1 rule / raises a clear error.
+			else if (parameterType == typeof(char) && argumentType == typeof(string))
+			{
+				return TypeConversion.ImplicitCast(evaluatedArgument, parameterType);
+			}
 
 			return evaluatedArgument;
 		}
@@ -322,6 +328,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			if (argument == null) throw new ArgumentNullException(nameof(argument));
 			if (parameterType == null) throw new ArgumentNullException(nameof(parameterType));
+
+			// A null constant (a `null` literal) binds to a reference type or Nullable<T> without
+			// coercion. Routing it through ImplicitCast would dereference the null value
+			// (value.GetType()) at runtime, so emit the typed null constant. Mirrors the null
+			// short-circuit of CoerceScalarValue in the interpreted path.
+			if (argument is ConstantExpression nullConstant && nullConstant.Value == null
+				&& (!parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null))
+			{
+				return Expression.Constant(null, parameterType);
+			}
 
 			Type argumentType = argument.Type;
 
@@ -346,6 +362,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Convert(argument, typeof(decimal));
 			}
 
+			// string -> char (length-1). Route through ImplicitCast so the length rule is enforced at
+			// runtime; a bare Expression.Convert(string, char) is not a valid CLR conversion and would throw.
+			if (parameterType == typeof(char) && argumentType == typeof(string))
+			{
+				return Expression.Convert(
+					Expression.Call(
+						typeof(TypeConversion).GetMethod(
+							nameof(TypeConversion.ImplicitCast), BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public),
+						argument,
+						Expression.Constant(parameterType, typeof(Type))
+					),
+					parameterType
+				);
+			}
+			
 			// If types are not directly assignable, use ImplicitCast.
 			if (!AreCompatible(argumentType, parameterType))
 			{
@@ -411,6 +442,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (paramType == typeof(string))
 			{
 				compatible = argType == typeof(string);
+			}
+			else if (paramType == typeof(char))
+			{
+				// A char parameter accepts a real char or a (length-1) string; DTOs carry a char as a
+				// single-character string. The length is checked when the value is coerced.
+				compatible = argType == typeof(char) || argType == typeof(string);
 			}
 			else if (paramType == typeof(DateTime))
 			{

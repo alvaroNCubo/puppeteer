@@ -55,6 +55,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				result = typeof(bool);
 			}
+			else if (string.Equals(name, "char", StringComparison.OrdinalIgnoreCase))
+			{
+				result = typeof(char);
+			}
 			else if (string.Equals(name, "list", StringComparison.OrdinalIgnoreCase))
 			{
 				if (subType != null)
@@ -180,6 +184,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (nonNullableSource.IsEnum)
 				return nonNullableTarget == typeof(string) || nonNullableSource == nonNullableTarget;
 
+			// char: allow char<->char and string<->char (length-1 string; checked at execution).
+			if (nonNullableSource == typeof(char) || nonNullableTarget == typeof(char))
+				return nonNullableSource == nonNullableTarget || nonNullableSource == typeof(string) || nonNullableTarget == typeof(string);
+
 			if (nonNullableSource == typeof(string) || nonNullableTarget == typeof(string))
 				return nonNullableSource == nonNullableTarget;
 
@@ -210,6 +218,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                     return ParseEnumOrThrow(cast, (string)value);
                 else if (valueType == cast)
                     return value;
+                else
+                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
+            }
+            if (cast == typeof(char))
+            {
+                if (valueType == typeof(char))
+                    return value;
+                else if (valueType == typeof(string))
+                    return Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion.StringToChar((string)value);
                 else
                     throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
@@ -408,7 +425,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 			}
 
-			if (targetType == typeof(string))
+			if (targetType == typeof(char))
+			{
+				if (sourceType == typeof(char))
+				{
+					return expr;
+				}
+				else if (sourceType == typeof(string))
+				{
+					var stringToCharMethod = typeof(Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion).GetMethod(
+						nameof(Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion.StringToChar),
+						System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
+						null, new[] { typeof(string) }, null);
+					return Expression.Call(stringToCharMethod, expr);
+				}
+				else
+				{
+					throw new LanguageException($"Invalid cast from {sourceType} to {targetType} in Expression.");
+				}
+			}
+			else if (targetType == typeof(string))
 			{
 				if (sourceType == typeof(string))
 				{

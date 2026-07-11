@@ -15,6 +15,10 @@ namespace Choreography.Theater
         // Same pattern as V2 — auto-provision, schema registry, second-write.
         private Playbill playbill;
         private string currentPlaybillSchemaName;
+
+        // Source of audit records a CarryPlaybill shadow copies (null = audit-off).
+        protected override Playbill ShadowPlaybillSource => playbill;
+
         // Convenience: if the caller does not provide libraries, the assembly from
         // which the ctor was invoked is assumed. Useful when domain and interface live in
         // the same project. The idiomatic path is to pass the domain DLLs explicitly

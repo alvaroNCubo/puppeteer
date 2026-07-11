@@ -65,6 +65,11 @@ namespace Choreography.Theater
 			PreInitializeDefaults(playbillValues);
 			configure(playbillValues);
 
+			// A playbill carries audit metadata — frozen In values only. Reject any
+			// Out/InOut/Eval the configure callback may have injected via the raw
+			// Parameters indexer (which otherwise creates a slot of any modifier).
+			PlaybillParameterGuard.EnsureInputOnly(playbillValues, _playbillSchemaName);
+
 			return new PerformanceV1Invocation(_performance, _script, _ip, _user, _playbill, _playbillSchemaName, playbillValues);
 		}
 

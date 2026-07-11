@@ -15,7 +15,7 @@ namespace Puppeteer.EventSourcing.DB
 	// authoritative writer. The journal is sacred — humans never edit the file
 	// manually; all mutations go through CLI verbs (attach/REPL, elide).
 	//
-	// Format (one user PerformCommand maps to one line):
+	// Format (one user PerformCommand maps to one journal entry):
 	//
 	//   // Puppeteer Journal V2 — PlainText backend
 	//   // DO NOT EDIT MANUALLY. Use puppeteer attach --txt and puppeteer elide.
@@ -25,9 +25,14 @@ namespace Puppeteer.EventSourcing.DB
 	//   obj = Base(123);                 // id=1-2 kind=atom action=1 at=2026-06-02T14:22:08Z
 	//   obj.DoSomething();                 // id=3-4 kind=atom action=2 at=2026-06-02T14:22:09Z
 	//
-	// Each entry line: <script>  TAB  // <metadata>
-	// Comment lines (starting with `//` after trim) are skipped by the parser
-	// except for the special header keys (Elided:). Blank lines also skipped.
+	// An entry ends with `<script>  // <metadata>`. A parameter-bearing command journals
+	// a Define whose DSL body renders across MULTIPLE physical lines (`define action N
+	// (...) as\r{\r...\r}\rend;`) with the `// <metadata>` comment appended only after the
+	// body's final segment. The reader (SplitIntoLogicalLines) reassembles an entry's
+	// physical lines back into one logical entry before parsing, so a bare `end;` line is
+	// never handed to the parser on its own.
+	// Comment lines (starting with `//` after trim) BETWEEN entries are skipped by the
+	// parser except for the special header keys (Elided:). Blank lines also skipped.
 	//
 	// Entry IDs are preserved with gaps after elision (Option B signed). When
 	// `puppeteer elide --entry N` physically removes a line, the header's
@@ -158,14 +163,12 @@ namespace Puppeteer.EventSourcing.DB
 			string[] lines = File.ReadAllLines(filePath);
 			long maxIdSeen = 0;
 
-			foreach (string raw in lines)
+			foreach (LogicalLine logical in SplitIntoLogicalLines(lines))
 			{
-				string line = raw.Trim();
-				if (line.Length == 0) continue;
-
-				// Header lines: parse the Elided list, ignore the rest.
-				if (line.StartsWith("//", StringComparison.Ordinal))
+				if (!logical.IsEntry)
 				{
+					// Header / separator / blank. Parse the Elided list, ignore the rest.
+					string line = logical.RawLines[0].Trim();
 					if (line.StartsWith(HEADER_ELIDED_PREFIX, StringComparison.Ordinal))
 					{
 						string payload = line.Substring(HEADER_ELIDED_PREFIX.Length).Trim();
@@ -186,11 +189,11 @@ namespace Puppeteer.EventSourcing.DB
 					continue;
 				}
 
-				// Content separator: not data, just a visual divider.
-				if (line == CONTENT_SEPARATOR) continue;
-
-				// Entry line: split into script and metadata comment.
-				ParsedLine parsed = ParseEntryLine(raw);
+				// Entry: the writer renders a Define/atom body with embedded CR
+				// separators (`define … as\r{…}\rend;`), so File.ReadAllLines splits one
+				// logical entry across several physical lines with the `// id=…` metadata
+				// on the last one. SplitIntoLogicalLines rejoined them; parse the whole.
+				ParsedLine parsed = ParseEntryLine(logical.Reassembled);
 				if (parsed == null) continue;
 
 				foreach (var ev in parsed.ProduceEvents(EventDataPool))
@@ -201,6 +204,85 @@ namespace Puppeteer.EventSourcing.DB
 			}
 
 			nextEntryId = maxIdSeen + 1;
+		}
+
+		// One logical journal element: either a passthrough line (header / separator /
+		// blank) or an entry that may span several physical lines. See
+		// SplitIntoLogicalLines for why entries can be multi-line.
+		private sealed class LogicalLine
+		{
+			public bool IsEntry;
+			public List<string> RawLines;
+			// Physical lines rejoined with the writer's in-body separator (CR). The
+			// parser treats CR/LF as whitespace, so this faithfully reconstructs the
+			// `define … as\r{…}\rend;  // <meta>` sentence the writer emitted.
+			public string Reassembled => string.Join("\r", RawLines);
+
+			public static LogicalLine Other(string raw) => new LogicalLine { IsEntry = false, RawLines = new List<string> { raw } };
+			public static LogicalLine Entry(List<string> raws) => new LogicalLine { IsEntry = true, RawLines = raws };
+		}
+
+		// Groups the file's physical lines into logical elements. A parameter-bearing
+		// command journals a Define whose DSL body is rendered with embedded CR
+		// separators (`define action N (…) as\r{\r…\r}\rend;`) and the `// id=… kind=…
+		// at=…` metadata comment appended only after the body's final segment. Because
+		// File.ReadAllLines splits on \r, \n and \r\n, that single entry arrives as
+		// several physical lines — only the last carrying metadata. We accumulate
+		// physical lines into one entry until a line carries a valid metadata tail
+		// (IsEntryTerminator), so the parser sees the whole sentence instead of a
+		// trailing fragment like `end;`. Header/separator/blank lines that appear
+		// BETWEEN entries pass through unchanged; the same shapes appearing WITHIN an
+		// entry's body are kept as continuation lines.
+		private static IEnumerable<LogicalLine> SplitIntoLogicalLines(string[] lines)
+		{
+			List<string> pending = null;
+
+			foreach (string raw in lines)
+			{
+				if (pending == null)
+				{
+					string line = raw.Trim();
+					if (line.Length == 0 || line == CONTENT_SEPARATOR || line.StartsWith("//", StringComparison.Ordinal))
+					{
+						yield return LogicalLine.Other(raw);
+						continue;
+					}
+
+					pending = new List<string> { raw };
+					if (IsEntryTerminator(raw))
+					{
+						yield return LogicalLine.Entry(pending);
+						pending = null;
+					}
+					continue;
+				}
+
+				// Mid-entry: every physical line (including blanks or `//`-prefixed body
+				// fragments) belongs to the current entry until its metadata tail closes it.
+				pending.Add(raw);
+				if (IsEntryTerminator(raw))
+				{
+					yield return LogicalLine.Entry(pending);
+					pending = null;
+				}
+			}
+
+			// An unterminated tail (metadata never seen) is malformed; surface it so the
+			// caller's ParseEntryLine can null it out / preserve it rather than dropping.
+			if (pending != null)
+				yield return LogicalLine.Entry(pending);
+		}
+
+		// True when this physical line ends an entry: it carries a metadata comment
+		// whose mandatory keys (id, kind, at) are all present after the last `//`.
+		// Body fragments never satisfy this (they either have no `//` or the tail does
+		// not parse as journal metadata), so it is a safe entry-boundary marker.
+		private static bool IsEntryTerminator(string raw)
+		{
+			int metaIdx = raw.LastIndexOf("//", StringComparison.Ordinal);
+			if (metaIdx < 0) return false;
+			var keys = ParseMetadata(raw.Substring(metaIdx + 2).Trim());
+			return keys.ContainsKey("id") && keys.ContainsKey("kind") && keys.ContainsKey("at");
 		}
 
 		// Parses a single entry line: <script>  TAB+  // id=<range> kind=<...> action=<N|-> at=<iso>
@@ -856,35 +938,34 @@ namespace Puppeteer.EventSourcing.DB
 			var resultLines = new List<string>();
 			bool headerSeen = false;
 
-			foreach (string raw in originalLines)
+			foreach (LogicalLine logical in SplitIntoLogicalLines(originalLines))
 			{
-				string trimmed = raw.Trim();
-
-				if (trimmed.StartsWith(HEADER_ELIDED_PREFIX, StringComparison.Ordinal))
+				if (!logical.IsEntry)
 				{
-					foreach (var id in ids) elidedIds.Add(id);
-					resultLines.Add(HEADER_ELIDED_PREFIX + " " + FormatElidedList());
-					headerSeen = true;
-					continue;
-				}
-
-				if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed == CONTENT_SEPARATOR || trimmed.Length == 0)
-				{
+					string raw = logical.RawLines[0];
+					if (raw.Trim().StartsWith(HEADER_ELIDED_PREFIX, StringComparison.Ordinal))
+					{
+						foreach (var id in ids) elidedIds.Add(id);
+						resultLines.Add(HEADER_ELIDED_PREFIX + " " + FormatElidedList());
+						headerSeen = true;
+						continue;
+					}
 					resultLines.Add(raw);
 					continue;
 				}
 
-				ParsedLine parsed = ParseEntryLine(raw);
+				ParsedLine parsed = ParseEntryLine(logical.Reassembled);
 				if (parsed == null)
 				{
-					resultLines.Add(raw);
+					// Unparseable/malformed entry: preserve every physical line verbatim.
+					resultLines.AddRange(logical.RawLines);
 					continue;
 				}
 
 				bool drop = ids.Contains(parsed.FirstId) || (parsed.SecondId > 0 && ids.Contains(parsed.SecondId));
-				if (drop) continue;
+				if (drop) continue; // drops ALL physical lines of a multi-line entry
 
-				resultLines.Add(raw);
+				resultLines.AddRange(logical.RawLines);
 			}
 
 			if (!headerSeen)

@@ -53,10 +53,10 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 #endif
 
-			// Rent a Parameters instance from the pool.
-			Parameters capturedVariables = parametersPool.Rent();
-			capturedVariables.PurgeUserParameters();
-			capturedVariables.Clear();
+			// Rent a Parameters instance from the pool and wrap it as the match's
+			// capture bag (MatchParameters owns it as an implementation detail).
+			MatchParameters capturedVariables = new MatchParameters(parametersPool.Rent());
+			capturedVariables.Reset();
 
 			// If there are parameters captured earlier (from a previous ThenSeek), copy them in.
 			int initCount = (initialCapturedVariables != null) ? initialCapturedVariables.Count() : 0;
@@ -102,18 +102,20 @@ namespace Puppeteer.EventSourcing.Follower
 
 			if (allMatch)
 			{
-				// Successful match - return captured variables.
-				return capturedVariables;
+				// Successful match - return the captured variables. The match result still
+				// crosses into MatchTree as a Parameters, so hand back the underlying bag
+				// here (boundary tightened in a later step of the read-only refactor).
+				return capturedVariables.Underlying;
 			}
 			else
 			{
 				// No match - return to the pool.
 				capturedVariables.PurgeUserParameters();
-				parametersPool.Return(capturedVariables);
+				parametersPool.Return(capturedVariables.Underlying);
 				return null;
 			}
 		}
-		private bool MatchExpression(ExpressionNode expression, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchExpression(ExpressionNode expression, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (expression == null)
 				return false;
@@ -163,7 +165,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// against the script's ScriptTellStatement entries. Captures variables
 		// (target id, command args, envelope id) into capturedVariables and
 		// constraint-matches when a variable is already bound from a prior Seek.
-		private bool MatchTellPattern(TellPatternNode pattern, PatternListNode patternAst, Parameters capturedVariables, ref int lastMatchedPosition)
+		private bool MatchTellPattern(TellPatternNode pattern, PatternListNode patternAst, MatchParameters capturedVariables, ref int lastMatchedPosition)
 		{
 			for (int i = 0; i < patternAst.ScriptTellStatements.Count; i++)
 			{
@@ -208,7 +210,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 		// Plan 7 of the Tell primitive roadmap: match an ack pattern against the
 		// script's ScriptTellAckStatement entries.
-		private bool MatchTellAckPattern(TellAckPatternNode pattern, PatternListNode patternAst, Parameters capturedVariables, ref int lastMatchedPosition)
+		private bool MatchTellAckPattern(TellAckPatternNode pattern, PatternListNode patternAst, MatchParameters capturedVariables, ref int lastMatchedPosition)
 		{
 			for (int i = 0; i < patternAst.ScriptTellAckStatements.Count; i++)
 			{
@@ -238,7 +240,7 @@ namespace Puppeteer.EventSourcing.Follower
 		// must equal the captured value), not a re-capture. This is what makes
 		// `OnSeek tell ... id $tid` -> `ThenSeek tell ack $tid` correlate the
 		// envelope id across the two seeks.
-		private bool MatchOrConstraintParameter(ParameterNode patternParam, object scriptValue, Parameters capturedVariables)
+		private bool MatchOrConstraintParameter(ParameterNode patternParam, object scriptValue, MatchParameters capturedVariables)
 		{
 			if (patternParam == null) return false;
 			switch (patternParam)
@@ -303,7 +305,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return false;
 		}
-		private bool MatchTypeAccess(TypeAccessNode typeAccess, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchTypeAccess(TypeAccessNode typeAccess, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (typeAccess == null) return false;
 			if (patternAst == null) return false;
@@ -389,7 +391,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return false;
 		}
-		private bool MatchInstanceAccess(InstanceAccessNode instanceAccess, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchInstanceAccess(InstanceAccessNode instanceAccess, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (instanceAccess == null) return false;
 			if (patternAst == null) return false;
@@ -538,7 +540,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return false;
 		}
-		private bool MatchMemberAccess(MemberAccessNode memberAccess, System.Reflection.MemberInfo scriptMember, PatternListNode patternAst, Parameters capturedVariables)
+		private bool MatchMemberAccess(MemberAccessNode memberAccess, System.Reflection.MemberInfo scriptMember, PatternListNode patternAst, MatchParameters capturedVariables)
 		{
 			if (memberAccess == null) return false;
 			if (scriptMember == null) return false;
@@ -585,7 +587,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return true;
 		}
-		private bool MatchParameter(ParameterNode parameterNode, Type scriptParameterType, Parameters capturedVariables)
+		private bool MatchParameter(ParameterNode parameterNode, Type scriptParameterType, MatchParameters capturedVariables)
 		{
 			if (parameterNode == null) return false;
 
@@ -616,7 +618,7 @@ namespace Puppeteer.EventSourcing.Follower
 					return false;
 			}
 		}
-		private bool MatchConstructorCall(ConstructorCallNode constructor, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchConstructorCall(ConstructorCallNode constructor, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (constructor == null) return false;
 			if (patternAst == null) return false;
@@ -657,7 +659,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return false;
 		}
-		private bool MatchAssignment(AssignmentNode assignment, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchAssignment(AssignmentNode assignment, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			string varName = assignment.VariableName;
 			Type requiredType = null;
@@ -775,7 +777,7 @@ namespace Puppeteer.EventSourcing.Follower
 					return new UnresolvedDomainType(typeName);
 			}
 		}
-		private bool MatchPartialPattern(PartialPatternNode partialPattern, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchPartialPattern(PartialPatternNode partialPattern, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (partialPattern.Patterns.Count == 0)
 				return false;
@@ -844,7 +846,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return true;
 		}
-		private bool MatchMethodCall(MemberAccessNode memberAccess, ScriptMethodCall scriptMethodCall, Parameters capturedVariables,
+		private bool MatchMethodCall(MemberAccessNode memberAccess, ScriptMethodCall scriptMethodCall, MatchParameters capturedVariables,
 			PatternListNode patternAst, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			if (memberAccess == null) return false;
@@ -882,6 +884,11 @@ namespace Puppeteer.EventSourcing.Follower
 				return false;
 			}
 
+			// The matched method's declared parameter types — used so a $-capture over a
+			// script literal is typed from the SIGNATURE (what the method received), not
+			// from the literal's naive parse type. See the capture site in MatchParameterValue.
+			System.Reflection.ParameterInfo[] methodParams = scriptMethodCall.Method?.GetParameters();
+
 			for (int i = 0; i < memberAccess.Parameters.Count; i++)
 			{
 				var patternParam = memberAccess.Parameters[i];
@@ -903,7 +910,10 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				else
 				{
-					argMatched = MatchParameterValue(patternParam, scriptArgument, capturedVariables);
+					Type targetParameterType = (methodParams != null && i < methodParams.Length)
+						? methodParams[i].ParameterType
+						: null;
+					argMatched = MatchParameterValue(patternParam, scriptArgument, capturedVariables, targetParameterType);
 				}
 
 				if (!argMatched)
@@ -923,7 +933,68 @@ namespace Puppeteer.EventSourcing.Follower
 #endif
 			return true;
 		}
-		private bool MatchParameterValue(ParameterNode parameterNode, object scriptValue, Parameters capturedVariables)
+		// Coerce a captured literal value to the TYPE the matched method declares for its
+		// position, mirroring what the interpreter's call boundary does when it actually
+		// invokes the method (numeric widening + string/int -> enum). Returns the coerced
+		// value ONLY when the conversion yields the target type EXACTLY; otherwise the raw
+		// value is returned unchanged. Two consequences of the exact-type gate:
+		//   - a subclass value keeps its concrete runtime type (no lossy up-cast), and
+		//   - the already-correctly-typed @parameter path (value type == target) is a no-op,
+		//     so this never perturbs a parametrized command's captures.
+		// Best-effort: any conversion failure falls back to the raw value.
+		private static object CoerceCapturedValueToParameterType(object value, Type targetType)
+		{
+			if (value == null || targetType == null || targetType == typeof(object)) return value;
+
+			Type actual = value.GetType();
+			if (actual == targetType) return value;
+
+			try
+			{
+				if (targetType.IsEnum)
+				{
+					// The DSL admits an enum argument as its string name ('Store') or as its
+					// underlying numeric value; both resolve to the enum constant here.
+					if (value is string enumName)
+					{
+						return Enum.Parse(targetType, enumName, ignoreCase: true);
+					}
+					if (actual.IsPrimitive)
+					{
+						return Enum.ToObject(targetType, value);
+					}
+					return value;
+				}
+
+				// Numeric widening only (int -> decimal/double, double -> decimal, ...).
+				// Restricted to numeric<->numeric so we never silently turn, say, an int
+				// into a string. Convert.ChangeType handles boxed numerics correctly (unlike
+				// a direct unboxing cast, which throws for int-boxed-as-double).
+				if (IsNumericType(actual) && IsNumericType(targetType))
+				{
+					object coerced = Convert.ChangeType(value, targetType);
+					if (coerced != null && coerced.GetType() == targetType)
+					{
+						return coerced;
+					}
+				}
+			}
+			catch
+			{
+				// Best-effort: leave the raw value in place on any conversion failure.
+			}
+
+			return value;
+		}
+
+		private static bool IsNumericType(Type t)
+		{
+			return t == typeof(int) || t == typeof(long) || t == typeof(short) || t == typeof(byte)
+				|| t == typeof(sbyte) || t == typeof(uint) || t == typeof(ulong) || t == typeof(ushort)
+				|| t == typeof(float) || t == typeof(double) || t == typeof(decimal);
+		}
+
+		private bool MatchParameterValue(ParameterNode parameterNode, object scriptValue, MatchParameters capturedVariables, Type targetParameterType = null)
 		{
 			if (parameterNode == null) return false;
 
@@ -945,36 +1016,103 @@ namespace Puppeteer.EventSourcing.Follower
 					return true;
 
 				case VariableParameterNode variable:
-					// A $var binds the runtime VALUE of the observed argument into the
-					// results (it is forwarded downstream, e.g. as a tell payload, and
-					// read by guards). Pattern matching is defined over parameters: the
-					// only arguments whose value is knowable statically are literals and
-					// @parameter references (id.IsParameter == true). Both arrive here as a
-					// concrete value; capture it.
+					// ==================================================================
+					// CAPTURE CONTRACT — when a pattern variable ($x) binds a value, and
+					// when it cannot. This is the single authoritative statement of the
+					// rule; PatternCaptureContractTests enumerates every case below.
+					//
+					// A $-capture binds the runtime VALUE the matcher can read FROM THE
+					// JOURNAL. Reactions never compute: the matcher does not re-run the
+					// observed command, so it can only see a value when the observed
+					// argument carries one intrinsically. The observed argument (as reduced
+					// by DotAccess.GetArgumentValues) is exactly one of:
+					//
+					//   CAPTURABLE (a concrete value reaches here):
+					//     1. a LITERAL written directly at the call position (`Sale(..., 'x')`)
+					//        — captured, and typed from the method SIGNATURE (see
+					//        CoerceCapturedValueToParameterType), not the literal's parse type.
+					//     2. an @PARAMETER reference (id.IsParameter) — its value travels in
+					//        the invocation row and resolves to a concrete value.
+					//     3. an EXPOSE label (`expose x 'l'`, capture over 'l') — handled by
+					//        the expose path (CaptureExposeValue), not here.
+					//
+					//   NOT CAPTURABLE (arrives as a TypedValuePlaceholder — no journaled value):
+					//     4. a GLOBAL/LOCAL VARIABLE (`Sale(..., x)` where x is not a param):
+					//        placeholder carrying the identifier NAME. Its value existed only
+					//        in the (now gone) command runtime; the matcher cannot recover it.
+					//     5. an OPERATED / DERIVED expression (`x + 'A'`, `foo(bar())`):
+					//        placeholder with no name. Same reason.
+					//     (4) and (5) are AUTHORING errors -> hard PatternCaptureException. The
+					//     author must `expose` the value and capture the label instead.
+					//
+					//   NO-MATCH (fail gracefully, NOT a hard error):
+					//     6. a genuine NULL value — a null is data, not an authoring mistake
+					//        (a648232 contract); a later event may carry a value.
+					//     7. a DECLARED PARAMETER whose value failed to resolve at this moment
+					//        (name is in the action's parameter signature). A legitimate
+					//        capturable position with a transiently-absent value — a
+					//        framework/data resolution issue, distinguished from a variable via
+					//        TypedValuePlaceholder.IsDeclaredParameter. Failing (not throwing)
+					//        keeps a live push loop alive; an ordered batch replay (where the
+					//        value resolves) still binds and fires. §4.3 resilience preserved.
+					// ==================================================================
 					if (scriptValue != null && !(scriptValue is TypedValuePlaceholder))
 					{
 						string paramName = variable.VariableName.StartsWith("$") ? variable.VariableName.Substring(1) : variable.VariableName;
-						capturedVariables[paramName, scriptValue.GetType()] = scriptValue;
+
+						// Capture with the TYPE the matched method actually declares for this
+						// position, not the raw runtime type of the observed argument. A script
+						// LITERAL parses to a naive type (e.g. `250` -> int, `'Store'` -> string)
+						// that can differ from the method's declared parameter type (`decimal
+						// amount`, `SaleChannel channel`): the interpreter coerces it at the call
+						// boundary, so the value the method truly received is a decimal / an enum.
+						// Without this, a literal-argument command captures with the wrong type
+						// while the same command issued with a typed @parameter captures correctly
+						// — the two paths diverge, and the downstream tell journals the wrong
+						// signature / a different content hash.
+						object captureValue = CoerceCapturedValueToParameterType(scriptValue, targetParameterType);
+						capturedVariables[paramName, captureValue.GetType()] = captureValue;
 						return true;
 					}
 
-					// Otherwise the argument reached the matcher as a TypedValuePlaceholder:
-					// its value is not statically knowable (a local variable, a general
-					// expression, or an @parameter reference that did not resolve to its
-					// value). The placeholder only carries the source IDENTIFIER name, which
-					// is NOT the argument's value, so the pattern does not match here (see the
-					// inline note below).
-					if (scriptValue is TypedValuePlaceholder tvp && !string.IsNullOrEmpty(tvp.VariableName))
+					if (scriptValue is TypedValuePlaceholder notBindable)
 					{
-						// Non-parameter in a $-capture position: value not statically knowable,
-						// so the pattern does NOT match here. We neither bind the identifier
-						// name as fake data nor throw: failing the match keeps a live Cue/Job
-						// reaction alive (skips this event, advances its checkpoint) instead of
-						// poisoning the push loop with an uncaught throw. LastResolutionError
-						// still records the cause when it came from a swallowed resolution failure.
-						return false;
+						// A DECLARED PARAMETER whose value merely failed to resolve at this
+						// moment is a legitimate (capturable) position — not an authoring error.
+						// Fail the match gracefully (the value may resolve in an ordered batch
+						// replay); the underlying resolution failure is recorded elsewhere via
+						// LastResolutionError. This is the §4.3 resilience: an unresolved observed
+						// @parameter must NOT poison a live push loop.
+						if (notBindable.IsDeclaredParameter)
+						{
+							return false;
+						}
+
+						// Cases 4 & 5: a genuine global/local VARIABLE or an OPERATED expression.
+						// There is no journaled value to bind — HARD ERROR (authoring).
+						string captureName = variable.VariableName.StartsWith("$") ? variable.VariableName.Substring(1) : variable.VariableName;
+						string observed = notBindable.VariableName != null
+							? $"the global/local variable '{notBindable.VariableName}'"
+							: "an operated or derived expression";
+						string exposeName = notBindable.VariableName ?? "value";
+						throw new PatternCaptureException(
+							$"Pattern capture '${captureName}' has no value to bind: the observed argument is {observed}, "
+							+ "not a literal written at the call position nor a parameter (@name), so no value was captured. "
+							+ "The matcher reads captured values from the journal and never re-runs the command "
+							+ "(Reactions never compute), so a variable's runtime value — which existed only during the "
+							+ "original command — is gone by match time. "
+							+ $"Expose it in the command (e.g. `expose {exposeName} '{exposeName}';`) and capture over the "
+							+ "exposed label instead. (If this argument is a parameter whose value failed to resolve, that is "
+							+ "a resolution issue, not a capture over a variable.)");
 					}
-					return true;
+
+					// Case 6: a genuine null value. A null is data, not an authoring mistake;
+					// a $-capture cannot bind null, so the match simply FAILS here (it does not
+					// throw, and it does not fabricate an "incomplete complete match" that would
+					// later blow up in the Causation body). Keeping this a no-match lets a live
+					// Cue/Job reaction stay alive and lets a later event carry a real value.
+					// This is the a648232 contract.
+					return false;
 
 				case LiteralParameterNode literal:
 #if DEBUG
@@ -1128,7 +1266,7 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 
-		private bool MatchAlternative(AlternativeExpressionNode alternative, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchAlternative(AlternativeExpressionNode alternative, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			// Try each branch sequentially; the first that matches wins.
 			foreach (var branch in alternative.Branches)
@@ -1165,7 +1303,7 @@ namespace Puppeteer.EventSourcing.Follower
 			return false;
 		}
 
-		private bool MatchGuardedExpression(GuardedExpressionNode guarded, PatternListNode patternAst, Parameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
+		private bool MatchGuardedExpression(GuardedExpressionNode guarded, PatternListNode patternAst, MatchParameters capturedVariables, HashSet<int> usedMemberAccessIndices, HashSet<int> usedMethodCallIndices, ref int lastMatchedPosition)
 		{
 			// First: structural match of the inner expression.
 			if (!MatchExpression(guarded.InnerExpression, patternAst, capturedVariables, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
@@ -1188,7 +1326,7 @@ namespace Puppeteer.EventSourcing.Follower
 			return true;
 		}
 
-		private bool EvaluateGuard(GuardClause guard, Parameters capturedVariables, PatternListNode patternAst)
+		private bool EvaluateGuard(GuardClause guard, MatchParameters capturedVariables, PatternListNode patternAst)
 		{
 			// Special case: contains / not contains over the whole script text.
 			if (guard.Operator == GuardOperator.Contains || guard.Operator == GuardOperator.NotContains)
@@ -1245,7 +1383,7 @@ namespace Puppeteer.EventSourcing.Follower
 			return CompareValues(capturedValue, guard.Operator, guard.Value);
 		}
 
-		private object GetCapturedVariableValue(string variableName, Parameters capturedVariables, PatternListNode patternAst)
+		private object GetCapturedVariableValue(string variableName, MatchParameters capturedVariables, PatternListNode patternAst)
 		{
 			// Look up the captured parameters.
 			string cleanName = variableName.StartsWith("$") ? variableName.Substring(1) : variableName;
@@ -1346,7 +1484,7 @@ namespace Puppeteer.EventSourcing.Follower
 		//   expose 100 total;        → match alias "total" with literal value 100.
 		//   expose _ total;          → match any value at alias "total".
 		//   expose $x total;          → capture the alias "total" value into $x (Step 13, pending).
-		private bool MatchExposeNode(ExposeNode exposeNode, PatternListNode patternAst, Parameters capturedVariables, ref int lastMatchedPosition)
+		private bool MatchExposeNode(ExposeNode exposeNode, PatternListNode patternAst, MatchParameters capturedVariables, ref int lastMatchedPosition)
 		{
 			if (exposeNode == null) return false;
 			if (string.IsNullOrEmpty(exposeDataJson)) return false;
@@ -1421,7 +1559,7 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 		// Step 13: capture expose values into a $variable.
-		private bool CaptureExposeValue(string alias, string variableName, Type expectedType, Parameters capturedVariables)
+		private bool CaptureExposeValue(string alias, string variableName, Type expectedType, MatchParameters capturedVariables)
 		{
 #if DEBUG
 			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Capturing expose alias '{alias}' into variable '{variableName}'");

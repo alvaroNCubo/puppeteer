@@ -2082,6 +2082,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			return Expression.Property(instanceExpr, propertyInfo, argumentExprs);
 		}
+
+
 		protected List<object> GetArgumentValues()
 		{
 			List<object> values = new List<object>();
@@ -2108,15 +2110,41 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 							}
 							else
 							{
-								object value = arg.Execute();
-								values.Add(value);
+								// Prefer the value from the INVOCATION (the journaled Arguments,
+								// exposed on the symbol table by the Reaction) over executing the
+								// bound Id. Reading from the invocation does not depend on the
+								// program's per-instance parameter binding, which is what lets the
+								// resolved Action program be shared read-only. Falls back to the
+								// interpreted execute when no invocation channel is present (e.g.
+								// non-reaction matching contexts).
+								Parameters invocation = id.SymbolTable?.CurrentActionArguments;
+								if (invocation != null && invocation.ContainsParameter(id.Name))
+								{
+									values.Add(invocation[id.Name]?.GetValue());
+								}
+								else
+								{
+									values.Add(arg.Execute());
+								}
 							}
 						}
 						else
 						{
-							// Not a parameter — only the type is known (no value), so use a placeholder.
+							// Not a resolved parameter value — only the type is known, so use a
+							// placeholder. Distinguish a DECLARED PARAMETER whose value merely failed
+							// to resolve (its name is in the program's parameter signature) from a
+							// genuine global/local VARIABLE: the capture contract treats the former as
+							// a graceful no-match and the latter as a hard authoring error. The name
+							// lookup is authoritative regardless of whether value-resolution succeeded.
 							Type argType = arg.ComputeType();
-							values.Add(new Follower.TypedValuePlaceholder(argType, id.Name));
+							// Authoritative source: the cached Action's declared parameter names,
+							// hung transiently on the SymbolTable by the Reaction before matching.
+							// The re-parsed matching program's own Parameters is NOT authoritative
+							// in the resolution-failure path (it re-parses signature-less), so relying
+							// on it would mis-classify an unresolved @parameter as a variable.
+							bool isDeclaredParameter = id.IsParameter
+								|| (id.SymbolTable?.CurrentActionParameterNames?.Contains(id.Name) ?? false);
+							values.Add(new Follower.TypedValuePlaceholder(argType, id.Name, isDeclaredParameter));
 						}
 					}
 					else

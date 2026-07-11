@@ -17,34 +17,34 @@
 -- -----------------------------------------------------------------------------
 -- Step 1: Create Playbill tables (idempotent)
 -- -----------------------------------------------------------------------------
-IF OBJECT_ID('PlaybillSchemas', 'U') IS NULL
+IF OBJECT_ID('<ActorName>_PlaybillSchemas', 'U') IS NULL
 BEGIN
-    CREATE TABLE PlaybillSchemas (
+    CREATE TABLE [<ActorName>_PlaybillSchemas] (
         SchemaName    VARCHAR(64)    NOT NULL,
         Declarations  VARCHAR(2000)  NOT NULL,
         CreatedAt     DATETIME       NOT NULL,
-        CONSTRAINT PK_PlaybillSchemas PRIMARY KEY (SchemaName)
+        CONSTRAINT [PK_<ActorName>_PlaybillSchemas] PRIMARY KEY (SchemaName)
     );
 END;
 
-IF OBJECT_ID('PlaybillRecords', 'U') IS NULL
+IF OBJECT_ID('<ActorName>_PlaybillRecords', 'U') IS NULL
 BEGIN
-    CREATE TABLE PlaybillRecords (
+    CREATE TABLE [<ActorName>_PlaybillRecords] (
         EntryId               BIGINT         NOT NULL,
         SchemaName            VARCHAR(64)    NOT NULL,
         SerializedParameters  VARCHAR(2000)  NOT NULL,
-        CONSTRAINT PK_PlaybillRecords PRIMARY KEY (EntryId)
+        CONSTRAINT [PK_<ActorName>_PlaybillRecords] PRIMARY KEY (EntryId)
     );
-    CREATE INDEX IX_PlaybillRecords_SchemaName ON PlaybillRecords (SchemaName);
+    CREATE INDEX IX_PlaybillRecords_SchemaName ON [<ActorName>_PlaybillRecords] (SchemaName);
 END;
 
 
 -- -----------------------------------------------------------------------------
 -- Step 2: Register the "RestApi" schema (idempotent)
 -- -----------------------------------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM PlaybillSchemas WHERE SchemaName = 'RestApi')
+IF NOT EXISTS (SELECT 1 FROM [<ActorName>_PlaybillSchemas] WHERE SchemaName = 'RestApi')
 BEGIN
-    INSERT INTO PlaybillSchemas (SchemaName, Declarations, CreatedAt)
+    INSERT INTO [<ActorName>_PlaybillSchemas] (SchemaName, Declarations, CreatedAt)
     VALUES ('RestApi', 'In,ip:string,In,user:string', GETDATE());
 END;
 
@@ -71,7 +71,7 @@ END;
 -- The NOT EXISTS clause skips rows whose EntryId already has a PlaybillRecord
 -- (idempotent re-run safe — SQL Server has no INSERT IGNORE).
 -- -----------------------------------------------------------------------------
-INSERT INTO PlaybillRecords (EntryId, SchemaName, SerializedParameters)
+INSERT INTO [<ActorName>_PlaybillRecords] (EntryId, SchemaName, SerializedParameters)
 SELECT
     j.id AS EntryId,
     'RestApi' AS SchemaName,
@@ -81,7 +81,7 @@ SELECT
     '''' + REPLACE(ISNULL(j.[User], 'Anonymous'), '''', '\''') + '''' AS SerializedParameters
 FROM [<ActorName>] j
 WHERE (j.Ip IS NOT NULL OR j.[User] IS NOT NULL)
-  AND NOT EXISTS (SELECT 1 FROM PlaybillRecords pr WHERE pr.EntryId = j.id);
+  AND NOT EXISTS (SELECT 1 FROM [<ActorName>_PlaybillRecords] pr WHERE pr.EntryId = j.id);
 
 
 -- -----------------------------------------------------------------------------
@@ -104,6 +104,6 @@ WHERE (j.Ip IS NOT NULL OR j.[User] IS NOT NULL)
 -- -----------------------------------------------------------------------------
 -- SELECT COUNT(*) AS LegacyRowsWithIpOrUser FROM [<ActorName>]
 --   WHERE Ip IS NOT NULL OR [User] IS NOT NULL;
--- SELECT COUNT(*) AS PlaybillRecordsForRestApi FROM PlaybillRecords
+-- SELECT COUNT(*) AS PlaybillRecordsForRestApi FROM [<ActorName>_PlaybillRecords]
 --   WHERE SchemaName = 'RestApi';
 -- -- Both counts should match (modulo any pre-existing PlaybillRecords).

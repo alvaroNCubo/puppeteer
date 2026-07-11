@@ -31,6 +31,15 @@ namespace Choreography.Transport.Brokered
 		internal const string HeaderWitness = "puppeteer-witness";
 		internal const string HeaderReason = "puppeteer-reason";
 
+		// W3C Trace Context — EPHEMERAL observability metadata that lets a cross-actor
+		// tell chain render as ONE distributed trace. Unlike the `puppeteer-*` headers,
+		// the standard header NAMES are used verbatim so any OpenTelemetry-compatible
+		// APM (or an external producer/consumer) interoperates without a bespoke
+		// propagator. Single source of truth is Puppeteer.Tell.TraceContext so the same
+		// keys are used on every input medium, not just the broker. NEVER journaled.
+		internal const string HeaderTraceParent = Puppeteer.Tell.TraceContext.TraceParentHeader;
+		internal const string HeaderTraceState = Puppeteer.Tell.TraceContext.TraceStateHeader;
+
 		// Kind discriminator — a topic and its ack topic may both be observed by the
 		// same code path, so each record self-identifies.
 		internal const string KindTell = "tell";

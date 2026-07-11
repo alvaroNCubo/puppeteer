@@ -31,6 +31,9 @@ namespace Choreography.Theater
         private Playbill playbill;
         private string currentPlaybillSchemaName;
 
+        // Source of audit records a CarryPlaybill shadow copies (null = audit-off).
+        protected override Playbill ShadowPlaybillSource => playbill;
+
         // Convenience: if the caller does not provide libraries, the assembly from
         // which the ctor was invoked is assumed. Useful when domain and interface live in
         // the same project. The idiomatic path is to pass the domain DLLs explicitly
@@ -45,6 +48,7 @@ namespace Choreography.Theater
             : base(actorName, libraryAssemblies)
         {
             actorV2 = (ActorV2)ActorInstance;
+            ForbidCastOnlyReactions();
         }
 
         public PerformanceV2(PerformanceV1 source) : base(source)
@@ -52,6 +56,7 @@ namespace Choreography.Theater
             actorV2 = new ActorV2(source.GetActorV1());
             hook = new StageHook(actorV2);
             ActorInstance = actorV2;
+            ForbidCastOnlyReactions();
         }
 
         /// <summary>
@@ -78,6 +83,18 @@ namespace Choreography.Theater
             hook = source.hook;
             ActorInstance = source.ActorInstance;
             // formatterPrototype starts null; caller can override with .Formatter()
+        }
+
+        // A Theater PerformanceV2 is a director-role host: its steady-state live
+        // role is director (the provider is () => !isFollower, director once the
+        // handover completes). A CastOnly reaction never fires on a director, so
+        // declaring one here is an anti-pattern. Raise the handler flag so the
+        // Reactions builder rejects `.CastOnly()` LOUDLY at declaration time rather
+        // than letting it be a silent no-op. Idempotent; the N-projection ctor
+        // shares an already-flagged handler. V2-only — PerformanceV1 is untouched.
+        private void ForbidCastOnlyReactions()
+        {
+            actorV2.Handler.ForbidsCastOnlyActivation = true;
         }
 
         protected override Actor CreateActor(string actorName)
@@ -227,6 +244,40 @@ namespace Choreography.Theater
             string body = transpilerPrototype.Transpile(notation);
             return new ActorV2Invocation(actorV2, check, body, playbill, currentPlaybillSchemaName)
                 .WithParameters(configure)
+                .PerformCheckThenCommand();
+        }
+
+        // Enact bound to a set of carried values: the transpiler lowers the
+        // notation (author-side, once) into a parametric command body, and the
+        // ordered values are bound through the SAME pooled path the Command
+        // surface uses (WithParameters). Only the transpiled body is journaled,
+        // as a self-contained parametric Action — replay re-issues it with the
+        // resolved arguments and never re-runs the transpiler. This is the
+        // receiver-side dual a Told(...).Enact(...) mapping applies when the tell
+        // carries a payload to bind into the body.
+        public string PerformEnact(string notation, Parameters values)
+        {
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            if (values == null) throw new ArgumentNullException(nameof(values));
+            string body = transpilerPrototype.Transpile(notation);
+            return new ActorV2Invocation(actorV2, body, playbill, currentPlaybillSchemaName)
+                .WithParameters(values)
+                .PerformCommand();
+        }
+
+        // CheckThenEnact bound to carried values. The check and the transpiled
+        // body share the bound values (PerformCheckThenCommand re-evaluates the
+        // check under the write lock), so the sender's carried check can guard
+        // against the payload it carried. Transpile still happens once, author-
+        // side; only the parametric body is journaled.
+        public string PerformCheckThenEnact(string check, string notation, Parameters values)
+        {
+            if (check == null) throw new ArgumentNullException(nameof(check));
+            if (notation == null) throw new ArgumentNullException(nameof(notation));
+            if (values == null) throw new ArgumentNullException(nameof(values));
+            string body = transpilerPrototype.Transpile(notation);
+            return new ActorV2Invocation(actorV2, check, body, playbill, currentPlaybillSchemaName)
+                .WithParameters(values)
                 .PerformCheckThenCommand();
         }
 

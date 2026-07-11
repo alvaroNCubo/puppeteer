@@ -38,4 +38,16 @@ namespace Puppeteer
 		}
 	}
 
+	// A pattern-AUTHORING error (as opposed to a data-driven match/no-match outcome):
+	// the pattern cannot yield a binding for the observed event no matter its data —
+	// e.g. a $-capture placed over an argument that carries no journaled value (a
+	// global/local variable or an operated expression). It must PROPAGATE (surface to
+	// logs / fail the batch) rather than be swallowed as a silent no-match, so the
+	// author sees the mistake instead of a reaction that quietly never fires. Pattern.Match
+	// re-throws this, mirroring how it already re-throws the OUT-parameter authoring error.
+	public sealed class PatternCaptureException : LanguageException
+	{
+		public PatternCaptureException(string message) : base(message) { }
+	}
+
 }

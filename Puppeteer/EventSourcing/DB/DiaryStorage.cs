@@ -88,6 +88,23 @@ namespace Puppeteer.EventSourcing.DB
 			this.EventDataPool = new EventDataPool();
 		}
 
+		// Structural identity for the "a relocation target must differ from the actor's
+		// own store" guard (Reactions.RelocatedTo / RelocatedInMemory). Two stores are
+		// "the same" when they are the same backend for the same actor pointed at the
+		// same connection — i.e. they would read/write the same physical journal +
+		// checkpoints. Best-effort on the connection string (compared verbatim); it
+		// catches the accidental "relocate onto myself" case without pretending to
+		// canonicalize every backend's connection-string dialect.
+		internal bool IsSameStoreAs(DiaryStorage other)
+		{
+			if (other == null) return false;
+			if (ReferenceEquals(this, other)) return true;
+
+			return GetType() == other.GetType()
+				&& string.Equals(Name, other.Name, StringComparison.Ordinal)
+				&& string.Equals(ConnectionString, other.ConnectionString, StringComparison.Ordinal);
+		}
+
 		protected internal abstract long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false);
 		protected internal abstract Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false);
 

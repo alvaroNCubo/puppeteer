@@ -29,6 +29,8 @@ namespace Puppeteer.EventSourcing.DB
 		// Requires AllowMultipleStatements = true in the MySQL connection string: "Server=...;Database=...;AllowMultipleStatements=true;..."
 		internal DiaryStorageMySQL(IActorEventJournalClient eventJournalClient, string connectionString) : base(eventJournalClient, connectionString)
 		{
+			StorageActorName.ValidateSqlIdentifier(Name, "MySQL");
+
 			mySqlWriteScriptCommand = $"insert into `{Name}` (id, OccurredAt, Script) values (@id, @OccurredAt, @Script)";
 
 			// Define rows: script = canonical sentence, action = actionId,

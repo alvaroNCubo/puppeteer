@@ -50,12 +50,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal int ActionId => actionId;
 
 		// Canonical parameter declaration text exactly as it should appear inside the
-		// parens of `define action <id> (...)`. Format: `name:type` separated by `, `
-		// (no '@' prefix — see class-level docs for option (A) sign-off rationale).
-		// Phase 1 signed: NO normalization of parameter order — the order is
-		// semantically significant because callsite arguments are positionally bound.
-		// Two declarations with the same set in different orders are different actions
-		// by design.
+		// parens of `define action <id> (...)`. Format: `[out|inout ]name:type` separated
+		// by `, ` (no '@' prefix — see class-level docs for option (A) sign-off rationale).
+		// The optional lowercase `out`/`inout` keyword carries the parameter modifier; an
+		// entry with no keyword is In (see Parameters.UserParametersAsCanonicalText and
+		// ParseDefineActionParameterList). Phase 1 signed: NO normalization of parameter
+		// order — the order is semantically significant because callsite arguments are
+		// positionally bound. Two declarations with the same set in different orders are
+		// different actions by design.
 		internal string ParametersText => parametersText;
 
 		internal IReadOnlyList<Statement> Body => body;

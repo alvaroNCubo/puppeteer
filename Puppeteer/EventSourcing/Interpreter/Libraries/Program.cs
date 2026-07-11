@@ -20,6 +20,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		private bool statementsReleased;
 		private bool cachedHasSingleTellStatement;
 		private bool cachedContainsTell;
+		private bool cachedContainsExpose;
+		private bool? computedContainsExpose;
 		internal bool StatementsReleased => statementsReleased;
 
         private readonly bool programIsEval;
@@ -35,6 +37,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         private Parameters parameters;
 		private ParameterSignature parameterSignature;
 		private readonly bool isCheck;
+		// True when this Program was produced by Parser.Rehydrate() — journal replay. That
+		// path OVERLOADS isCheck to mean "don't need output" and re-parses ordinary COMMANDS
+		// (which legitimately create/update globals). A genuine check parsed via Parser.Parse
+		// leaves this false. Scope resolution keys the read-only-context rule off this so a
+		// replayed command is never mistaken for a read-only check.
+		private readonly bool isRehydrationReparse;
 
 		internal DateTime Now { get; set; }
 		internal long EntryId { get; set; }
@@ -117,7 +125,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			new Dictionary<string, ParameterExpression>(StringComparer.OrdinalIgnoreCase);
 		internal Dictionary<string, ParameterExpression> GlobalStorageByName => globalStorageByName;
 
-		internal Program(DomainLibraries libraries, string script, SymbolTable symbolTable, List<Statement> statements, int [] level, bool isQuery, bool isCheck)
+		internal Program(DomainLibraries libraries, string script, SymbolTable symbolTable, List<Statement> statements, int [] level, bool isQuery, bool isCheck, bool isRehydrationReparse = false)
         {
             this.libraries = libraries ?? throw new ArgumentNullException(nameof(libraries));
             this.Script = script;
@@ -128,6 +136,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             this.isQuery = isQuery;
             this.parameters = Parameters.EMPTY;
             this.isCheck = isCheck;
+            this.isRehydrationReparse = isRehydrationReparse;
         }
 
         internal int Level
@@ -181,6 +190,38 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return false;
         }
 
+        // An `expose` has no compiled-mode lowering: the compiled path
+        // (ExecuteExpression) renders a single flat Output, so an expose is
+        // appended to the same document as `print` instead of its own expose
+        // channel, and LastExposeData is never materialized (only Execute()
+        // reads ExecutionOutput.GetExposeJson). The result is a policy-dependent
+        // semantic: the exposed value is captured and journaled interpreted but
+        // dropped compiled, so a Reaction seeking the expose matches under
+        // AlwaysInterpreted and silently fails under a compiling policy.
+        // AdjustCompilationMode uses this to force the WHOLE program interpreted,
+        // exactly as ContainsTell does — the interpreter routes the expose to its
+        // separate buffer and sets LastExposeData, making capture policy-invariant.
+        // Unlike a tell, an expose can be nested inside a foreach/if body, so the
+        // detection walks the AST (memoized: statements are immutable after parse).
+        internal bool ContainsExpose
+        {
+            get
+            {
+                if (statementsReleased) return cachedContainsExpose;
+                computedContainsExpose ??= ComputeContainsExpose();
+                return computedContainsExpose.Value;
+            }
+        }
+
+        private bool ComputeContainsExpose()
+        {
+            if (statements == null) return false;
+            // A lone `expose` parses to a bare ExposeStatementIndividual; only a
+            // comma list is wrapped in an ExposeStatement. Collecting the individual
+            // covers both shapes (the wrapper visits its items).
+            return Collect<ExposeStatementIndividual>().Any();
+        }
+
         internal bool IsQuery
         {
             get
@@ -194,6 +235,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             get
             {
                 return isCheck;
+            }
+        }
+
+        internal bool IsRehydrationReparse
+        {
+            get
+            {
+                return isRehydrationReparse;
             }
         }
 
@@ -237,19 +286,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				case CompilationModePolicy.Automatic:
 					if (IsCompiledMode) throw new LanguageException("The Program is already in compiled execution mode.");
 
-					// A `tell` has no compiled-mode lowering, so a tell-bearing
-					// program runs interpreted. This is per-program: the tell lives in
-					// a Reaction's Causation body (post-commit, not the actor's hot
-					// command path), so the actor's other programs keep compiling —
-					// no global interpreted regression.
-					IsCompiledMode = !useInterpretedMode && !ContainsTell;
+					// A `tell` or `expose` has no compiled-mode lowering, so a program
+					// carrying either runs interpreted. This is per-program and keeps
+					// the capture of the expose side-channel (LastExposeData) policy-
+					// invariant; the actor's other programs keep compiling — no global
+					// interpreted regression.
+					IsCompiledMode = !useInterpretedMode && !ContainsTell && !ContainsExpose;
 					break;
 				case CompilationModePolicy.AlwaysCompiled:
-					// Even under an explicit AlwaysCompiled policy a tell cannot be
-					// compiled; fall back to interpreted for the tell-bearing program
-					// rather than failing at write-time. AlwaysCompiled exists only to
-					// pin unit-test execution mode.
-					IsCompiledMode = !ContainsTell;
+					// Even under an explicit AlwaysCompiled policy a `tell`/`expose`
+					// cannot be compiled; fall back to interpreted for that program
+					// rather than dropping the expose side-channel at write-time.
+					// AlwaysCompiled exists only to pin unit-test execution mode.
+					IsCompiledMode = !ContainsTell && !ContainsExpose;
 					break;
 				case CompilationModePolicy.AlwaysInterpreted:
 					IsCompiledMode = false;
@@ -317,6 +366,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// cachedContainsTell is only ever snapshotted false — but keep it honest.)
 			cachedHasSingleTellStatement = statements.Count == 1 && statements[0] is TellStatement;
 			cachedContainsTell = ComputeContainsTell();
+			// A program reaching ReleaseStatements is compiled (gated above on
+			// IsCompiledMode), so by AdjustCompilationMode it can never contain an
+			// expose — snapshot it honestly anyway before the AST is dropped.
+			cachedContainsExpose = ComputeContainsExpose();
 
 			// Drop the Statement tree and the all-references list. idDeclarations
 			// is kept (small, and Declarations may be queried) — the bulk freed
@@ -353,6 +406,22 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			foreach (Statement source in statements)
 			{
+				// Top-level LOCAL declarations only occur in a read-only context (query/check),
+				// where the user scope starts local. In a command the top level is global, so
+				// this branch is inert (top-level locals never arise there). A block-local is
+				// self-contained inside its own BlockStatement.ExecuteExpression, so only a
+				// DIRECT top-level local needs its VariableSymbol storage declared and
+				// initialized in this lambda's block — mirroring BlockStatement.
+				if (source is NewInstanceStatement topLevelAssignment
+					&& topLevelAssignment.LValue is Id lValueId
+					&& lValueId.IsLocalVariable
+					&& lValueId.IsOriginalLValueDeclaration)
+				{
+					cmds.Add(topLevelAssignment.AllocateLocalStorageExpression(parametersParam));
+					ParameterExpression localStorage = (ParameterExpression)topLevelAssignment.LocalStorageExpression;
+					if (localStorage != null) referencedParamsAndGlobalVarDeclationsExp.Add(localStorage);
+				}
+
 				cmds.Add(source.ExecuteExpression(parametersParam, outputParam));
 			}
 
@@ -429,9 +498,46 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return Execute(false);
         }
 
-        internal string ExecuteCheck()
+        // A check honors the SAME compilation mode as a command/query: it runs through the
+        // compiled lambda when IsCompiledMode, interpreted otherwise. Historically a check
+        // always ran interpreted here because the command-gating signal LastCheckBlocked was
+        // only computed by the interpreted Execute(); the compiled branch below wires it
+        // (reading Output.HasBlockingEWI before the Output returns to the pool). Unlike
+        // ExecuteExpression, a check does NOT clear parameters afterwards — the two-phase
+        // check-then-command lifecycle (ActorHandler.PerformCheckThenCmd) owns parameter state.
+        internal string ExecuteCheck(Parameters parameters)
         {
+            if (IsCompiledMode)
+            {
+                return ExecuteCheckCompiled(parameters);
+            }
             return Execute(false);
+        }
+
+        private string ExecuteCheckCompiled(Parameters parameters)
+        {
+            if (_executable == null)
+            {
+                this.SolveReferences(parameters, withStaticValidation: true);
+                var programExpression = this.ProgramExpression();
+                var sw = LabInstrumentation.OnCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
+                _executable = programExpression.Compile();
+                if (sw != null) { sw.Stop(); LabInstrumentation.OnCompileElapsedTicks(sw.ElapsedTicks); }
+                this.idParameters = null;
+            }
+            else
+            {
+                this.SolveParameters(parameters);
+            }
+
+            var output = (symbolTable.RecoveringState) ? Output.RentWithoutOutput() : Output.RentWithOutput();
+            string result = _executable(parameters, output);
+            // The command-gating signal the interpreted Execute captures at its tail: only
+            // Error/Warning EWIs condition the command. Read BEFORE returning to the pool.
+            LastCheckBlocked = output.HasBlockingEWI();
+            Output.Return(output);
+            // Deliberately NO parameters.Clear() (see ExecuteCheck comment).
+            return result;
         }
 
         internal void LoadArguments(Parameters arguments, bool recomputeEvalParameters = true)
@@ -723,11 +829,29 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             private readonly HashSet<Id> parametersIds;
 			private readonly SymbolTable symbolTable;
 			private readonly bool isQuery;
+			private readonly bool isCheck;
+			private readonly bool isRehydrationReparse;
+
+			// A genuine read-only user context: a real PerformQuery or a real check. Such a
+			// context touches no journal and has no global write surface, so its user scope
+			// is local-only: a top-level assignment creates a LOCAL and a scope-0 global
+			// create is unreachable — the same reason expose/tell/upgrade are rejected there.
+			// isCheck alone is NOT enough: journal replay OVERLOADS isCheck to mean "don't
+			// need output" and re-parses ordinary COMMANDS (which DO create globals). Two
+			// independent signals exclude every replay flavor:
+			//   * isRehydrationReparse — the parse-time mark set by Parser.Rehydrate (covers a
+			//     direct SolveReferences even when RecoveringState was never set);
+			//   * RecoveringState — the runtime replay window, which also covers Eval bodies
+			//     re-parsed at replay time (their reparse does not carry the parse-time mark).
+			private bool IsReadOnlyUserContext =>
+				(isQuery || isCheck) && !isRehydrationReparse && !symbolTable.RecoveringState;
 
 			internal ReferencesSolver(Program program, Parameters initialParameterSet)
             {
 				this.symbolTable = program.symbolTable;
 				this.isQuery = program.IsQuery;
+				this.isCheck = program.IsCheck;
+				this.isRehydrationReparse = program.IsRehydrationReparse;
 
 				// Collect LValues from assignments, excluding those that already exist as global variables
 				var lValuesFromAssignments = program.Collect<NewInstanceStatement>()
@@ -796,8 +920,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 					if (id.Level == 0 && !id.IsParameter)
                     {
-                        RejectGlobalDeclarationInQuery(id);
-                        id.DeclareAsGlobalVariable();
+                        if (IsReadOnlyUserContext)
+                        {
+                            // Read-only context: the user scope is local-only, so a top-level
+                            // (scope-0) assignment to a fresh name creates a LOCAL, not a
+                            // global. Global creation is structurally unreachable here — the
+                            // same reason expose/tell/upgrade are rejected. An assignment to a
+                            // name that ALREADY resolved to a global is handled by the
+                            // globalLValues loop above (rejected via RejectGlobalDeclarationInQuery).
+                            id.DeclareAsLocalVariable();
+                        }
+                        else
+                        {
+                            RejectGlobalDeclarationInQuery(id);
+                            id.DeclareAsGlobalVariable();
+                        }
                     }
                     else if (id.Level >= programLevel && !id.IsGlobalVariable && !id.IsParameter)
                     {
@@ -952,23 +1089,21 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
             }
 
-			// A query is read-only and never journaled, so it must not declare or write a
-			// top-level global variable — that would mutate actor state. This is the rule
-			// the parser used to enforce eagerly with "Global variable declarations are not
-			// allowed in queries", but the parser cannot tell a new-global declaration from
-			// an assignment to a pre-declared @Out parameter: the Lexer drops the '@' alias
-			// and the parameter set is unknown until reference resolution. By the time this
-			// runs each LValue's scope is resolved, so an Out/InOut parameter LValue is
-			// Scope.Parameter (declared earlier in the ctor) and never reaches the two
+			// A read-only context (query or check) is never journaled, so it must not write a
+			// top-level global variable — that would mutate actor state. A fresh top-level
+			// name is declared LOCAL (see the IsReadOnlyUserContext branch in the ctor) and
+			// never reaches this guard; only an assignment whose LValue already resolved to an
+			// EXISTING global does (the globalLValues loop), and that write is rejected. The
+			// parser cannot make this distinction eagerly: the Lexer drops the '@' alias and
+			// the parameter set is unknown until reference resolution, so an Out/InOut
+			// parameter LValue is Scope.Parameter by the time this runs and never reaches the
 			// DeclareAsGlobalVariable sites that call this — only genuine globals do.
-			// Restricted to Level 0 to match the original guard, which only fired at the
-			// top level (currLevel.Length == 0); assignments nested in a block were never
-			// rejected here.
 			private void RejectGlobalDeclarationInQuery(Id lValue)
 			{
-				if (isQuery && lValue.Level == 0)
+				if (IsReadOnlyUserContext && lValue.Level == 0)
 				{
-					throw new LanguageException($"Global variable declarations are not allowed in queries. Cannot assign to the global variable '{lValue.Name}' in a query because queries are read-only. If '{lValue.Name}' is meant to receive a computed result, declare it as an output parameter (Parameter.Out) and reference it as '@{lValue.Name}'.");
+					string context = isQuery ? "a query" : "a check";
+					throw new LanguageException($"Global variable declarations are not allowed in queries. Cannot assign to the global variable '{lValue.Name}' in {context} because {context} is read-only. If '{lValue.Name}' is meant to receive a computed result, declare it as an output parameter (Parameter.Out) and reference it as '@{lValue.Name}'.");
 				}
 			}
 

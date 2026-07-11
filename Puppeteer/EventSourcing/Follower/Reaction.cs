@@ -1085,9 +1085,42 @@ namespace Puppeteer.EventSourcing.Follower
 		internal void SetCausationAction(string script, string check)
 		{
 			EnsureNoActionConfigured();
+			EnsureCausationBodyParses(script);
 			this.scriptForCmd = script;
 			this.causationCheck = check;  // null when no check: was supplied
 			this.actionType = ReactionActionType.Causation;
+		}
+
+		// Build-time guard for the Causation plane, mirroring EnsureNoTellInProgramPlane:
+		// reject a malformed .Causation.Continue(...) body at DEFINITION time with an
+		// actionable message that names the reaction, instead of storing it verbatim and
+		// letting it fail much later — deep inside a live push match, where the parser
+		// error surfaces without any reaction context and (worse) is swallowed by the
+		// push-loop resilience, so the tell silently never fires. This is a purely
+		// SYNTACTIC check (Parse only; reference resolution stays at match time against
+		// the event's captures/parameters), so it cannot false-positive on an identifier
+		// that only becomes bound at runtime.
+		private void EnsureCausationBodyParses(string script)
+		{
+			if (actorHandler == null || string.IsNullOrWhiteSpace(script)) return;
+
+			Parser parser = actorHandler.ParsersPool.Rent();
+			try
+			{
+				parser.SetSource(script);
+				parser.Parse(isQuery: false, isCheck: false);
+			}
+			catch (LanguageException ex)
+			{
+				throw new LanguageException(
+					$"Reaction '{name}': the .Causation.Continue(...) body could not be parsed. "
+					+ $"Fix the script (a 'tell' reads: tell <Message> [with <v1, v2, ...>] to <Addressee>[('<id>')] [once <expr>];). "
+					+ $"Parser said: {ex.Message}");
+			}
+			finally
+			{
+				actorHandler.ParsersPool.Return(parser);
+			}
 		}
 
 		internal void SetMetadataAction(MetadataKind kind, string destination, string[] elideSeeks = null)
@@ -1313,13 +1346,35 @@ namespace Puppeteer.EventSourcing.Follower
 					// this PerformCmd, so the RECEIVER runs it as
 					// CheckThenCommand. It is always cleared after the body.
 					actorHandler.CausationTellCheck = this.causationCheck;
+					// Stamp the causal provenance of this Reaction onto any tell its body
+					// emits: the triggering entry id (per-hop-local causal identity) and
+					// the Reaction's name. Cleared in the finally alongside the check.
+					actorHandler.CausationTellCausalEventId = triggeringEntryId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+					actorHandler.CausationTellReactionName = this.name;
 					try
 					{
 						actorHandler.PerformCmd(this.scriptForCmd, parameters);
 					}
+					catch (LanguageException ex)
+					{
+						// Contextualize a resolution/execution failure of the Causation body.
+						// The bare cause (e.g. "Variable 'accountNumber' has not been defined"
+						// from Id.Execute) gives no hint that it came from a Reaction's Causation
+						// body nor which reaction — and on the live push it is swallowed, so the
+						// tell silently never fires. Naming the reaction + the likely cause turns
+						// the swallowed mystery into an actionable diagnostic. Re-thrown (not
+						// eaten) so the checkpoint stays unconfirmed and the match is retried.
+						throw new LanguageException(
+							$"Reaction '{name}': the .Causation.Continue(...) body failed to execute — {ex.Message} "
+							+ $"Every identifier referenced in a Causation body must be a match capture declared in the "
+							+ $"OnMatch pattern (e.g. $accountNumber), a parameter, or an already-defined variable; a name "
+							+ $"that is none of these resolves as an undefined actor variable.");
+					}
 					finally
 					{
 						actorHandler.CausationTellCheck = null;
+						actorHandler.CausationTellCausalEventId = null;
+						actorHandler.CausationTellReactionName = null;
 					}
 				}
 				finally
@@ -1452,6 +1507,20 @@ namespace Puppeteer.EventSourcing.Follower
 
 			if (eventData is ActionEventData actionData)
 			{
+				// Hang the Action's AUTHORITATIVE declared-parameter names on the symbol table
+				// for the duration of this event's match. DotAccess.GetArgumentValues reads them
+				// to tell a $-capture over a declared @parameter (capturable; value maybe
+				// transiently unresolved → graceful no-match) from one over a genuine variable
+				// (authoring error → hard PatternCaptureException). The cached signature is the
+				// only authoritative source — the re-parsed matching program loses it on the
+				// resolution-failure path. Cleared below for non-Action events.
+				symbolTable.CurrentActionParameterNames = GetDeclaredParameterNames(actionData.ActionId);
+
+				// The invocation's argument VALUES, built fresh from the journaled Arguments —
+				// the read-only value source the matcher consults, independent of any program's
+				// per-instance binding (the step that lets the resolved Action be shared).
+				symbolTable.CurrentActionArguments = BuildInvocationArguments(actionData);
+
 				// Check whether the Program is already in our local cache.
 				bool isFirstTime = !cachedPrograms.ContainsKey(actionData.ActionId);
 
@@ -1480,6 +1549,33 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			else
 			{
+				// Not an Action event: clear any Action context so it cannot leak into this
+				// event's matching (e.g. a tell/ack Script event).
+				symbolTable.CurrentActionParameterNames = null;
+				symbolTable.CurrentActionArguments = null;
+
+				// Rule 1: a pure-domain reaction observes ActorV2 Actions (Define+Invocation),
+				// never V1-style literal Script commands, so a ScriptEvent is not a candidate
+				// for it — skip it (no match). Reactions that tell/ack or expose are NOT
+				// pure-domain (IsPureDomainReaction() is false) and keep observing their Script
+				// sentences. A one-time Debug hint helps diagnose a producer that still emits a
+				// Script where the reaction expects an Action.
+				if (eventData is ScriptEventData && IsPureDomainReaction())
+				{
+					if (!ruleOneScriptAdvisoryLogged)
+					{
+						ruleOneScriptAdvisoryLogged = true;
+						// Debug, not Error: it is a diagnostic hint, not a failure — and
+						// ConsoleLogger.Error requires a non-null exception. Debug is null-safe.
+						actorHandler?.Logger?.Debug(
+							$"[Reaction '{Name}'] skipped a literal ScriptEvent (EntryId={eventData.EntryId}): "
+							+ "domain reactions observe ActorV2 Actions (Define+Invocation), not V1-style literal "
+							+ "Script commands. Migrate the producing endpoint to a parametrized V2 command "
+							+ "(actor.Using(script).WithParameters(...)) so the reaction observes an Action.");
+					}
+					return false;
+				}
+
 				// B.2 ext: last-executed-script fast path. Push-mode Cue/Job
 				// Reactions typically consume an entry within microseconds of
 				// the writer publishing it, so the entry just executed under
@@ -1506,6 +1602,94 @@ namespace Puppeteer.EventSourcing.Follower
 
 			return true;
 		}
+
+		// The declared parameter names of a cached Action, from its AUTHORITATIVE signature
+		// (resolved at Define time). Used to classify $-capture placeholders during matching:
+		// a name in this set is a declared @parameter (capturable; value maybe transiently
+		// unresolved), a name absent from it is a genuine variable (authoring error). Returns
+		// null when the Action is not cached (the caller then leaves no set, and a placeholder
+		// is treated as a non-declared-parameter — but a matched ActionEvent is always cached,
+		// so in practice this returns the real signature).
+		private HashSet<string> GetDeclaredParameterNames(int actionId)
+		{
+			if (!actorHandler.TryGetAction(actionId, out var entry) || entry.Program?.Parameters == null)
+				return null;
+
+			var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var p in entry.Program.Parameters)
+			{
+				if (p?.Name != null) names.Add(p.Name);
+			}
+			return names;
+		}
+
+		// The invocation's argument VALUES for a cached Action, built fresh from the
+		// journaled Arguments against the Action's authoritative signature. This is the
+		// read-only value source the matcher consults (SymbolTable.CurrentActionArguments),
+		// decoupled from any program's per-instance binding — the enabler for sharing the
+		// resolved Action program read-only. A value that fails to deserialize leaves its
+		// parameter unset (partial); the capture contract then treats that unresolved
+		// DECLARED parameter gracefully (no hard error). Returns null when not cached.
+		private Parameters BuildInvocationArguments(ActionEventData actionData)
+		{
+			if (!actorHandler.TryGetAction(actionData.ActionId, out var entry) || entry.Program?.Parameters == null)
+			{
+				return null;
+			}
+
+			var args = new Parameters(entry.Program.Parameters.ParametersAsString(), actorHandler.Libraries);
+			try
+			{
+				args.LoadArguments(actionData.Arguments);
+			}
+			catch (Exception)
+			{
+				// Partial values; a $-capture over the unresolved declared parameter is handled
+				// gracefully by the capture contract, and the cause is recorded elsewhere.
+				return args;
+			}
+
+			return args;
+		}
+
+		// Rule 1 (round 1, advisory): true when this Reaction's pattern is PURELY a DOMAIN-CALL
+		// pattern — it has at least one Seek and NO Seek references `tell` or `expose`. Both are
+		// excluded because they are NOT domain-call patterns: a `tell`/`tell ack` pattern
+		// legitimately observes Script sentences, and an `expose` pattern matches the event's
+		// exposeData (orthogonal to Script-vs-Action — exposeData rides on either). Rule 1
+		// targets ONLY domain-call patterns (`[T].Method(...)`, ctor, assignment), which is
+		// where "observe an Action, not a literal Script" applies. Computed once (patterns are
+		// fixed after definition) and cached.
+		private bool? isPureDomainReactionCache;
+		private bool IsPureDomainReaction()
+		{
+			if (isPureDomainReactionCache.HasValue) return isPureDomainReactionCache.Value;
+
+			bool hasPattern = false;
+			bool anyNonDomain = false;
+			if (reactionEngines != null)
+			{
+				foreach (var engine in reactionEngines)
+				{
+					for (int i = 0; i < engine.Patterns.Count; i++)
+					{
+						hasPattern = true;
+						string text = engine.Patterns[i].PatternText;
+						if (Lexer.SourceContainsToken(text, TokenType.tell) || Lexer.SourceContainsToken(text, TokenType.expose))
+						{
+							anyNonDomain = true;
+							break;
+						}
+					}
+					if (anyNonDomain) break;
+				}
+			}
+			isPureDomainReactionCache = hasPattern && !anyNonDomain;
+			return isPureDomainReactionCache.Value;
+		}
+
+		// Rule 1 advisory is emitted at most once per Reaction lifetime.
+		private bool ruleOneScriptAdvisoryLogged;
 
 		// ===== REFERENCE RESOLUTION FOR ActionEventData (Commits C-D-E) =====
 		// Runs ONLY THE FIRST TIME an ActionId is seen (cache miss).
@@ -1576,10 +1760,49 @@ namespace Puppeteer.EventSourcing.Follower
 				// and build real Parameters for IN/INOUT/EVAL from actionData.Arguments.
 				var cacheParameters = entry.Program.Parameters;
 
-				var eventParameters = new Parameters(cacheParameters.ParametersAsString());
-				eventParameters.LoadArguments(actionData.Arguments);
+				// Re-parse WITH the actor's domain type resolver so a parameter typed as a
+				// domain enum (e.g. `channel:SaleChannel`) resolves instead of throwing
+				// "not a valid primitive or known domain enum". Without the resolver the
+				// string-round-trip only accepts primitives, so ANY reaction observing an
+				// action that carries an enum parameter failed to resolve (in push AND batch).
+				var eventParameters = new Parameters(cacheParameters.ParametersAsString(), actorHandler.Libraries);
+
+				// (b) read-only-reuse: value deserialization is NON-FATAL for the reaction's
+				// matching. Observed values come from the invocation channel
+				// (CurrentActionArguments), not from this program, so a bad/undeserializable
+				// value must NOT prevent STRUCTURE/kind resolution (SolveReferences) or caching.
+				// That ordering — value-load throwing before SolveReferences — was the §4.3 root
+				// (a bad value left the action unresolved, so the match/tell never fired live and
+				// only recovered on a batch replay). Record the cause and continue with the
+				// signature-only Parameters; the structure resolves regardless of the value.
+				try
+				{
+					eventParameters.LoadArguments(actionData.Arguments);
+				}
+				catch (Exception loadEx)
+				{
+					argumentsDeserializationErrors++;
+					RecordResolutionError(actionData.ActionId, $"Arguments deserialization (non-fatal; matching reads the invocation channel): {loadEx.Message}", loadEx);
+				}
 
 				if (!cacheParameters.IsStructuralEquivalentTo(eventParameters)) throw new LanguageException("Parameter structure mismatch between cache and event");
+
+				// A2 (reactions ref-resolution): seed this reaction's symbol table with the
+				// Action's frozen per-Action global types before resolving the body. The
+				// signature was resolved once at Define time with the actor's globals in
+				// scope (ActorHandler.FreezeGlobalSignature), so a receiver global the body
+				// references (e.g. a chain rooted at an actor global) is known here — and its
+				// type is authoritative — regardless of which events this reaction replayed.
+				// This is the precise, per-Action successor to the broad Execute-time seed
+				// (which remains as a fallback belt): it fills any global the broad seed could
+				// not know, e.g. one created after this reaction started observing.
+				foreach (var frozenGlobal in entry.GlobalSignature)
+				{
+					if (frozenGlobal.Value != null && !symbolTable.HasVariable(frozenGlobal.Key))
+					{
+						symbolTable.SetVariable(frozenGlobal.Key, null, frozenGlobal.Value);
+					}
+				}
 
 				// Logging: show registered parameters.
 				// Playbill final refactor: IsNow is no longer filtered (there is no SystemParameter — everything is a user param).
@@ -1605,7 +1828,17 @@ namespace Puppeteer.EventSourcing.Follower
 				// table) dereferences a null global and throws a NullReferenceException, which
 				// SolveActionReferences swallows — leaving the action unresolved so the match
 				// (and its tell) never fires on the live push, only on a full batch replay.
-				program.LoadArguments(eventParameters, recomputeEvalParameters: false);
+				// Non-fatal for the same reason (values are read from the invocation channel).
+				// This still sets program.Parameters (before any eval), which Pattern.Match uses
+				// for the per-event Now; it just must not abort structure resolution + caching.
+				try
+				{
+					program.LoadArguments(eventParameters, recomputeEvalParameters: false);
+				}
+				catch (Exception loadEx)
+				{
+					RecordResolutionError(actionData.ActionId, $"Program argument load (non-fatal; matching reads the invocation channel): {loadEx.Message}", loadEx);
+				}
 				program.SolveReferences(eventParameters, withStaticValidation: true);
 
 				// Store the Program with its Parameters in the cache.

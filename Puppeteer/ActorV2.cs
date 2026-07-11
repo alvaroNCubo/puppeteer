@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Reflection;
 
 namespace Puppeteer
@@ -26,9 +25,6 @@ namespace Puppeteer
 			ExecutionFailed?.Invoke(error);
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public ActorV2Invocation Using(string scriptForChk, string scriptForCmd)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(scriptForChk);
@@ -37,9 +33,6 @@ namespace Puppeteer
 			return new ActorV2Invocation(this, scriptForChk, scriptForCmd);
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public ActorV2Invocation Using(string script)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);

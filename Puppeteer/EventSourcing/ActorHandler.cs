@@ -194,6 +194,19 @@ namespace Puppeteer.EventSourcing
 			actingAsDirectorProvider = provider;
 		}
 
+		// A director-role host (a Theater PerformanceV2) forbids CastOnly reactions.
+		// A CastOnly reaction only ever fires on a Cast/follower node
+		// (ActivationAllowsRole returns !isActingAsDirector); on a host whose
+		// steady-state role is director it would be a SILENT no-op — it never fires
+		// and no error is raised. The host raises this flag so a `.CastOnly()`
+		// declaration throws a LanguageException EAGERLY at CreateReaction time
+		// instead of silently never firing. The core builder cannot enforce this
+		// (it has no host context: the role is provided at runtime via
+		// SetActingAsDirectorProvider). A genuine Cast/follower node in a real
+		// replication topology (the P2P Stage) never raises it, so it can still
+		// declare `.CastOnly()`.
+		internal bool ForbidsCastOnlyActivation { get; set; }
+
 		// Transient check from a Causation.Continue(check:, ...). It is NOT evaluated
 		// here (the origin would always satisfy it); it is baked into the TellEnvelope.Check
 		// that TellStatement.Execute builds during the body's PerformCmd, so that
@@ -203,6 +216,23 @@ namespace Puppeteer.EventSourcing
 		{
 			get => symbolTable.CurrentCausationCheck;
 			set => symbolTable.CurrentCausationCheck = value;
+		}
+
+		// Causal provenance of the Reaction body currently running: the id of the
+		// triggering journal entry and the Reaction's name. TellStatement stamps them
+		// onto the TellEnvelope so the utterance carries an explicit back-reference to
+		// the act that caused it. Set/cleared by ExecuteCausation around the body's
+		// PerformCmd; read by TellStatement via SymbolTable. Mirrors CausationTellCheck.
+		internal string CausationTellCausalEventId
+		{
+			get => symbolTable.CurrentCausationCausalEventId;
+			set => symbolTable.CurrentCausationCausalEventId = value;
+		}
+
+		internal string CausationTellReactionName
+		{
+			get => symbolTable.CurrentCausationReactionName;
+			set => symbolTable.CurrentCausationReactionName = value;
 		}
 
 		// Shadow Replay — S1 (handoff_shadow_S1_implementation.md / design §3.0).
@@ -866,6 +896,11 @@ namespace Puppeteer.EventSourcing
 			// the replay.
 			RecoverPendingTells();
 
+			// Blessed default: the reactions' canonical checkpoint store derives from
+			// the actor's own storage — durable exactly when the actor is durable, and
+			// all an ordinary author needs. A relocated run (Reactions.RelocatedInMemory
+			// / RelocatedTo) never changes this canonical store; it only redirects the
+			// store for that run.
 			reactions.SetDairyStorage(dairy.Storage);
 
 			if (this.OnAfterRecovering != null) this.OnAfterRecovering(dbType, connection, this.Name, this.EntryId);
@@ -1760,21 +1795,30 @@ namespace Puppeteer.EventSourcing
 				throw new LanguageException($"AddKnownActionFromDefine: parsed Define statement text did not yield a DefineActionStatement (actionId={actionId}). Text: '{defineStatementText}'");
 			}
 
-			// Canonical body text = each body statement rendered with Statement.Write
-			// at tabs=0 in IN_MEMORY mode. Same shape that ActorHandler's cutover
-			// emits on the live path (FormatedScriptForDairy = program.ConvertToString).
+			// Authored body text = each body statement rendered with Statement.Write
+			// at tabs=0 in IN_MEMORY mode, UNDER AuthoredRenderScope so filtered print
+			// statements are kept. The Define body was journaled with prints
+			// (ComposeJournalText uses Program.ConvertToAuthoredString), so the parsed
+			// defineStmt.Body still carries them; re-rendering WITHOUT the authored scope
+			// would drop the prints here and rebuild a print-free Action, silently losing
+			// the command's output on every re-issue after a restart. Rendering under the
+			// authored scope keeps the prints in the re-parse source so the reconstructed
+			// Program faithfully reproduces the authored body.
 			System.Text.StringBuilder bodySb = new System.Text.StringBuilder();
-			foreach (Statement source in defineStmt.Body)
+			using (AuthoredRenderScope.Enter())
 			{
-				source.Write(bodySb, 0, DatabaseType.IN_MEMORY);
+				foreach (Statement source in defineStmt.Body)
+				{
+					source.Write(bodySb, 0, DatabaseType.IN_MEMORY);
+				}
 			}
-			string canonicalBody = bodySb.ToString();
+			string authoredBody = bodySb.ToString();
 
-			// Re-parse the canonical body as a standalone Program — that is what the
+			// Re-parse the authored body as a standalone Program — that is what the
 			// cache stores. Side-stepping a Program "shrink" operation keeps the AST
 			// path uniform with the live cache miss path.
 			Parser bodyPass = ParsersPool.Rent();
-			bodyPass.SetSource(canonicalBody);
+			bodyPass.SetSource(authoredBody);
 			Program bodyProgram = bodyPass.Parse(isQuery: false, isCheck: false);
 			ParsersPool.Return(bodyPass);
 
@@ -1799,6 +1843,26 @@ namespace Puppeteer.EventSourcing
 				bodyProgram.Parameters = new Parameters(parametersDeclarationText, libraries);
 			}
 
+			// The `define action` canonical header EXCLUDES the system parameter Now
+			// (UserParametersAsCanonicalText / ArgumentsAsString drop it, symmetric with the
+			// live path where Now is injected via SetNow and re-injected on replay from the
+			// journaled OccurredAt). A parametric body that references Now must nonetheless
+			// reconstruct the SAME Parameters shape the live command had: without the Now slot
+			// present here, the interpreted reference resolution below binds every @parameter
+			// Id EXCEPT Now, leaving the body's Now reference unresolved against a signature
+			// that no longer declares it. The per-invocation value injection
+			// (Parameters["Now"] = OccurredAt) then arrives too late, because a known Action
+			// does NOT re-run SolveReferences per invocation (only SolveParameters). Restore
+			// the slot so the interpreted resolver binds Now as a parameter, exactly as live.
+			// Compiled Actions resolve lazily on first Perform from the injected value and do
+			// not depend on this, but keeping the reconstructed shape faithful is
+			// policy-invariant — the CompilationModePolicy must not alter journal semantics.
+			if (bodyProgram.ReferencesNow)
+			{
+				bodyProgram.Parameters ??= new Parameters();
+				bodyProgram.Parameters.EnsureNowSlot();
+			}
+
 			// An interpreted cached Action is executed by Program.Execute() on every
 			// replayed invocation, and that walker binds each @parameter Id from the
 			// resolved idParameters (SolveParameters -> Id.DeclareAsLocalParameter, gated
@@ -1812,13 +1876,77 @@ namespace Puppeteer.EventSourcing
 			if (!bodyProgram.IsCompiledMode && bodyProgram.Parameters != null)
 				bodyProgram.SolveReferences(bodyProgram.Parameters, withStaticValidation: false);
 
-			// Key by the DatabaseType-consistent canonical render so the live command
-			// path (PrepareCommandProgram / PerformCmdAsync, which key by
-			// program.ConvertToString(this.DatabaseType)) resolves this rehydrated Action
-			// on the first re-issue instead of journaling a duplicate Define. canonicalBody
-			// (IN_MEMORY) remains the re-parse source above; the cache key uses this actor's
-			// DatabaseType so both paths agree regardless of backend.
-			_ = actionCommands.Add(actionId, bodyProgram.ConvertToString(this.DatabaseType), bodyProgram);
+			// A2 (reactions ref-resolution): freeze the Action's resolved global
+			// signature now, while the actor's globals are in scope under the write
+			// lock and Define entries are processed in entry-id order AFTER the setup
+			// that created those globals. A Reaction observing this Action reuses the
+			// frozen { globalName -> ForcedType } map to seed its own symbol table, so
+			// its reference resolution no longer depends on which events it replayed.
+			IReadOnlyDictionary<string, Type> globalSignature = FreezeGlobalSignature(authoredBody, bodyProgram.Parameters);
+
+			// Key by the DatabaseType-consistent AUTHORED render (prints kept) so the live
+			// command path (PrepareCommandProgram / PerformCmdAsync, which now also key by
+			// program.ConvertToAuthoredString(this.DatabaseType)) resolves this rehydrated
+			// Action on the first re-issue instead of journaling a duplicate Define. The
+			// authored render is a parse -> render fixed point, so the key computed here
+			// equals the one the live path computes for the same authored body. The cache
+			// key uses this actor's DatabaseType so both paths agree regardless of backend.
+			_ = actionCommands.Add(actionId, bodyProgram.ConvertToAuthoredString(this.DatabaseType), bodyProgram, globalSignature);
+		}
+
+		// A2 (reactions ref-resolution): resolve a throwaway copy of the Action body
+		// against the actor's symbol table to capture the immutable global signature
+		// { name -> ForcedType }. A throwaway Program is used on purpose so the cached
+		// Action's own resolution state is never disturbed — compiled Actions resolve
+		// lazily inside ExecuteExpression on first Perform, and resolving the cached
+		// instance here would race that lazy pass. Runs single-threaded under the write
+		// lock (the caller processes Define entries inline on the journal-reader thread).
+		//
+		// The probe adopts the actor's compilation policy so its DeclareAsGlobalVariable
+		// behaves like the real Action: a compiled probe only BINDS to globals that
+		// already exist in the actor's table (no table mutation), while an interpreted
+		// probe mirrors the interpreted Define resolution the caller already performs.
+		// withStaticValidation:false is enough — SolveReferences populates each global
+		// RValue's ForcedType from the actor's symbol entry regardless of validation.
+		private IReadOnlyDictionary<string, Type> FreezeGlobalSignature(string bodyText, Parameters shapeParameters)
+		{
+			ArgumentNullException.ThrowIfNullOrWhiteSpace(bodyText);
+
+			Parser parser = ParsersPool.Rent();
+			Program probe;
+			try
+			{
+				parser.SetSource(bodyText);
+				probe = parser.Parse(isQuery: false, isCheck: false);
+			}
+			finally
+			{
+				ParsersPool.Return(parser);
+			}
+
+			probe.SetContextInfo();
+			probe.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+
+			// A fresh Parameters (rebuilt from the declaration text, DomainLibraries for
+			// enum-typed params) keeps the probe's parameter binding from touching the
+			// shape Parameters the cached Program holds.
+			Parameters probeParameters = shapeParameters != null
+				? new Parameters(shapeParameters.ParametersAsString(), libraries)
+				: new Parameters();
+
+			probe.SolveReferences(probeParameters, withStaticValidation: false);
+
+			Dictionary<string, Type> signature = null;
+			foreach (Id id in probe.Collect<Id>())
+			{
+				if (id.IsGlobalVariable && id.ForcedType != null)
+				{
+					signature ??= new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+					signature[id.Name] = id.ForcedType;
+				}
+			}
+
+			return signature;
 		}
 
 
@@ -1924,22 +2052,26 @@ namespace Puppeteer.EventSourcing
 				}
 				else
 				{
-					// With user parameters this is an Action. Key the cache by the CANONICAL
-					// body text, DatabaseType-consistent with the rehydration path
-					// (AddKnownActionFromDefine), not the raw endpoint text. Otherwise a
-					// rehydrated Action — cached under its canonical Define body — is missed
-					// on the first live re-issue (whose raw text carries prints / comments /
-					// @-aliases / whitespace the canonical render drops) and a duplicate
-					// Define is journaled on every restart. The raw text is registered as an
-					// alias so repeated identical calls still fast-hit without re-rendering.
-					string canonicalKey = commandPrepared.Program.ConvertToString(this.DatabaseType);
-					commandPrepared.FormatedScriptForDairy = canonicalKey;
-					// A body that renders to an empty canonical form (e.g. a print-only
-					// parametric command with no journaled state) cannot key the cache;
-					// fall back to the raw endpoint text so the non-empty-key contract
-					// holds. Such degenerate Actions are rare and do not round-trip through
-					// rehydration anyway (their Define body has no canonical statements).
-					string identityKey = string.IsNullOrWhiteSpace(canonicalKey) ? script : canonicalKey;
+					// With user parameters this is an Action. FormatedScriptForDairy keeps
+					// the CANONICAL (print-free) render: it is the Script-row payload and
+					// the Eval re-render base, where eliding prints is correct because a
+					// print does not change actor state.
+					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
+					// The Action IDENTITY key, however, must PRESERVE prints. A print is
+					// part of the command's OUTPUT contract, so two commands whose mutation
+					// is identical but whose prints differ are DIFFERENT Actions and must
+					// not share one cached Program (otherwise the second re-issues the
+					// first's rendered output). The authored render (prints kept) is also
+					// DatabaseType-consistent with the rehydration path
+					// (AddKnownActionFromDefine, which rebuilds the Action from the authored
+					// Define body): keying both paths by the authored render lets a
+					// rehydrated Action be matched — not duplicated — on the first live
+					// re-issue. The raw text is registered as an alias so repeated identical
+					// calls still fast-hit without re-rendering.
+					string authoredKey = commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType);
+					// A body that renders to an empty authored form cannot key the cache;
+					// fall back to the raw endpoint text so the non-empty-key contract holds.
+					string identityKey = string.IsNullOrWhiteSpace(authoredKey) ? script : authoredKey;
 
 					if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
 					{
@@ -1978,7 +2110,7 @@ namespace Puppeteer.EventSourcing
 		// Executes the already-prepared program under the write lock.
 		// Flow: LoadArguments -> SolveReferences/SolveParameters -> Perform -> persist to the journal.
 		// writeNewEntry is false during rehydration (RecoveringState) so events are not re-persisted.
-		private string ExecuteCommandWithWriteLock(CommandPrepared commandPrepared, Parameters parameters, DateTime now, string Ip, string User)
+		private string ExecuteCommandWithWriteLock(CommandPrepared commandPrepared, Parameters parameters, DateTime now, string Ip, string User, bool recomputeEvalParameters = true)
 		{
 			if (commandPrepared == null) throw new ArgumentNullException(nameof(commandPrepared));
 			if (parameters == null) throw new ArgumentNullException(nameof(parameters));
@@ -2022,7 +2154,10 @@ namespace Puppeteer.EventSourcing
 				effectiveParameters.SetNow(now);
 			}
 
-			commandPrepared.Program.LoadArguments(effectiveParameters);
+			// recomputeEvalParameters:false on the check-then-command path — the WriteLock
+			// re-check already evaluated Eval params once (command-time); the command reuses
+			// that value instead of re-executing the eval expression.
+			commandPrepared.Program.LoadArguments(effectiveParameters, recomputeEvalParameters);
 
 			if (commandPrepared.NeedsToSolveReferences) commandPrepared.Program.SolveReferences(effectiveParameters, withStaticValidation: true);
 			if (commandPrepared.NeedsToSolveParameters) commandPrepared.Program.SolveParameters(effectiveParameters);
@@ -2479,15 +2614,19 @@ namespace Puppeteer.EventSourcing
 					}
 					else
 					{
-						// See PrepareCommandProgram: key the Action cache by the canonical
-						// body text (DatabaseType-consistent with AddKnownActionFromDefine)
-						// so a rehydrated Action is matched instead of duplicated on the
-						// first live re-issue. Raw text aliased for fast subsequent hits.
-						string canonicalKey = program.ConvertToString(this.DatabaseType);
-						formatedScriptForDairy = canonicalKey;
-						// Empty canonical (print-only parametric body): fall back to raw text
-						// so the non-empty-key contract holds (see PrepareCommandProgram).
-						string identityKey = string.IsNullOrWhiteSpace(canonicalKey) ? script : canonicalKey;
+						// See PrepareCommandProgram: FormatedScriptForDairy stays canonical
+						// (print-free), but the Action IDENTITY key preserves prints via the
+						// authored render — a print is part of the output contract, so
+						// commands differing only in their prints are different Actions. The
+						// authored render is DatabaseType-consistent with the rehydration path
+						// (AddKnownActionFromDefine) so a rehydrated Action is matched instead
+						// of duplicated on the first live re-issue. Raw text aliased for fast
+						// subsequent hits.
+						formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
+						string authoredKey = program.ConvertToAuthoredString(this.DatabaseType);
+						// Empty authored render: fall back to raw text so the non-empty-key
+						// contract holds (see PrepareCommandProgram).
+						string identityKey = string.IsNullOrWhiteSpace(authoredKey) ? script : authoredKey;
 
 						if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
 						{
@@ -3050,7 +3189,7 @@ namespace Puppeteer.EventSourcing
 
 			try
 			{
-				result = program.ExecuteCheck();
+				result = program.ExecuteCheck(parameters);
 				// Read the blocking flag immediately after execution, still under the
 				// read lock — same pattern as dateOfLastActivity below.
 				blocked = program.LastCheckBlocked;
@@ -3105,6 +3244,14 @@ namespace Puppeteer.EventSourcing
 
 			if (scriptForCmd.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (scriptForChk.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Check script exceeds the maximun length");
+
+			// Record the caller-supplied parameter values before the check runs. The check
+			// script executes TWICE (ReadLock pre-check, WriteLock re-check) and the author is
+			// unaware of that, so every parameter it dirties is restored to this original
+			// before the WriteLock re-check — each guard evaluates from clean caller inputs.
+			// (The command, after the re-check, deliberately does NOT reset: it inherits the
+			// re-check's parameter state, reusing whatever the check computed.)
+			parameters.SnapshotOriginals();
 
 			// Phase 1: check without blocking (read lock). If it CONDITIONS the command
 			// (emitted an Error/Warning), the write lock is not taken. An advisory
@@ -3178,6 +3325,12 @@ namespace Puppeteer.EventSourcing
 
 				try
 				{
+					// Undo any parameter the ReadLock pre-check dirtied, so the WriteLock
+					// re-check starts from the caller's original inputs. LoadArguments then
+					// evaluates Eval params ONCE here (command-time, under the write lock);
+					// the command reuses that value (ExecuteCommandWithWriteLock is called
+					// with recomputeEvalParameters:false below).
+					parameters.RestoreOriginals();
 					programChk.LoadArguments(parameters);
 					if (needsToSolveReferencesChk) programChk.SolveReferences(parameters, withStaticValidation: true);
 					if (needsToSolveParametersChk) programChk.SolveParameters(parameters);
@@ -3187,7 +3340,7 @@ namespace Puppeteer.EventSourcing
 					try
 					{
 						// Re-check under the write lock: verify the state has not changed since phase 1
-						chkResult = programChk.ExecuteCheck();
+						chkResult = programChk.ExecuteCheck(parameters);
 						if (programChk.LastCheckBlocked)
 						{
 							return chkResult;
@@ -3198,7 +3351,10 @@ namespace Puppeteer.EventSourcing
 						symbolTable.SetReadOnlyMode(false);
 					}
 
-					result = ExecuteCommandWithWriteLock(_reusableCommandPrepared, parameters, now, Ip, User);
+					// No reset before the command: it inherits the parameter state the
+					// re-check left, reusing whatever the check computed. Eval params were
+					// already evaluated above (command-time), so the command must not recompute them.
+					result = ExecuteCommandWithWriteLock(_reusableCommandPrepared, parameters, now, Ip, User, recomputeEvalParameters: false);
 				}
 				finally
 				{
@@ -3237,7 +3393,11 @@ namespace Puppeteer.EventSourcing
 					}
 					break;
 				case CompilationModePolicy.AlwaysCompiled:
-					result = program.ExecuteExpression(parameters);
+					// A program carrying a construct with no compiled lowering
+					// (`tell`/`expose`) is forced interpreted by AdjustCompilationMode
+					// even under AlwaysCompiled; honor that here instead of routing it
+					// through ExecuteExpression, which would drop the expose side-channel.
+					result = program.IsCompiledMode ? program.ExecuteExpression(parameters) : program.Execute();
 					break;
 				case CompilationModePolicy.AlwaysInterpreted:
 					result = program.Execute();
@@ -3297,11 +3457,31 @@ namespace Puppeteer.EventSourcing
 
 		private volatile bool RecoveringStatusIsRunning = false;
 		private volatile bool isCatchingUp = false;
+		private volatile bool fenced = false;
+		private volatile bool catchUpFailed = false;
 
 		private volatile ActorTransitions currentTransition;
 
-		internal bool IsAlive => currentTransition == ActorTransitions.Alive
-								|| currentTransition == ActorTransitions.Recovered;
+		// A follower that joins for a red-black handover is REHYDRATED (transition
+		// reaches Recovered) yet must NOT serve until the handover completes. Recovered
+		// alone therefore cannot mean "ready": while fenced, the rehydration transition
+		// stays Recovered for the whole catch-up window, so gating IsAlive only on the
+		// transition would report a fenced replica as alive. This gate is the single
+		// source of truth for readiness across every hosting layer (StageHook,
+		// Performance): set on Start(asFollower:true), cleared on the handover.
+		internal bool Fenced { get => fenced; set => fenced = value; }
+
+		// Latched when a red-black catch-up cannot re-apply a journaled ActorV2 Action
+		// (see ReplayPendingEventsForRedBlack). A suspended catch-up must never be
+		// promoted: the replica is not replay-compatible with the committed state.
+		// Surfaced so a host can distinguish "still catching up" (IsAlive false,
+		// CatchUpFailed false) from "catch-up suspended" (both false, this true) for
+		// APM/alerting; UnlockAndRunAlive refuses to promote while this is true.
+		internal bool CatchUpFailed => catchUpFailed;
+
+		internal bool IsAlive => !fenced
+								&& (currentTransition == ActorTransitions.Alive
+								|| currentTransition == ActorTransitions.Recovered);
 
 		// Take control and run the last commands if there are any
 		internal string LockWhileNotSyncronized()
@@ -3310,16 +3490,25 @@ namespace Puppeteer.EventSourcing
 			if (currentTransition == ActorTransitions.Recovering) return $"Invalid transition from {currentTransition} to {ActorTransitions.Recovering}";
 			if (currentTransition == ActorTransitions.Lock) return $"Invalid transition from {currentTransition} to {ActorTransitions.Recovering}";
 
-			bool alreadyBlocked = false;
+			// The write lock is thread-affine (ReaderWriterLockSlim): it must be
+			// acquired and released on the same thread, and the catch-up loop below runs
+			// until the operator calls UnlockAndRunAlive (possibly indefinitely). So the
+			// loop owns a background thread while this method returns promptly — but only
+			// AFTER the lock is engaged, so the caller observes a genuinely locked actor.
+			// The handoff is a blocking wait on this signal (no busy-spin, proper memory
+			// barrier); a failure to acquire propagates to the caller instead of hanging.
+			var enteredLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			RecoveringStatusIsRunning = true;
 			_ = Task.Run(() =>
 			{
-				rwLock.EnterWriteLock();
+				try { rwLock.EnterWriteLock(); }
+				catch (Exception ex) { enteredLock.SetException(ex); return; }
+
+				enteredLock.SetResult();
 
 				try
 				{
-					alreadyBlocked = true;
 					long lastIdAfterRecoveredState = 0;
 					long previousLastIdAfterRecoveredState = 0;
 
@@ -3347,19 +3536,47 @@ namespace Puppeteer.EventSourcing
 
 					currentTransition = ActorTransitions.Alive;
 				}
+				catch (Exception catchUpEx)
+				{
+					// Catch-up could not complete: an ActorV2 Action could not be re-applied
+					// (already latched + logged in ReplayPendingEventsForRedBlack), or a journal
+					// record could not be parsed/resolved by the joining version. Do NOT transition
+					// to Alive; the replica stays fenced and UnlockAndRunAlive refuses to promote
+					// it. Observing the exception here also prevents an unobserved background-task
+					// fault.
+					if (!catchUpFailed)
+					{
+						catchUpFailed = true;
+						Logger.Error("Red-black suspended during catch-up before reaching the leader.", catchUpEx);
+						Console.WriteLine("Red-black suspended during catch-up: " + catchUpEx.Message);
+					}
+				}
 				finally
 				{
 					rwLock.ExitWriteLock();
 				}
 			});
 
-			while (!alreadyBlocked) ;
+			enteredLock.Task.Wait();
 
 			return "Recovering status is running";
 		}
 
 		private long ReplayPendingEventsForRedBlack()
 		{
+			// Red-black catch-up is a REPLAY of already-journaled events — exactly like the
+			// initial rehydration (EventSourcingStorage), which runs under RecoveringState.
+			// The catch-up primitive must run under the SAME flag; running it as live
+			// execution is the asymmetry that broke `tell` re-application during the
+			// cutover window: a tell re-applied with RecoveringState=false falls into
+			// TellStatement's LIVE branch (EnsureInReactionAction throws — and a live tell
+			// would even re-dispatch a ghost message) instead of the replay branch that
+			// captures it for takeover re-delivery (RegisterReissueEnvelope). It also keeps
+			// writeNewEntry=false, so catch-up never re-persists an already-journaled entry.
+			// Save/restore so looped/nested calls compose.
+			bool priorRecoveringState = symbolTable.RecoveringState;
+			symbolTable.RecoveringState = true;
+
 			eventsQueue = new BlockingCollection<EventData>(MAX_NORMAL_LOAD_POOL_SIZE);
 
 			long lastEntryId = dairy.RehydrateFromEvent(this.EntryId);
@@ -3422,8 +3639,32 @@ namespace Puppeteer.EventSourcing
 						if (eventData is ActionEventData)
 							program.ReleaseStatements(this.DatabaseType);
 					}
-					catch
+					catch (Exception replayEx)
 					{
+						if (eventData is ActionEventData)
+						{
+							// V2 red-black policy. An ActorV2 Action is journaled ONCE and carries no
+							// per-invocation outcome tag, so on replay there is no way to tell "this
+							// Action already failed on the primary" from "the joining version can no
+							// longer re-apply it". Red-black rehydration is ordered and single-threaded,
+							// so the transient causes of a live failure (infrastructure, races) do NOT
+							// reproduce — a throw here is a DETERMINISTIC logic incompatibility between
+							// the journaled Action and the joining version. Serving on top of it would
+							// diverge from the committed state. Suspend the handover: latch the failure,
+							// record it loudly (Logger for APM/alerting, Console for the operator watching
+							// the rollout), and abort so the replica stays fenced. EntryId is NOT advanced
+							// past the offending Action.
+							catchUpFailed = true;
+							string suspendMessage = $"Red-black suspended at EntryId {eventData.EntryId}: the joining version could not re-apply a journaled Action. Replica stays fenced; resolve the incompatibility before promoting.";
+							Logger.Error(suspendMessage, replayEx);
+							Console.WriteLine(suspendMessage);
+							throw new LanguageException(suspendMessage);
+						}
+
+						// Legacy ScriptEventData: the script row is a self-contained, faithful record
+						// of an ATTEMPTED command; replay must fail the SAME permissive way (logged
+						// and skipped) so the replayed state matches the primary's.
+						Logger.Error($"Red-black replay skipped a failed script at EntryId {eventData.EntryId} (legacy permissive path).", replayEx);
 						Console.WriteLine("Error during red-black replay at EntryId: " + eventData.EntryId);
 					}
 
@@ -3440,6 +3681,7 @@ namespace Puppeteer.EventSourcing
 			{
 				ParsersPool.Return(parser);
 				eventsQueue = null;
+				symbolTable.RecoveringState = priorRecoveringState;
 			}
 
 			this.EntryId = Int64.Max(lastEntryId, this.EntryId);
@@ -3448,11 +3690,61 @@ namespace Puppeteer.EventSourcing
 
 		internal void UnlockAndRunAlive()
 		{
+			if (catchUpFailed)
+				throw new LanguageException("Cannot run alive: red-black was suspended because the joining version could not re-apply a journaled Action. The replica is not replay-compatible with the committed state and stays fenced.");
 			if (!RecoveringStatusIsRunning) throw new Exception("The follower it's already stopped.");
 			if (currentTransition == ActorTransitions.Recovering) throw new Exception($"Invalid transition from {currentTransition} to {ActorTransitions.Recovering}");
 			if (currentTransition == ActorTransitions.Alive) throw new Exception($"Invalid transition from {currentTransition} to {ActorTransitions.Alive}");
 
 			RecoveringStatusIsRunning = false;
+			// Handover done: lift the fence so readiness reflects the served state. Kept
+			// in the core so IsAlive stays honest even when a host drives the hook directly.
+			fenced = false;
+
+			// Red-black takeover: now primary, re-issue any tell the outgoing node
+			// journaled but never delivered (its transport send buffer died at power-off).
+			// Runs after the fence is lifted, so it is primary-only by construction — a
+			// fenced follower never reaches here (1-writer / no external effect while
+			// fenced). Synchronous, so a host that flips readiness right after this call
+			// observes the re-delivered tell.
+			ReissuePendingTells();
+		}
+
+		// Red-black takeover re-delivery. A tell journaled-as-issued by the outgoing node
+		// but whose delivery it never completed (its transport send buffer died with the
+		// power-off) is still durable in the shared journal. On becoming primary the
+		// successor re-issues it through its own transport. Safe against double delivery:
+		// the tell carries a `once` id, so the addressee dedups by envelope id whether or
+		// not the first attempt ever reached the wire. Delivery outside any lock, mirroring
+		// the live post-commit drain (delivery is the transport's problem).
+		internal void ReissuePendingTells()
+		{
+			if (IsShadow) return;
+			ITransport transport = _transport;
+			if (transport == null) return;
+
+			IReadOnlyList<TellEnvelope> pending = symbolTable.CollectPendingReissueEnvelopes();
+			if (pending.Count == 0) return;
+
+			// TEMPORARY INSTRUMENTATION (remove once the feature is stable): a field run
+			// can be analyzed from the log — how many tells the takeover re-issued and
+			// which envelope id / addressee each carried.
+			Logger.Debug($"[Tell.Reissue] takeover of actor '{Name}' re-issuing {pending.Count} pending tell(s) from the journal.");
+
+			foreach (TellEnvelope envelope in pending)
+			{
+				try
+				{
+					Logger.Debug($"[Tell.Reissue] re-issuing tell '{envelope.Id}' message='{envelope.MessageName}' to '{envelope.Addressee}'('{envelope.AddresseeInstanceId}').");
+					transport.SendAsync(envelope).GetAwaiter().GetResult();
+				}
+				catch (Exception e)
+				{
+					// Delivery is the transport's problem; a failed re-issue leaves the tell
+					// pending (its fate stays recoverable). Surface it for analysis.
+					Logger.Error($"[Tell.Reissue] failed to re-issue tell '{envelope.Id}' to '{envelope.Addressee}' on takeover of actor '{Name}'.", e);
+				}
+			}
 		}
 
 		internal void CatchUpFromJournal(long targetEntryId)
@@ -3975,13 +4267,13 @@ namespace Puppeteer.EventSourcing
 		{
 			private readonly Dictionary<string, CommandCacheEntry> cmdCacheByScript = new Dictionary<string, CommandCacheEntry>();
 			private readonly Dictionary<int, CommandCacheEntry> cmdCacheById = new Dictionary<int, CommandCacheEntry>();
-			internal CommandCacheEntry Add(int id, string script, Program program)
+			internal CommandCacheEntry Add(int id, string script, Program program, IReadOnlyDictionary<string, Type> globalSignature = null)
 			{
 				if (id < 0) throw new ArgumentNullException(nameof(id));
 				ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 				ArgumentNullException.ThrowIfNull(program);
 
-				CommandCacheEntry commandCacheEntry = new CommandCacheEntry(id, script, program);
+				CommandCacheEntry commandCacheEntry = new CommandCacheEntry(id, script, program, globalSignature);
 
 				cmdCacheByScript.TryAdd(script, commandCacheEntry);
 				cmdCacheById.TryAdd(id, commandCacheEntry);
@@ -4024,10 +4316,16 @@ namespace Puppeteer.EventSourcing
 
 		internal class CommandCacheEntry
 		{
+			// Shared empty signature so entries built on paths that do not freeze a
+			// signature (V1 AddKnownAction, promotion) never expose a null map.
+			private static readonly IReadOnlyDictionary<string, Type> EmptyGlobalSignature =
+				new Dictionary<string, Type>(0);
+
 			private readonly int id;
 			private readonly string script;
 			private readonly Program program;
-			internal CommandCacheEntry(int id, string script, Program program)
+			private readonly IReadOnlyDictionary<string, Type> globalSignature;
+			internal CommandCacheEntry(int id, string script, Program program, IReadOnlyDictionary<string, Type> globalSignature = null)
 			{
 				ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 				ArgumentNullException.ThrowIfNull(program);
@@ -4035,6 +4333,7 @@ namespace Puppeteer.EventSourcing
 				this.id = id;
 				this.script = script;
 				this.program = program;
+				this.globalSignature = globalSignature ?? EmptyGlobalSignature;
 			}
 
 			internal int Id { get { return id; } }
@@ -4042,6 +4341,15 @@ namespace Puppeteer.EventSourcing
 			internal string Script { get { return script; } }
 
 			internal Program Program { get { return program; } }
+
+			// A2 (reactions ref-resolution): the immutable { globalName -> ForcedType }
+			// signature resolved once at Define time, under the write lock, with the
+			// actor's globals in scope. A Reaction observing this Action reuses these
+			// exact per-Action global types to seed its own (separate) symbol table
+			// before resolving the body, so reference resolution no longer depends on
+			// which events the Reaction happened to replay. Frozen after construction
+			// and never mutated, so it is safe to share across the Reaction threads.
+			internal IReadOnlyDictionary<string, Type> GlobalSignature { get { return globalSignature; } }
 
 		}
 
@@ -4789,30 +5097,49 @@ namespace Puppeteer.EventSourcing
 				Gen2GcCallback.Register(static state => { ((ConcurrentParametersPool)state).Trim(); return true; }, this);
 			}
 
-#if PUPPETEER_HIDE_INTERNALS
-			[DebuggerHidden]
-#endif
+			// Single-ownership tracking: the instances currently handed out (by reference). Guards
+			// the pool against double-hand-out (Rent) and double-return (Return) — see below.
+			private readonly ConcurrentDictionary<Parameters, byte> _checkedOut =
+				new ConcurrentDictionary<Parameters, byte>(ReferenceEqualityComparer.Instance);
+
 			internal Parameters Rent()
 			{
-				if (_objects.TryPop(out var item))
+				// Single-ownership invariant: NEVER hand out an instance that is already checked out.
+				// A double-return can place a duplicate on the free stack; without this guard a later
+				// Rent would give the same bag to two owners at once, and one owner's
+				// PurgeUserParameters/Return would wipe the other's live captures. Skip any
+				// already-checked-out duplicate and take the next.
+				while (_objects.TryPop(out var item))
 				{
 					Interlocked.Decrement(ref _count);
-					item.PurgeUserParameters();
-					return item;
+					if (_checkedOut.TryAdd(item, 1))
+					{
+						item.PurgeUserParameters();
+						return item;
+					}
+					// Already checked out: a duplicate reached the free stack via a double-return. Do
+					// not hand it to a second owner — drop it and take the next.
 				}
 				// Playbill final refactor: the pool no longer pre-seeds Now.
 				// V1 (PerformCmd(string,string,string), PerformCmdAsync(string,string,string))
 				// injects Now via the indexer in its entry path before descending to the
 				// internal machinery. V2 fluent (.WithParameters(...)) declares Now explicitly.
-				return new Parameters();
+				var fresh = new Parameters();
+				_checkedOut.TryAdd(fresh, 1);
+				return fresh;
 			}
 
-#if PUPPETEER_HIDE_INTERNALS
-			[DebuggerHidden]
-#endif
 			internal void Return(Parameters item)
 			{
 				ArgumentNullException.ThrowIfNull(item);
+				// Single-ownership invariant: only push an instance the pool actually handed out and
+				// that has not already been returned. A Return of a not-currently-checked-out instance
+				// is a double-return (same bag returned twice) or a foreign return; pushing it would
+				// plant a duplicate on the free stack. Drop it without pushing.
+				if (!_checkedOut.TryRemove(item, out _))
+				{
+					return;
+				}
 				item.Clear();
 				if (Volatile.Read(ref _count) < _maxPoolSize)
 				{
@@ -4821,9 +5148,6 @@ namespace Puppeteer.EventSourcing
 				}
 			}
 
-#if PUPPETEER_HIDE_INTERNALS
-			[DebuggerHidden]
-#endif
 			internal Parameters Rent(string shapeKey)
 			{
 				ArgumentNullException.ThrowIfNull(shapeKey);
@@ -4842,9 +5166,6 @@ namespace Puppeteer.EventSourcing
 				return new Parameters();
 			}
 
-#if PUPPETEER_HIDE_INTERNALS
-			[DebuggerHidden]
-#endif
 			internal void Return(string shapeKey, Parameters item)
 			{
 				ArgumentNullException.ThrowIfNull(shapeKey);

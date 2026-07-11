@@ -47,6 +47,13 @@ namespace Puppeteer.Tell
 		public Task SendAsync(TellEnvelope envelope, CancellationToken cancellationToken = default)
 		{
 			cancellationToken.ThrowIfCancellationRequested();
+			// Carry the ambient W3C trace context on the recorded envelope (the uniform
+			// carrier a non-broker transport uses instead of wire headers). Ephemeral
+			// observability only — never journaled. No active trace -> nothing stamped.
+			if (envelope.TraceParent == null && TraceContext.TryCaptureAmbient(out string traceParent, out string traceState))
+			{
+				envelope = envelope with { TraceParent = traceParent, TraceState = traceState };
+			}
 			sent.Enqueue(envelope);
 			return Task.CompletedTask;
 		}

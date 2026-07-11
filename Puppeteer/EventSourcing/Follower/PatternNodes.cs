@@ -129,11 +129,22 @@ namespace Puppeteer.EventSourcing.Follower
 		internal Type ValueType { get; }
 		internal string VariableName { get; }
 
-		internal TypedValuePlaceholder(Type valueType, string variableName = null)
+		// True when the source identifier is a DECLARED PARAMETER of the observed action
+		// (its name is in the action's parameter signature) whose value simply did not
+		// resolve at this moment — as opposed to a genuine global/local VARIABLE. The
+		// distinction drives the capture contract: a $-capture over a declared parameter is
+		// a legitimate (capturable) position whose value is transiently absent → graceful
+		// no-match; a $-capture over a variable is an authoring error → hard
+		// PatternCaptureException. Without this flag the two are indistinguishable once the
+		// argument is reduced to a name-carrying placeholder.
+		internal bool IsDeclaredParameter { get; }
+
+		internal TypedValuePlaceholder(Type valueType, string variableName = null, bool isDeclaredParameter = false)
 		{
 			ArgumentNullException.ThrowIfNull(valueType);
 			ValueType = valueType;
 			VariableName = variableName;
+			IsDeclaredParameter = isDeclaredParameter;
 		}
 	}
 

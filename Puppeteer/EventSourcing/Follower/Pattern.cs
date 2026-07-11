@@ -18,6 +18,12 @@ namespace Puppeteer.EventSourcing.Follower
 		private readonly QuickTest quickTest;
 		private readonly DomainLibraries libraries;
 
+		// Names captured only for diagnostics raised by the definition-time static
+		// method-signature validation (B): they let a mismatch cite the offending
+		// Reaction and Seek.
+		private readonly string reactionName;
+		private readonly string seekName;
+
 		internal Pattern(ReactionEngine reactionEngine, string patternText)
 		{
 			ArgumentNullException.ThrowIfNull(reactionEngine);
@@ -27,12 +33,15 @@ namespace Puppeteer.EventSourcing.Follower
 			this.reaction = reactionEngine.Reaction;
 			this.actorHandler = reaction.ActorHandler;
 			this.libraries = actorHandler.Libraries;
+			this.reactionName = reaction.Name;
+			this.seekName = reactionEngine.PatternDescription;
 
 			var parser = new PatternParser();
 			this.patternAst = parser.Parse(patternText);
 
 			ValidateTypesInPattern(patternAst);
 			ResolveTypesInPattern(patternAst);
+			ValidateMethodSignaturesInPattern(patternAst);
 
 			this.quickTest = GenerateQuickTest(patternAst);
 		}
@@ -180,10 +189,12 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			catch (LanguageException ex)
 			{
-				// Re-throw exceptions related to OUT-parameter validation.
-				// Exceptional paths are NOT cached — they represent invalid
-				// pattern definitions, not "match/no-match" outcomes over data.
-				if (ex.Message.Contains("Cannot match an OUT parameter"))
+				// Re-throw pattern-AUTHORING errors (a $-capture over a non-capturable
+				// argument, or OUT-parameter misuse). Exceptional paths are NOT cached —
+				// they represent invalid pattern definitions, not "match/no-match"
+				// outcomes over data — and must surface rather than be swallowed as a
+				// silent no-match.
+				if (ex is PatternCaptureException || ex.Message.Contains("Cannot match an OUT parameter"))
 				{
 					if (needsCleanup)
 					{
@@ -221,6 +232,7 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				System.Diagnostics.Debug.WriteLine($"[Pattern.Match] PatternMatcher MATCHED! Captured params: {capturedCount}");
 #endif
+
 				if (cacheable)
 				{
 					// B.2: snapshot captures into the cache entry BEFORE returning
@@ -236,6 +248,7 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						parameters[cap.Name, cap.Type] = cap.Value;
 					}
+
 				}
 				else
 				{
@@ -263,6 +276,7 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 			return false;
 		}
+
 		private QuickTest GenerateQuickTest(PatternListNode patternAst)
 		{
 			ArgumentNullException.ThrowIfNull(patternAst);
@@ -640,6 +654,430 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 			}
+		}
+
+		// B: definition-time static validation of a Seek pattern's method (and
+		// constructor) calls against the receiver TYPE's signature in the actor's
+		// DomainLibraries. The pattern names the receiver type directly ([c:Company]
+		// or [Company]), so the callable's signature is statically known even though
+		// the concrete Action a pattern will match is not. A genuinely impossible
+		// pattern (wrong arity, or a typed/literal position incompatible with the
+		// callable at that position) can never match at runtime — today that is a
+		// silent failure; here it fails fast with a LanguageException.
+		//
+		// This is INDEPENDENT of the frozen Action global signature (A2): it validates
+		// against the library, not against a specific Action, and never resolves
+		// runtime symbols nor touches any symbol table.
+		//
+		// The overriding constraint is NO FALSE POSITIVES: a pattern that matches
+		// today must keep defining. Wherever the signature cannot be pinned down
+		// unambiguously (receiver type not in the libraries, callable name not found
+		// among the scanned candidates, or overload resolution ambiguous) the check
+		// is skipped rather than raised.
+		private void ValidateMethodSignaturesInPattern(PatternListNode patternAst)
+		{
+			foreach (var expression in patternAst.Expressions)
+			{
+				ValidateSignaturesInExpression(expression);
+			}
+		}
+
+		private void ValidateSignaturesInExpression(ExpressionNode expression)
+		{
+			switch (expression)
+			{
+				case InstanceAccessNode instanceAccess:
+					if (instanceAccess.MemberAccess != null
+						&& libraries.TryGetType(instanceAccess.TypeName, out Type instanceReceiverType))
+					{
+						ValidateMemberChain(instanceReceiverType, instanceAccess.MemberAccess);
+					}
+					break;
+
+				case TypeAccessNode typeAccess:
+					if (typeAccess.MemberAccess != null
+						&& libraries.TryGetType(typeAccess.TypeName, out Type typeReceiverType))
+					{
+						ValidateMemberChain(typeReceiverType, typeAccess.MemberAccess);
+					}
+					break;
+
+				case ConstructorCallNode constructor:
+					// Constructor arity/type is intentionally NOT validated here: a pattern
+					// may name a constructor shape that no declared constructor provides yet
+					// still be a legitimate pattern-text fixture, and the matcher already
+					// treats such a call as a plain non-match. Only recurse into arguments
+					// that are themselves calls-with-receiver.
+					foreach (var param in constructor.Parameters)
+					{
+						ValidateSignaturesInNestedParameter(param);
+					}
+					break;
+
+				case AssignmentNode assignment:
+					ValidateSignaturesInExpression(assignment.Value);
+					break;
+
+				case PartialPatternNode partialPattern:
+					foreach (var pattern in partialPattern.Patterns)
+					{
+						ValidateSignaturesInExpression(pattern);
+					}
+					break;
+
+				case GuardedExpressionNode guarded:
+					ValidateSignaturesInExpression(guarded.InnerExpression);
+					break;
+
+				case AlternativeExpressionNode alternative:
+					foreach (var branch in alternative.Branches)
+					{
+						ValidateSignaturesInExpression(branch.Expression);
+					}
+					break;
+
+				// ExposeNode, tell/ack pattern nodes, wildcard and literal expressions
+				// carry no receiver-typed callable to validate statically.
+			}
+		}
+
+		// An argument that is itself a call-with-receiver (foo([_:Derived].goo($x)))
+		// is validated as its own call; other argument kinds carry nothing to recurse
+		// into.
+		private void ValidateSignaturesInNestedParameter(ParameterNode parameter)
+		{
+			if (parameter is NestedCallParameterNode nested)
+			{
+				ValidateSignaturesInExpression(nested.Call);
+			}
+		}
+
+		private void ValidateMemberChain(Type receiverType, MemberAccessNode access)
+		{
+			Type currentType = receiverType;
+			MemberAccessNode current = access;
+			while (current != null && currentType != null)
+			{
+				if (current.Parameters != null)
+				{
+					// Method-call node: validate arity and per-position types.
+					ValidateMethodCall(currentType, current);
+					foreach (var param in current.Parameters)
+					{
+						ValidateSignaturesInNestedParameter(param);
+					}
+					// Advance to the return type only when a single method signature
+					// resolves it unambiguously; otherwise stop walking (an unknown
+					// receiver type further down must not raise).
+					currentType = ResolveUnambiguousMethodReturnType(currentType, current);
+				}
+				else
+				{
+					// Property/field-access node: resolve its member type to continue.
+					currentType = ResolvePropertyOrFieldType(currentType, current.MemberName);
+				}
+				current = current.NextAccess;
+			}
+		}
+
+		private void ValidateMethodCall(Type receiverType, MemberAccessNode methodNode)
+		{
+			int argCount = methodNode.Parameters.Count;
+			List<Type[]> arityMatchingSignatures = GatherMethodSignatures(receiverType, methodNode.MemberName, argCount);
+
+			// Callable name not found among the scanned candidates. NOT an error: the
+			// DSL also reaches methods this static scan does not fully reproduce
+			// (extension methods outside the domain libraries, interface members). A
+			// method-existence error would risk false positives, so skip.
+			if (arityMatchingSignatures == null)
+			{
+				return;
+			}
+
+			if (arityMatchingSignatures.Count == 0)
+			{
+				throw new LanguageException(
+					$"Reaction '{reactionName}', Seek '{seekName}': the pattern calls '{receiverType.Name}.{methodNode.MemberName}' with {argCount} argument(s), but no overload accepts that number of arguments.");
+			}
+
+			// Per-position type checks only when the arity-matching candidates collapse
+			// to a single expected type vector; ambiguous overloads are left unchecked.
+			Type[] expected = SingleExpectedTypeVector(arityMatchingSignatures);
+			if (expected == null)
+			{
+				return;
+			}
+
+			for (int i = 0; i < argCount; i++)
+			{
+				Type constrained = ConstrainedPatternType(methodNode.Parameters[i]);
+				if (constrained == null) continue; // wildcard / untyped $var accepts any type.
+				if (!IsPatternTypeCompatible(constrained, expected[i]))
+				{
+					throw new LanguageException(
+						$"Reaction '{reactionName}', Seek '{seekName}': in the pattern call '{receiverType.Name}.{methodNode.MemberName}', argument {i + 1} is typed '{constrained.Name}' but the method expects '{expected[i].Name}' at that position.");
+				}
+			}
+		}
+
+		// Returns null when NO callable by this name was found among the candidates
+		// (receiver hierarchy, its descendants in the libraries, and domain extension
+		// methods over it); an empty list when candidates exist by name but none
+		// accepts argCount; otherwise the expected per-position type vector (length
+		// argCount, params-expanded) of every candidate that accepts argCount.
+		private List<Type[]> GatherMethodSignatures(Type receiverType, string methodName, int argCount)
+		{
+			bool anyByName = false;
+			var vectors = new List<Type[]>();
+			foreach (var (method, isExtension) in EnumerateCandidateMethods(receiverType, methodName))
+			{
+				anyByName = true;
+				if (TryBuildExpectedVector(method.GetParameters(), isExtension, argCount, out Type[] vec))
+				{
+					vectors.Add(vec);
+				}
+			}
+			return anyByName ? vectors : null;
+		}
+
+		private Type ResolveUnambiguousMethodReturnType(Type receiverType, MemberAccessNode methodNode)
+		{
+			int argCount = methodNode.Parameters.Count;
+			Type found = null;
+			foreach (var (method, isExtension) in EnumerateCandidateMethods(receiverType, methodNode.MemberName))
+			{
+				if (!TryBuildExpectedVector(method.GetParameters(), isExtension, argCount, out _)) continue;
+				Type ret = method.ReturnType;
+				if (ret == typeof(void)) return null;      // cannot continue a chain past void.
+				if (found == null) found = ret;
+				else if (found != ret) return null;        // ambiguous return → stop.
+			}
+			return found;
+		}
+
+		private IEnumerable<(System.Reflection.MethodInfo method, bool isExtension)> EnumerateCandidateMethods(Type receiverType, string methodName)
+		{
+			const System.Reflection.BindingFlags flags =
+				System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+				System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static |
+				System.Reflection.BindingFlags.FlattenHierarchy;
+
+			foreach (var m in receiverType.GetMethods(flags))
+			{
+				if (m.IsGenericMethodDefinition) continue;
+				if (string.Equals(m.Name, methodName, StringComparison.OrdinalIgnoreCase))
+				{
+					yield return (m, false);
+				}
+			}
+
+			// A pattern typed against a base receiver matches a call on a subtype, so a
+			// method declared only on a descendant is a legitimate target.
+			foreach (Type t in libraries.AllTypes)
+			{
+				if (t == receiverType) continue;
+				if (t.IsGenericTypeDefinition) continue;
+				if (!receiverType.IsAssignableFrom(t)) continue;
+				foreach (var m in t.GetMethods(flags))
+				{
+					if (m.IsGenericMethodDefinition) continue;
+					if (string.Equals(m.Name, methodName, StringComparison.OrdinalIgnoreCase))
+					{
+						yield return (m, false);
+					}
+				}
+			}
+
+			// Extension methods declared over the receiver type in the domain libraries.
+			foreach (Type s in libraries.AllTypes)
+			{
+				if (!(s.IsAbstract && s.IsSealed)) continue; // static class
+				foreach (var m in s.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+				{
+					if (m.IsGenericMethodDefinition) continue;
+					if (!string.Equals(m.Name, methodName, StringComparison.OrdinalIgnoreCase)) continue;
+					if (!m.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false)) continue;
+					var ps = m.GetParameters();
+					if (ps.Length == 0) continue;
+					if (!ps[0].ParameterType.IsAssignableFrom(receiverType)) continue;
+					yield return (m, true);
+				}
+			}
+		}
+
+		// Builds the expected per-position type vector for a candidate against argCount,
+		// or returns false when the candidate does not accept that number of arguments.
+		// For an extension method the leading 'this' parameter is excluded; a trailing
+		// params array is expanded to its element type across the surplus positions.
+		private static bool TryBuildExpectedVector(System.Reflection.ParameterInfo[] parameters, bool isExtension, int argCount, out Type[] vector)
+		{
+			vector = null;
+			int start = isExtension ? 1 : 0;
+			int effectiveCount = parameters.Length - start;
+			if (effectiveCount < 0) return false;
+
+			bool isParams = effectiveCount > 0
+				&& parameters[parameters.Length - 1].IsDefined(typeof(ParamArrayAttribute), false);
+
+			if (isParams)
+			{
+				int fixedCount = effectiveCount - 1;
+				if (argCount < fixedCount) return false;
+				Type paramsElement = parameters[parameters.Length - 1].ParameterType.GetElementType();
+				var vec = new Type[argCount];
+				for (int i = 0; i < argCount; i++)
+				{
+					vec[i] = i < fixedCount ? parameters[start + i].ParameterType : paramsElement;
+				}
+				vector = vec;
+				return true;
+			}
+
+			if (argCount != effectiveCount) return false;
+			var exact = new Type[argCount];
+			for (int i = 0; i < argCount; i++)
+			{
+				exact[i] = parameters[start + i].ParameterType;
+			}
+			vector = exact;
+			return true;
+		}
+
+		// Returns the shared expected type vector when every candidate agrees on it
+		// element-wise, or null when the overloads disagree (ambiguous → skip).
+		private static Type[] SingleExpectedTypeVector(List<Type[]> vectors)
+		{
+			Type[] first = vectors[0];
+			for (int v = 1; v < vectors.Count; v++)
+			{
+				Type[] cur = vectors[v];
+				if (cur.Length != first.Length) return null;
+				for (int i = 0; i < first.Length; i++)
+				{
+					if (cur[i] != first[i]) return null;
+				}
+			}
+			return first;
+		}
+
+		// The static type a pattern position constrains, or null when it accepts any
+		// type (a bare wildcard '_' or an untyped '$var'). A typed parameter ('$x:int',
+		// '_:Type', 'name:Type') constrains its type; a literal constrains its explicit
+		// or literal type.
+		private static Type ConstrainedPatternType(ParameterNode parameter)
+		{
+			switch (parameter)
+			{
+				case TypedParameterNode typed:
+					return IsResolvableType(typed.ParameterType) ? typed.ParameterType : null;
+				case LiteralParameterNode literal:
+					Type literalType = literal.ExplicitType ?? literal.LiteralType;
+					return IsResolvableType(literalType) ? literalType : null;
+				default:
+					return null;
+			}
+		}
+
+		private static bool IsResolvableType(Type type)
+			=> type != null && type is not UnresolvedDomainType && type is not UnresolvedArrayType;
+
+		// Conservative compatibility between a pattern position type and the callable's
+		// parameter type at that position. Errs toward compatible: it rejects only
+		// clearly unrelated types (no numeric coercion, no subtype relationship in
+		// either direction, neither an enum, interface, nor collection). This mirrors
+		// what the runtime matcher would accept while never rejecting a pattern that
+		// could match today.
+		private static bool IsPatternTypeCompatible(Type patternType, Type expected)
+		{
+			if (patternType == null || expected == null) return true;
+			if (!IsResolvableType(expected)) return true;
+
+			if (patternType == expected) return true;
+
+			// Enums accept name/underlying-value forms the matcher resolves per value.
+			if (expected.IsEnum || patternType.IsEnum) return true;
+
+			// An interface position may be satisfied by a concrete argument whose
+			// implementation relationship is not visible from these two types alone.
+			if (expected.IsInterface || patternType.IsInterface) return true;
+
+			// Collection/array element variance is matched value-by-value at runtime.
+			if (IsCollectionLike(expected) || IsCollectionLike(patternType)) return true;
+
+			// Numeric widening/narrowing across the primitive numeric types.
+			if (IsNumeric(expected) && IsNumeric(patternType)) return true;
+
+			// A pattern position is an upper bound on the argument the matcher will see,
+			// and the parameter type is an upper bound on what the compiled Action
+			// passed; accept when the two are related in either direction (which also
+			// covers the numeric coercions AreCompatible knows about).
+			if (AstExpression.AreCompatible(patternType, expected)) return true;
+			if (AstExpression.AreCompatible(expected, patternType)) return true;
+
+			return false;
+		}
+
+		private static bool IsCollectionLike(Type type)
+		{
+			if (type.IsArray) return true;
+			if (type.IsGenericType)
+			{
+				Type def = type.GetGenericTypeDefinition();
+				if (def == typeof(List<>) || def == typeof(IEnumerable<>) ||
+					def == typeof(IList<>) || def == typeof(ICollection<>))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		private static bool IsNumeric(Type type)
+		{
+			return type == typeof(byte) || type == typeof(sbyte) ||
+				type == typeof(short) || type == typeof(ushort) ||
+				type == typeof(int) || type == typeof(uint) ||
+				type == typeof(long) || type == typeof(ulong) ||
+				type == typeof(float) || type == typeof(double) || type == typeof(decimal);
+		}
+
+		private Type ResolvePropertyOrFieldType(Type receiverType, string memberName)
+		{
+			const System.Reflection.BindingFlags flags =
+				System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+				System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static |
+				System.Reflection.BindingFlags.FlattenHierarchy | System.Reflection.BindingFlags.IgnoreCase;
+
+			Type resolved = TryResolveMemberType(receiverType, memberName, flags);
+			if (resolved != null) return resolved;
+
+			// The member may live on a descendant the pattern typed against a base.
+			foreach (Type t in libraries.AllTypes)
+			{
+				if (t == receiverType) continue;
+				if (t.IsGenericTypeDefinition) continue;
+				if (!receiverType.IsAssignableFrom(t)) continue;
+				resolved = TryResolveMemberType(t, memberName, flags);
+				if (resolved != null) return resolved;
+			}
+			return null; // unresolved → stop walking the chain (no error).
+		}
+
+		private static Type TryResolveMemberType(Type type, string memberName, System.Reflection.BindingFlags flags)
+		{
+			try
+			{
+				var property = type.GetProperty(memberName, flags);
+				if (property != null) return property.PropertyType;
+			}
+			catch (System.Reflection.AmbiguousMatchException)
+			{
+				// Ambiguous member (e.g. shadowed by 'new') → cannot pin the type; skip.
+				return null;
+			}
+			var field = type.GetField(memberName, flags);
+			if (field != null) return field.FieldType;
+			return null;
 		}
 	}
 	internal class QuickTest

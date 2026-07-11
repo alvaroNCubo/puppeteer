@@ -43,6 +43,8 @@ namespace Puppeteer.EventSourcing.DB
 		internal DiaryStorageFileSystem(IActorEventJournalClient eventJournalClient, string connectionString)
 			: base(eventJournalClient, connectionString)
 		{
+			StorageActorName.ValidateFileSystemName(Name);
+
 			var parsedConnection = new FileSystemConnectionString(connectionString);
 			this.basePath = Path.Combine(parsedConnection.Path, Name);
 			this.journalDir = Path.Combine(basePath, "journal");

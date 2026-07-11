@@ -4,7 +4,6 @@ using Puppeteer.EventSourcing.Interpreter.Utils;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
@@ -28,9 +27,6 @@ namespace Puppeteer
 		// PurgeUserParameters so it is not left dangling toward an already-removed slot.
 		private Parameter nowSlot;
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		public Parameters() { }
 
 		// Optional resolver for non-primitive types (domain enums) when re-parsing the
@@ -183,13 +179,10 @@ namespace Puppeteer
 			}
 		}
 
-#if PUPPETEER_HIDE_INTERNALS
-		[DebuggerHidden]
-#endif
 		private void SetParameter(object value, int parameterKind, string parameterName, Type parameterType)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(parameterName);
-			if (value == null && parameterKind == Parameter.In)
+			if (value == null && (parameterKind == Parameter.In || parameterKind == Parameter.InOut))
 			{
 				bool isNullable = !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
 				if (!isNullable)
@@ -197,6 +190,7 @@ namespace Puppeteer
 			}
 			else if (value == null && parameterKind != Parameter.Out)
 			{
+				// Remaining null-accepting kind here is Eval, which requires a script value.
 				ArgumentNullException.ThrowIfNull(value);
 			}
 			if (parameterKind < 0) throw new LanguageException("Parameter Type can not be negative");
@@ -297,11 +291,58 @@ namespace Puppeteer
 			nowSlot.SetParsedScalar(now);
 		}
 
+		// Ensure the SYSTEM parameter Now slot EXISTS without assigning a value. Used when
+		// reconstructing a `define action` whose body references Now: the canonical header
+		// excludes Now (UserParametersAsCanonicalText / ArgumentsAsString drop it), so the
+		// rebuilt Parameters must re-add the slot before interpreted reference resolution can
+		// bind the body's Now reference as a parameter. The value is injected later, per
+		// replayed invocation, from the journaled OccurredAt. Idempotent: a pre-existing Now
+		// slot (or a prior SetNow) is reused, never duplicated.
+		internal void EnsureNowSlot()
+		{
+			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
+
+			if (nowSlot != null) return;
+			foreach (Parameter parameter in parameters)
+			{
+				if (IsSystemNow(parameter))
+				{
+					nowSlot = parameter;
+					return;
+				}
+			}
+			nowSlot = new Parameter(Parameter.In, SystemNowName, typeof(DateTime));
+			parameters.Add(nowSlot);
+		}
+
 		internal void Clear()
 		{
 			foreach (Parameter parameter in parameters)
 			{
 				parameter.Clear();
+			}
+		}
+
+		// Two-phase (check-then-command) support: snapshot every parameter's current value
+		// as its "original", and restore them, so the double-executed check always evaluates
+		// from clean caller inputs. See Parameter.SnapshotOriginal / RestoreOriginal.
+		internal void SnapshotOriginals()
+		{
+			foreach (Parameter parameter in parameters)
+			{
+				// The system Now is re-injected per Perform (SetNow); it is not a caller
+				// input, so it is neither snapshotted nor restored.
+				if (IsSystemNow(parameter)) continue;
+				parameter.SnapshotOriginal();
+			}
+		}
+
+		internal void RestoreOriginals()
+		{
+			foreach (Parameter parameter in parameters)
+			{
+				if (IsSystemNow(parameter)) continue;
+				parameter.RestoreOriginal();
 			}
 		}
 
@@ -330,11 +371,18 @@ namespace Puppeteer
 		}
 
 		// Phase 4 of the Action refactor: convert the canonical parameter declaration
-		// text (`name:type, name:type`) used in Define statements into the
-		// modifier-prefixed `In,name:type,In,name:type` form that the Parameters(string)
+		// text (`[out|inout ]name:type, ...`) used in Define statements into the
+		// modifier-prefixed `In,name:type,Out,name:type,...` form that the Parameters(string)
 		// constructor parses (the same form ParametersAsString produces). Used by
 		// ActorHandler when populating the action cache from a Define journal entry
 		// during replay.
+		//
+		// The header carries the modifier as a lowercase keyword prefix on the entries that
+		// need it (Out/InOut); an entry with no prefix is In. This translation lifts that
+		// prefix into the exact-cased modifier token the ctor grammar expects, so the
+		// rebuilt Parameters carry the true modifier and LoadArguments takes the matching
+		// branch on replay. A header without any prefix (pre-existing journals) maps every
+		// entry to In, exactly as before.
 		internal static string CanonicalDeclarationsToParametersString(string canonicalText)
 		{
 			if (string.IsNullOrEmpty(canonicalText)) return string.Empty;
@@ -348,19 +396,55 @@ namespace Puppeteer
 				if (trimmed.Length == 0) continue;
 				if (!first) sb.Append(',');
 				first = false;
-				sb.Append("In,");
-				sb.Append(trimmed);
+
+				// A leading `out `/`inout ` keyword (space-separated from the name) selects
+				// the modifier; anything else is a bare `name:type` and stays In. The name
+				// itself may legitimately be `out`/`inout` — that case has no space before
+				// the ':' so it is not mistaken for a prefix.
+				string declaration = trimmed;
+				string modifierToken = "In";
+				int space = trimmed.IndexOf(' ');
+				if (space > 0)
+				{
+					string word = trimmed.Substring(0, space);
+					if (string.Equals(word, OutModifierKeyword, StringComparison.OrdinalIgnoreCase))
+					{
+						modifierToken = "Out";
+						declaration = trimmed.Substring(space + 1).Trim();
+					}
+					else if (string.Equals(word, InOutModifierKeyword, StringComparison.OrdinalIgnoreCase))
+					{
+						modifierToken = "InOut";
+						declaration = trimmed.Substring(space + 1).Trim();
+					}
+				}
+
+				sb.Append(modifierToken);
+				sb.Append(',');
+				sb.Append(declaration);
 			}
 			return sb.ToString();
 		}
 
 		// Phase 4 of the Action refactor (project_puppeteer_action_refactor_plan.md):
 		// canonical user-parameter text for the `define action <id> (...)` header.
-		// Produces `name:type, name:type` separated by `, ` — same format that Phase 1's
-		// parser reads back. Modifiers (In/Out/InOut/Eval) are out of scope for Phase 1's
-		// Define statement and are not emitted here. Type names are lowercase to match
-		// CanonicalTypeName in Parser.ParseDefineActionParameterList. Empty parameter
-		// set (no user parameters) returns the empty string.
+		// Produces `[out|inout ]name:type` entries separated by `, ` — the same format
+		// Phase 1's parser reads back. Type names are lowercase to match CanonicalTypeName
+		// in Parser.ParseDefineActionParameterList. Empty parameter set (no user
+		// parameters) returns the empty string.
+		//
+		// The In/Out/InOut modifier is preserved because it is not recoverable from
+		// name:type alone, yet it governs replay: an Out (and a null-valued InOut) argument
+		// is journaled as the '?' placeholder, and LoadArguments only reads '?' for a slot
+		// whose modifier is Out/InOut. If the header dropped the modifier, every slot was
+		// rebuilt as In and LoadArguments took the null branch on '?', tripping the In
+		// non-nullable guard and blocking replay of any Out-parametric Action. The modifier
+		// is spelled as a lowercase KEYWORD PREFIX (`out name:type`, `inout name:type`); In
+		// is the default and emits no prefix, so a headerless entry still means In. That
+		// keeps older journals (written before the modifier was carried) readable as-is.
+		// Eval is deliberately left prefix-less too: its computed value travels in the
+		// arguments blob and is reconstructed as a value-in argument, so it round-trips as
+		// In (see ParameterSignature.ModifiersAreCompatible for the In/Eval equivalence).
 		// Now is a SYSTEM parameter: the framework injects it on every Perform with the
 		// OccurredAt value (DateTime.Now live, OccurredAt on replay). It is kept
 		// as a per-call parameter — thread-safe and visible to static pattern matching as
@@ -388,11 +472,28 @@ namespace Puppeteer
 				if (!first) sb.Append(", ");
 				first = false;
 
+				sb.Append(CanonicalModifierPrefix(parameter.ParameterModifier));
 				sb.Append(parameter.Name);
 				sb.Append(':');
 				sb.Append(CanonicalTypeName(parameter.ParameterType));
 			}
 			return sb.ToString();
+		}
+
+		// Lowercase keyword that prefixes a `define action` header parameter to carry its
+		// modifier. Only Out and InOut are emitted; In (and Eval, which round-trips as a
+		// value-in argument) default to no prefix so headerless entries and pre-existing
+		// journals keep meaning In. The keywords are chosen to lex as plain identifiers
+		// (unlike `in`/`eval`, which are reserved tokens), so the parser can read them back
+		// as a contextual prefix. Symmetric with ParseDefineActionParameterList (read) and
+		// CanonicalDeclarationsToParametersString (translation to the ctor grammar).
+		internal const string OutModifierKeyword = "out";
+		internal const string InOutModifierKeyword = "inout";
+		private static string CanonicalModifierPrefix(int parameterModifier)
+		{
+			if (parameterModifier == Parameter.Out) return OutModifierKeyword + " ";
+			if (parameterModifier == Parameter.InOut) return InOutModifierKeyword + " ";
+			return string.Empty;
 		}
 
 		private static string CanonicalTypeName(Type type)
@@ -431,7 +532,7 @@ namespace Puppeteer
 					sb.Append(',');
 					sb.Append(parameter.Name);
 					sb.Append(':');
-					WriteParameterType(parameter.ParameterType, sb);
+					WriteParameterType(parameter, sb);
 					isFirst = false;
 				}
 				else
@@ -441,7 +542,7 @@ namespace Puppeteer
 					sb.Append(',');
 					sb.Append(parameter.Name);
 					sb.Append(':');
-					WriteParameterType(parameter.ParameterType, sb);
+					WriteParameterType(parameter, sb);
 					sb.Append(':');
 					sb.Append(parameter.EvalScript);
 					isFirst = false;
@@ -469,8 +570,9 @@ namespace Puppeteer
 			}
 		}
 
-		private void WriteParameterType(Type type, StringBuilder sb)
+		private void WriteParameterType(Parameter parameter, StringBuilder sb)
 		{
+			Type type = parameter.ParameterType;
 			if (type.IsGenericType || type.IsArray)
 			{
 				WriteSingleParameterType(type.GenericTypeArguments[0], sb);
@@ -479,6 +581,12 @@ namespace Puppeteer
 			else
 			{
 				WriteSingleParameterType(type, sb);
+				// A nullable value-type parameter (declared `int?`, stored normalized to `int`
+				// with IsNullable=true) round-trips its nullability via a trailing '?', so that
+				// re-parsing reconstructs it as nullable and can accept the '?'/null argument.
+				// Reference types are inherently nullable and need no marker.
+				if (parameter.IsNullable && type.IsValueType)
+					sb.Append('?');
 			}
 		}
 
@@ -613,38 +721,56 @@ namespace Puppeteer
 			// it is attempted to be resolved as a domain enum via the typeResolver (DomainLibraries).
 			// This reconstructs an enum @parameter journaled by type name during replay;
 			// if the resolver is not available or the name is not a known enum, it fails hard.
+			Type baseType = null;
 			if (IsPrimitiveTypeKeyword(parameters, position))
 			{
 				switch (parameters[position])
 				{
 					case 's':
 					case 'S':
-						return StringType(parameters, ref position);
+						baseType = StringType(parameters, ref position);
+						break;
 					case 'i':
 					case 'I':
-						return IntType(parameters, ref position);
+						baseType = IntType(parameters, ref position);
+						break;
 					case 'b':
 					case 'B':
-						return BooleanType(parameters, ref position);
+						baseType = BooleanType(parameters, ref position);
+						break;
 					case 'd':
 					case 'D':
 						if (parameters[position + 1] == 'e' || parameters[position + 1] == 'E')
 						{
-							return DecimalType(parameters, ref position);
+							baseType = DecimalType(parameters, ref position);
 						}
 						else if (parameters[position + 1] == 'a' || parameters[position + 1] == 'A')
 						{
-							return DateTimeType(parameters, ref position);
+							baseType = DateTimeType(parameters, ref position);
 						}
 						else if (parameters[position + 1] == 'o' || parameters[position + 1] == 'O')
 						{
-							return DoubleType(parameters, ref position);
+							baseType = DoubleType(parameters, ref position);
 						}
 						break;
 				}
 			}
 
-			return EnumParameterType(parameters, ref position);
+			if (baseType == null) baseType = EnumParameterType(parameters, ref position);
+
+			// A trailing '?' marks a nullable value type (symmetric with WriteParameterType).
+			// Re-wrap into Nullable<T> so the Parameter ctor normalizes it back to T with
+			// IsNullable=true. Reference types carry no '?' and are unaffected.
+			if (position < parameters.Length && parameters[position] == '?')
+			{
+				position++;
+				if (baseType.IsValueType && Nullable.GetUnderlyingType(baseType) == null)
+				{
+					baseType = typeof(Nullable<>).MakeGenericType(baseType);
+				}
+			}
+
+			return baseType;
 		}
 
 		// True if the type token at `position` is exactly one of the 6 primitives
@@ -897,14 +1023,24 @@ namespace Puppeteer
 
 				if (!isFirst) sb.Append(',');
 				Type parameterType = parameter.ParameterType;
-				if (parameterType.IsGenericType || parameterType.IsArray)
+				if (parameter.ParameterModifier == Parameter.Out)
 				{
-
-					WriteSingleValueCollection(parameter, sb, databaseType);
-				}
-				else if (parameter.ParameterModifier == Parameter.Out)
-				{
+					// Out is always a placeholder, scalar OR collection: its value is not persisted
+					// and is recomputed by re-execution on replay. This must precede the collection
+					// check below so a collection-typed Out also writes '?', staying symmetric with
+					// LoadArguments (which reads '?' for any Out regardless of type).
 					sb.Append('?');
+				}
+				else if (parameter.GetValue() == null)
+				{
+					// A null argument (nullable In/InOut) is journaled as '?' and restored to
+					// null by LoadArguments; without this it would fall into the primitive writer
+					// and unbox (int)null.
+					sb.Append('?');
+				}
+				else if (parameterType.IsGenericType || parameterType.IsArray)
+				{
+					WriteSingleValueCollection(parameter, sb, databaseType);
 				}
 				else
 				{
@@ -937,6 +1073,13 @@ namespace Puppeteer
 					{
 						this[parameter.ParameterModifier, parameter.Name, parameter.ParameterType] = dummyValue;
 					}
+				}
+				else if (agumentsAsString[position] == '?')
+				{
+					// '?' outside an Out slot is the null marker for a nullable In/InOut argument
+					// (symmetric with ArgumentsAsString): consume it and restore the null value.
+					position++;
+					parameter.Value = null;
 				}
 				else if (parameter.ParameterType.IsGenericType || parameter.ParameterType.IsArray)
 				{
@@ -1015,6 +1158,32 @@ namespace Puppeteer
 			{
 				position++;
 				return Enumerable.Empty<int>();
+			}
+
+			// B1: range comprehension {start..end} (see docs/rfc/foreach-range-literal.md).
+			// A '..' before the first ',' or '}' selects the range form; a '.' can only be
+			// the range operator here because this blob holds integers (never doubles).
+			int scan = position;
+			bool isRange = false;
+			while (scan < agumentsAsString.Length && agumentsAsString[scan] != ',' && agumentsAsString[scan] != '}')
+			{
+				if (agumentsAsString[scan] == '.' && scan + 1 < agumentsAsString.Length && agumentsAsString[scan + 1] == '.')
+				{
+					isRange = true;
+					break;
+				}
+				scan++;
+			}
+			if (isRange)
+			{
+				int rangeStart = int.Parse(agumentsAsString.AsSpan(position, scan - position), CultureInfo.InvariantCulture);
+				position = scan + 2; // skip the '..'
+				int endStart = position;
+				while (position < agumentsAsString.Length && agumentsAsString[position] != '}') position++;
+				if (position >= agumentsAsString.Length) throw new LanguageException("Parameter definition is not valid");
+				int rangeEnd = int.Parse(agumentsAsString.AsSpan(endStart, position - endStart), CultureInfo.InvariantCulture);
+				position++; // skip the '}'
+				return new IntRangeList(rangeStart, rangeEnd);
 			}
 
 			while (position < agumentsAsString.Length)
@@ -1576,6 +1745,7 @@ namespace Puppeteer
 
 		private void Append(List<int> values, StringBuilder sb)
 		{
+			if (TryAppendIntRange(values, sb)) return;
 			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)
@@ -1585,6 +1755,21 @@ namespace Puppeteer
 				isFirst = false;
 			}
 			sb.Append('}');
+		}
+
+		// B1 (see docs/rfc/foreach-range-literal.md): an integer collection that is an
+		// IntRangeList — produced by a {start..end} range literal — serializes by
+		// comprehension so the journal stays O(1) in the range length instead of
+		// enumerating every element. Any other integer collection enumerates as before;
+		// runs are never inferred by scanning an arbitrary value (that is the dropped B2).
+		private static bool TryAppendIntRange(IEnumerable<int> values, StringBuilder sb)
+		{
+			if (values is IntRangeList range && range.StillDescribesBounds())
+			{
+				sb.Append('{').Append(range.Start).Append("..").Append(range.End).Append('}');
+				return true;
+			}
+			return false;
 		}
 
 		private void Append(List<string> values, StringBuilder sb, DatabaseType databaseType)
@@ -1657,6 +1842,7 @@ namespace Puppeteer
 
 		private void Append(IEnumerable<int> values, StringBuilder sb)
 		{
+			if (TryAppendIntRange(values, sb)) return;
 			var isFirst = true;
 			sb.Append('{');
 			foreach (var value in values)

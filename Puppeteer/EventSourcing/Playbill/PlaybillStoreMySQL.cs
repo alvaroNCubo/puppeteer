@@ -6,9 +6,18 @@ using System.IO;
 
 namespace Puppeteer.EventSourcing.Playbill
 {
-	// MySQL backend of the Playbill. Lives in the same DB as the actor's journal
-	// (one-actor-per-database). Auto-provision: the constructor creates the two
-	// tables (PlaybillSchemas, PlaybillRecords) via CREATE TABLE IF NOT EXISTS.
+	// MySQL backend of the Playbill. Auto-provision: the constructor creates the
+	// two tables ({ActorName}_PlaybillSchemas, {ActorName}_PlaybillRecords) via
+	// CREATE TABLE IF NOT EXISTS.
+	//
+	// The schemas/records tables are named PER ACTOR, symmetric to the actor's
+	// own journal table ({ActorName}). A single database may host many actors
+	// (EnsemblePerformance), and each actor keeps an INDEPENDENT EntryId sequence
+	// starting at 1 in its own journal. A database-global records table keyed by
+	// EntryId alone would collide the moment two actors reach the same EntryId
+	// (duplicate PK); per-actor tables keep each actor's records isolated —
+	// matching the FileSystem ({path}/{ActorName}/playbill/) and InMemory (keyed
+	// by actorName) backends.
 	//
 	// Distill via rebuild-via-shadow-swap: filters out records that point to
 	// EntryIds no longer existing in the `{ActorName}` journal and atomically
@@ -17,26 +26,29 @@ namespace Puppeteer.EventSourcing.Playbill
 	// Diary's strategy; each storage Distills its own.
 	internal sealed class PlaybillStoreMySQL : PlaybillStore
 	{
-		private const string SCHEMAS_TABLE = "PlaybillSchemas";
-		private const string RECORDS_TABLE = "PlaybillRecords";
+		private readonly string schemasTable;
+		private readonly string recordsTable;
 
 		internal PlaybillStoreMySQL(string actorName, string connectionString, IPuppeteerLogger logger)
 			: base(actorName, connectionString, logger)
 		{
+			StorageActorName.ValidateSqlIdentifier(actorName, "MySQL");
+			this.schemasTable = actorName + "_PlaybillSchemas";
+			this.recordsTable = actorName + "_PlaybillRecords";
 			EnsureTables();
 		}
 
 		private void EnsureTables()
 		{
 			string sql = $@"
-				CREATE TABLE IF NOT EXISTS `{SCHEMAS_TABLE}` (
+				CREATE TABLE IF NOT EXISTS `{schemasTable}` (
 					SchemaName    VARCHAR(64)   NOT NULL,
 					Declarations  VARCHAR(2000) NOT NULL,
 					CreatedAt     DATETIME      NOT NULL,
 					PRIMARY KEY (SchemaName)
 				) ENGINE=InnoDB CHARSET=utf8mb4;
 
-				CREATE TABLE IF NOT EXISTS `{RECORDS_TABLE}` (
+				CREATE TABLE IF NOT EXISTS `{recordsTable}` (
 					EntryId              BIGINT        NOT NULL,
 					SchemaName           VARCHAR(64)   NOT NULL,
 					SerializedParameters VARCHAR(2000) NOT NULL,
@@ -92,7 +104,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						return;
 					}
 
-					string sql = $"INSERT INTO `{SCHEMAS_TABLE}` (SchemaName, Declarations, CreatedAt) VALUES (@SchemaName, @Declarations, @CreatedAt)";
+					string sql = $"INSERT INTO `{schemasTable}` (SchemaName, Declarations, CreatedAt) VALUES (@SchemaName, @Declarations, @CreatedAt)";
 					using (var command = new MySqlCommand(sql, connection))
 					{
 						command.Parameters.AddWithValue("@SchemaName", schemaName);
@@ -125,7 +137,7 @@ namespace Puppeteer.EventSourcing.Playbill
 
 		private string SelectDeclarations(MySqlConnection connection, string schemaName)
 		{
-			string sql = $"SELECT Declarations FROM `{SCHEMAS_TABLE}` WHERE SchemaName = @SchemaName";
+			string sql = $"SELECT Declarations FROM `{schemasTable}` WHERE SchemaName = @SchemaName";
 			using (var command = new MySqlCommand(sql, connection))
 			{
 				command.Parameters.AddWithValue("@SchemaName", schemaName);
@@ -161,7 +173,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		internal override IEnumerable<(string Name, string Declarations)> ListSchemas()
 		{
 			var result = new List<(string, string)>();
-			string sql = $"SELECT SchemaName, Declarations FROM `{SCHEMAS_TABLE}` ORDER BY SchemaName";
+			string sql = $"SELECT SchemaName, Declarations FROM `{schemasTable}` ORDER BY SchemaName";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -192,7 +204,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(schemaName);
 			ArgumentNullException.ThrowIfNull(serializedParameters);
 
-			string sql = $"INSERT INTO `{RECORDS_TABLE}` (EntryId, SchemaName, SerializedParameters) VALUES (@EntryId, @SchemaName, @SerializedParameters)";
+			string sql = $"INSERT INTO `{recordsTable}` (EntryId, SchemaName, SerializedParameters) VALUES (@EntryId, @SchemaName, @SerializedParameters)";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -231,7 +243,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		{
 			if (entryId <= 0) throw new LanguageException($"EntryId {entryId} must be greater than zero.");
 
-			string sql = $"SELECT SchemaName, SerializedParameters FROM `{RECORDS_TABLE}` WHERE EntryId = @EntryId";
+			string sql = $"SELECT SchemaName, SerializedParameters FROM `{recordsTable}` WHERE EntryId = @EntryId";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -264,7 +276,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(schemaName);
 
 			var result = new List<(long, string)>();
-			string sql = $"SELECT EntryId, SerializedParameters FROM `{RECORDS_TABLE}` WHERE SchemaName = @SchemaName ORDER BY EntryId ASC";
+			string sql = $"SELECT EntryId, SerializedParameters FROM `{recordsTable}` WHERE SchemaName = @SchemaName ORDER BY EntryId ASC";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -298,7 +310,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNull(result);
 
 			result.Clear();
-			string sql = $"SELECT EntryId, SchemaName, SerializedParameters FROM `{RECORDS_TABLE}` WHERE EntryId > @AfterEntryId ORDER BY EntryId ASC";
+			string sql = $"SELECT EntryId, SchemaName, SerializedParameters FROM `{recordsTable}` WHERE EntryId > @AfterEntryId ORDER BY EntryId ASC";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -334,8 +346,8 @@ namespace Puppeteer.EventSourcing.Playbill
 		// transaction; no client sees an intermediate state.
 		internal override void Distill()
 		{
-			string newTable = RECORDS_TABLE + "_new";
-			string oldTable = RECORDS_TABLE + "_old";
+			string newTable = recordsTable + "_new";
+			string oldTable = recordsTable + "_old";
 
 			using (var connection = new MySqlConnection(ConnectionString))
 			{
@@ -348,15 +360,15 @@ namespace Puppeteer.EventSourcing.Playbill
 					ExecuteNonQuery(connection, $"DROP TABLE IF EXISTS `{newTable}`");
 					ExecuteNonQuery(connection, $"DROP TABLE IF EXISTS `{oldTable}`");
 
-					ExecuteNonQuery(connection, $"CREATE TABLE `{newTable}` LIKE `{RECORDS_TABLE}`");
+					ExecuteNonQuery(connection, $"CREATE TABLE `{newTable}` LIKE `{recordsTable}`");
 
 					string copyAlive = $@"
 						INSERT INTO `{newTable}`
-						SELECT pr.* FROM `{RECORDS_TABLE}` pr
+						SELECT pr.* FROM `{recordsTable}` pr
 						WHERE EXISTS (SELECT 1 FROM `{ActorName}` j WHERE j.id = pr.EntryId)";
 					ExecuteNonQuery(connection, copyAlive);
 
-					ExecuteNonQuery(connection, $"RENAME TABLE `{RECORDS_TABLE}` TO `{oldTable}`, `{newTable}` TO `{RECORDS_TABLE}`");
+					ExecuteNonQuery(connection, $"RENAME TABLE `{recordsTable}` TO `{oldTable}`, `{newTable}` TO `{recordsTable}`");
 					ExecuteNonQuery(connection, $"DROP TABLE `{oldTable}`");
 				}
 				catch (MySqlException e)

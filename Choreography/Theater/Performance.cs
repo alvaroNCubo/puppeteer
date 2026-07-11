@@ -7,6 +7,7 @@ using Choreography.Dispatch;
 using Choreography.Saga;
 using Puppeteer;
 using Puppeteer.EventSourcing.Follower;
+using Puppeteer.EventSourcing.Playbill;
 
 namespace Choreography.Theater
 {
@@ -20,7 +21,6 @@ namespace Choreography.Theater
         protected bool storageConfigured;
         private bool started;
         private bool isFollower;
-        private bool handoverComplete;
         private CancellationTokenSource reactionsCts;
         private readonly List<Task> reactionTasks = new List<Task>();
 
@@ -130,6 +130,13 @@ namespace Choreography.Theater
             // Transport; only the journal write is omitted.
             hook.SuppressReactionJournaling = asFollower;
 
+            // Readiness fence: a follower is rehydrated (transition reaches Recovered)
+            // but must not serve until the handover. The gate lives in the core so
+            // IsAlive is single-sourced across layers instead of Performance tracking
+            // handover state in parallel (which let the core report a fenced replica
+            // as alive during the whole catch-up window).
+            hook.Fenced = asFollower;
+
             // ReactionActivation gate: the Theater Performance acts as
             // director/primary when it is NOT a follower. The provider is live: it reads
             // isFollower on every Reaction.Execute, so after the handover
@@ -184,15 +191,17 @@ namespace Choreography.Theater
             }
         }
 
-        public bool IsAlive
-        {
-            get
-            {
-                if (!started) return false;
-                if (!isFollower) return true;
-                return handoverComplete;
-            }
-        }
+        // Single source of truth: readiness is the core gate (hook.IsAlive), which
+        // already accounts for the rehydration transition AND the follower fence.
+        // isFollower remains for the director-role provider, not for readiness, so no
+        // layer can disagree with the core about "ready to serve".
+        public bool IsAlive => started && hook.IsAlive;
+
+        // Diagnostics for the cutover controller: true when the red-black catch-up was
+        // suspended (the joining version could not re-apply a journaled Action). The
+        // replica stays fenced (IsAlive == false); resolve the incompatibility before
+        // promoting.
+        public bool CatchUpFailed => hook.CatchUpFailed;
 
         public string LockWhileNotSyncronized()
         {
@@ -203,7 +212,6 @@ namespace Choreography.Theater
         public void UnlockAndRunAlive()
         {
             hook.UnlockAndRunAlive();
-            handoverComplete = true;
             isFollower = false;
             aliveGate.Set();
             PerformanceTracer.Instance.RaiseHandoverCompleted(Name);
@@ -228,9 +236,38 @@ namespace Choreography.Theater
             if (!storageConfigured)
                 throw new InvalidOperationException("Storage not configured. Call ConfigureStorage before Shadow.");
 
+            // Opt-in playbill carry (default off). Validate BEFORE building the shadow so
+            // a misconfiguration does not leave an orphaned shadow actor/storage behind.
+            Playbill carrySource = null;
+            if (cfg.CarryPlaybill)
+            {
+                carrySource = ShadowPlaybillSource;
+                if (carrySource == null)
+                    throw new InvalidOperationException(
+                        "ShadowConfig.CarryPlaybill was requested, but this Performance declares no Playbill " +
+                        "schema (no .Playbill(...) call), so there is no audit metadata to carry. Declare a " +
+                        "Playbill on the primary before shadowing, or leave CarryPlaybill = false (the default).");
+            }
+
             Puppeteer.Shadow shadow = ActorInstance.Shadow(cfg);
-            return new ShadowPerformance(shadow);
+            var shadowPerformance = new ShadowPerformance(shadow);
+
+            // The shadow gets its OWN playbill store (shadow name + shadow storage — never
+            // the primary's); SyncUntil copies the primary's schemas + records up to the
+            // replay ceiling into it.
+            if (carrySource != null)
+            {
+                var target = new Playbill(cfg.ShadowStorageType, cfg.ShadowStorageConnection, shadow.Actor.Name, hook.Logger);
+                shadowPerformance.EnablePlaybillCarry(carrySource, target);
+            }
+
+            return shadowPerformance;
         }
+
+        // The Playbill whose audit records a shadow copies when CarryPlaybill is on.
+        // null on the base and on any Performance that declared no Playbill schema;
+        // V1/V2 override to expose their own playbill.
+        protected virtual Playbill ShadowPlaybillSource => null;
 
         // Distill: physically materializes the elisions accumulated in the journal of
         // the actor hosted by this Performance. Operational/administrative — corresponds

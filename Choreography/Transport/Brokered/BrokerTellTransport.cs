@@ -34,6 +34,12 @@ namespace Choreography.Transport.Brokered
 		private readonly IMessageBroker broker;
 		private readonly TellBindingTable bindings;
 
+		// Decides the byte shape of the record value. Defaults to today's behaviour
+		// (ArgumentsAsString); a host may slot in a denser codec — the receiver's
+		// BrokerTellConsumer MUST be wired with the same codec so the payload
+		// round-trips A -> B. The transport stays payload-shape-agnostic either way.
+		private readonly ITellPayloadCodec codec;
+
 		private readonly object handlerLock = new object();
 		private Action<AckEnvelope> ackHandler;
 		private Action<TellFailure> failureHandler;
@@ -48,11 +54,12 @@ namespace Choreography.Transport.Brokered
 
 		private bool disposed;
 
-		public BrokerTellTransport(IMessageBroker broker, TellBindingTable bindings, string witnessName = null)
+		public BrokerTellTransport(IMessageBroker broker, TellBindingTable bindings, string witnessName = null, ITellPayloadCodec payloadCodec = null)
 		{
 			this.broker = broker ?? throw new ArgumentNullException(nameof(broker));
 			this.bindings = bindings ?? throw new ArgumentNullException(nameof(bindings));
 			this.WitnessName = string.IsNullOrWhiteSpace(witnessName) ? "broker" : witnessName;
+			this.codec = payloadCodec ?? DefaultTellPayloadCodec.Instance;
 		}
 
 		// Stable telemetry label for this transport. It rides on failure records and
@@ -80,16 +87,34 @@ namespace Choreography.Transport.Brokered
 				[BrokerTellWire.HeaderCausalEvent] = envelope.CausalEventId
 			};
 
+			// Inject W3C trace context (ephemeral observability) so the receiver
+			// re-parents its work onto this trace and the cross-actor tell chain renders
+			// as ONE distributed trace. Prefer a context already stamped on the envelope
+			// (the uniform carrier); otherwise capture the ambient Activity at send.
+			// No active trace -> nothing injected (no header, zero overhead). Never
+			// journaled — this rides the wire only.
+			string traceParent = envelope.TraceParent;
+			string traceState = envelope.TraceState;
+			if (traceParent == null)
+			{
+				Puppeteer.Tell.TraceContext.TryCaptureAmbient(out traceParent, out traceState);
+			}
+			if (!string.IsNullOrEmpty(traceParent))
+			{
+				headers[BrokerTellWire.HeaderTraceParent] = traceParent;
+				if (!string.IsNullOrEmpty(traceState))
+					headers[BrokerTellWire.HeaderTraceState] = traceState;
+			}
+
 			fates[envelope.Id] = TellFate.InFlight;
 
 			// The record value is the ordered payload VALUES (serialized in order) —
 			// never the parameter names/types nor any command template. The command
 			// shape is the receiver's; repeating it on every message would be
 			// porosity. The host maps the message name (a header) to the command it
-			// already holds and applies these values positionally.
-			string body = envelope.Values != null
-				? envelope.Values.ArgumentsAsString(Puppeteer.DatabaseType.IN_MEMORY)
-				: string.Empty;
+			// already holds and applies these values positionally. The codec decides
+			// only the byte shape of that value; the default is ArgumentsAsString.
+			string body = codec.Encode(envelope.Values);
 
 			// Key by the addressee instance so all tells to one instance keep their
 			// relative order on a partition.

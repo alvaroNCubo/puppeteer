@@ -28,9 +28,14 @@ namespace Choreography.Dispatch
             Span = new SpanGroup(this);
         }
 
-        internal IFlowSpan StartHandlerSpan(string messageId, string handlerName, string sagaName, string stepName, string instanceKey)
+        internal IFlowSpan StartHandlerSpan(string messageId, string handlerName, string sagaName, string stepName, string instanceKey, string traceContext = null)
         {
-            var s = Span.Handler.Start();
+            // Re-parent onto an upstream producer's trace when the input signal carried
+            // a W3C trace context, so a Kafka-fed Dispatch/Saga continues the trace that
+            // produced the record. No context -> a normal handler span (prior behavior).
+            var s = string.IsNullOrWhiteSpace(traceContext)
+                ? Span.Handler.Start()
+                : Span.Handler.StartFromContext(traceContext);
             if (messageId != null) s.SetLabel(Tags.MessageId, messageId);
             if (handlerName != null) s.SetLabel("dispatch.handler", handlerName);
             if (sagaName != null) s.SetLabel(Tags.SagaName, sagaName);

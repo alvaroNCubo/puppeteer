@@ -49,10 +49,37 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				if (!parameters.ContainsParameter(descriptor.Name))
 					return false;
 				var parameter = parameters[descriptor.Name];
-				if (parameter.ParameterType != descriptor.ParameterType || parameter.ParameterModifier != descriptor.ParameterModifier)
+				if (parameter.ParameterType != descriptor.ParameterType)
+					return false;
+				if (!ModifiersAreCompatible(parameter.ParameterModifier, descriptor.ParameterModifier))
 					return false;
 			}
 			return true;
+		}
+
+		// In (caller-supplied literal) and Eval (value computed transactionally from the
+		// actor state at command time) are both VALUE-IN kinds: each supplies a value that
+		// the body consumes through a bare identifier bound as a local parameter, and the
+		// body cannot tell them apart. They are therefore interchangeable for signature
+		// compatibility. This matters across the define-action round-trip: the Define header
+		// carries the Out/InOut modifier explicitly but deliberately NOT In or Eval (Eval's
+		// script is not in the header; its computed value travels in the arguments blob and
+		// is reconstructed as a value-in argument). So a rehydrated Eval parameter comes
+		// back as In, while the first live re-issue after a restart still supplies the
+		// original Eval modifier. Rejecting that mismatch blocked every post-restart
+		// invocation of an Eval-parametric Action. Out / InOut carry write-back semantics
+		// that In / Eval do not, so those remain matched strictly — and because the header
+		// now preserves them, a rehydrated Out/InOut parameter keeps its modifier and this
+		// strict match holds after a restart.
+		private static bool ModifiersAreCompatible(int provided, int expected)
+		{
+			if (provided == expected) return true;
+			return IsValueInModifier(provided) && IsValueInModifier(expected);
+		}
+
+		private static bool IsValueInModifier(int modifier)
+		{
+			return modifier == Parameter.In || modifier == Parameter.Eval;
 		}
 
 		private IEnumerable<Parameter> ReferencedParameters(Parameters parameters)

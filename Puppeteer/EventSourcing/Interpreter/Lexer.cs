@@ -492,7 +492,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 										CurrentToken = new Token(TokenType.ellipsis, input.LexemeStart, input.LexemeEnd);
 										return;
 									}
-									input.Backtrack();
+									// Exactly two dots: the range operator '..' (e.g. {1..5}). Three dots
+									// stay 'ellipsis' (the reaction-pattern token); one dot stays 'dot'.
+									CurrentToken = new Token(TokenType.range, input.LexemeStart, input.LexemeEnd);
+									return;
 								}
 								CurrentToken = new Token(TokenType.dot, input.LexemeStart, input.LexemeEnd);
 								return;
@@ -718,6 +721,18 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 				if (IsDot())
 				{
+					// A '..' is the range operator, not a decimal point: end the number
+					// before the dots so {1..5} lexes as number, range, number. Peek by
+					// consuming the dot and backtracking (the balanced consume/backtrack
+					// pattern used throughout Advance).
+					input.ConsumeChar();
+					bool nextIsDot = input.CurrentChar == '.';
+					input.Backtrack();
+					if (nextIsDot)
+					{
+						break;
+					}
+
 					if (isDecimal)
 					{
 						throw new LanguageException($"More than one decimal point found in numeric literal at line {input.Row}, column {input.Column}.", input.CurrentString().ToString(), input.Row, input.Column);

@@ -10,23 +10,34 @@ namespace Puppeteer.EventSourcing.Playbill
 	// different SQL idioms: brackets [Name] instead of backticks, IF OBJECT_ID
 	// instead of CREATE TABLE IF NOT EXISTS, SELECT INTO + sp_rename for the
 	// rebuild-via-shadow-swap (RENAME TABLE does not exist in SQL Server).
+	//
+	// Like the MySQL backend, the schemas/records tables are named PER ACTOR
+	// ({ActorName}_PlaybillSchemas, {ActorName}_PlaybillRecords), symmetric to the
+	// actor's own journal table ({ActorName}). One database may host many actors
+	// (EnsemblePerformance) with INDEPENDENT per-actor EntryId sequences; a
+	// database-global records table keyed by EntryId alone would collide the
+	// moment two actors reach the same EntryId. Per-actor tables keep each actor's
+	// records isolated — matching the FileSystem and InMemory backends.
 	internal sealed class PlaybillStoreSQLServer : PlaybillStore
 	{
-		private const string SCHEMAS_TABLE = "PlaybillSchemas";
-		private const string RECORDS_TABLE = "PlaybillRecords";
+		private readonly string schemasTable;
+		private readonly string recordsTable;
 
 		internal PlaybillStoreSQLServer(string actorName, string connectionString, IPuppeteerLogger logger)
 			: base(actorName, connectionString, logger)
 		{
+			StorageActorName.ValidateSqlIdentifier(actorName, "SQL Server");
+			this.schemasTable = actorName + "_PlaybillSchemas";
+			this.recordsTable = actorName + "_PlaybillRecords";
 			EnsureTables();
 		}
 
 		private void EnsureTables()
 		{
 			string sql = $@"
-				IF OBJECT_ID('{SCHEMAS_TABLE}') IS NULL
+				IF OBJECT_ID('{schemasTable}') IS NULL
 				BEGIN
-					CREATE TABLE [{SCHEMAS_TABLE}] (
+					CREATE TABLE [{schemasTable}] (
 						SchemaName    VARCHAR(64)   NOT NULL,
 						Declarations  VARCHAR(2000) NOT NULL,
 						CreatedAt     DATETIME      NOT NULL,
@@ -34,15 +45,15 @@ namespace Puppeteer.EventSourcing.Playbill
 					);
 				END;
 
-				IF OBJECT_ID('{RECORDS_TABLE}') IS NULL
+				IF OBJECT_ID('{recordsTable}') IS NULL
 				BEGIN
-					CREATE TABLE [{RECORDS_TABLE}] (
+					CREATE TABLE [{recordsTable}] (
 						EntryId              BIGINT        NOT NULL,
 						SchemaName           VARCHAR(64)   NOT NULL,
 						SerializedParameters VARCHAR(2000) NOT NULL,
 						PRIMARY KEY (EntryId)
 					);
-					CREATE INDEX IX_PlaybillRecords_SchemaName ON [{RECORDS_TABLE}] (SchemaName);
+					CREATE INDEX IX_PlaybillRecords_SchemaName ON [{recordsTable}] (SchemaName);
 				END;";
 
 			using (var connection = new SqlConnection(ConnectionString))
@@ -92,7 +103,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						return;
 					}
 
-					string sql = $"INSERT INTO [{SCHEMAS_TABLE}] (SchemaName, Declarations, CreatedAt) VALUES (@SchemaName, @Declarations, @CreatedAt)";
+					string sql = $"INSERT INTO [{schemasTable}] (SchemaName, Declarations, CreatedAt) VALUES (@SchemaName, @Declarations, @CreatedAt)";
 					using (var command = new SqlCommand(sql, connection))
 					{
 						command.Parameters.AddWithValue("@SchemaName", schemaName);
@@ -125,7 +136,7 @@ namespace Puppeteer.EventSourcing.Playbill
 
 		private string SelectDeclarations(SqlConnection connection, string schemaName)
 		{
-			string sql = $"SELECT Declarations FROM [{SCHEMAS_TABLE}] WHERE SchemaName = @SchemaName";
+			string sql = $"SELECT Declarations FROM [{schemasTable}] WHERE SchemaName = @SchemaName";
 			using (var command = new SqlCommand(sql, connection))
 			{
 				command.Parameters.AddWithValue("@SchemaName", schemaName);
@@ -161,7 +172,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		internal override IEnumerable<(string Name, string Declarations)> ListSchemas()
 		{
 			var result = new List<(string, string)>();
-			string sql = $"SELECT SchemaName, Declarations FROM [{SCHEMAS_TABLE}] ORDER BY SchemaName";
+			string sql = $"SELECT SchemaName, Declarations FROM [{schemasTable}] ORDER BY SchemaName";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -192,7 +203,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(schemaName);
 			ArgumentNullException.ThrowIfNull(serializedParameters);
 
-			string sql = $"INSERT INTO [{RECORDS_TABLE}] (EntryId, SchemaName, SerializedParameters) VALUES (@EntryId, @SchemaName, @SerializedParameters)";
+			string sql = $"INSERT INTO [{recordsTable}] (EntryId, SchemaName, SerializedParameters) VALUES (@EntryId, @SchemaName, @SerializedParameters)";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -232,7 +243,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		{
 			if (entryId <= 0) throw new LanguageException($"EntryId {entryId} must be greater than zero.");
 
-			string sql = $"SELECT SchemaName, SerializedParameters FROM [{RECORDS_TABLE}] WHERE EntryId = @EntryId";
+			string sql = $"SELECT SchemaName, SerializedParameters FROM [{recordsTable}] WHERE EntryId = @EntryId";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -265,7 +276,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(schemaName);
 
 			var result = new List<(long, string)>();
-			string sql = $"SELECT EntryId, SerializedParameters FROM [{RECORDS_TABLE}] WHERE SchemaName = @SchemaName ORDER BY EntryId ASC";
+			string sql = $"SELECT EntryId, SerializedParameters FROM [{recordsTable}] WHERE SchemaName = @SchemaName ORDER BY EntryId ASC";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -299,7 +310,7 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNull(result);
 
 			result.Clear();
-			string sql = $"SELECT EntryId, SchemaName, SerializedParameters FROM [{RECORDS_TABLE}] WHERE EntryId > @AfterEntryId ORDER BY EntryId ASC";
+			string sql = $"SELECT EntryId, SchemaName, SerializedParameters FROM [{recordsTable}] WHERE EntryId > @AfterEntryId ORDER BY EntryId ASC";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -336,7 +347,7 @@ namespace Puppeteer.EventSourcing.Playbill
 		// of the table is not observable by other connections.
 		internal override void Distill()
 		{
-			string newTable = RECORDS_TABLE + "_new";
+			string newTable = recordsTable + "_new";
 
 			using (var connection = new SqlConnection(ConnectionString))
 			{
@@ -356,7 +367,7 @@ namespace Puppeteer.EventSourcing.Playbill
 					string selectInto = $@"
 						SELECT pr.*
 						INTO [{newTable}]
-						FROM [{RECORDS_TABLE}] pr
+						FROM [{recordsTable}] pr
 						WHERE EXISTS (SELECT 1 FROM [{ActorName}] j WHERE j.id = pr.EntryId)";
 					ExecuteNonQuery(connection, tx, selectInto);
 
@@ -364,8 +375,8 @@ namespace Puppeteer.EventSourcing.Playbill
 					ExecuteNonQuery(connection, tx, $"ALTER TABLE [{newTable}] ADD PRIMARY KEY (EntryId)");
 					ExecuteNonQuery(connection, tx, $"CREATE INDEX IX_PlaybillRecords_SchemaName ON [{newTable}] (SchemaName)");
 
-					ExecuteNonQuery(connection, tx, $"DROP TABLE [{RECORDS_TABLE}]");
-					ExecuteNonQuery(connection, tx, $"EXEC sp_rename '{newTable}', '{RECORDS_TABLE}'");
+					ExecuteNonQuery(connection, tx, $"DROP TABLE [{recordsTable}]");
+					ExecuteNonQuery(connection, tx, $"EXEC sp_rename '{newTable}', '{recordsTable}'");
 
 					tx.Commit();
 				}

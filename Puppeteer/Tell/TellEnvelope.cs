@@ -36,5 +36,15 @@ namespace Puppeteer.Tell
 		// the receiver, serialized in order via ArgumentsAsString. Null when the
 		// message carries no payload. Parameter names/types never travel: the receiver
 		// applies these values positionally to the command it already holds.
-		Parameters Values = null);
+		Parameters Values = null,
+		// EPHEMERAL observability metadata: the W3C `traceparent` (and optional
+		// `tracestate`) of the trace active when this tell is sent. It rides the
+		// envelope so a transport that ships envelopes directly (rather than mapping to
+		// broker headers) can carry it uniformly, and so the receiver can re-parent its
+		// work onto the sender's trace — the whole cross-actor chain then renders as ONE
+		// distributed trace. NEVER journaled, NEVER replayed: the journal records the
+		// domain fact alone, exactly as it never records ip/user/offset. Null when
+		// tracing is off. See Puppeteer.Tell.TraceContext.
+		string TraceParent = null,
+		string TraceState = null);
 }
