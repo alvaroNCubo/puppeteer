@@ -1,11 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Puppeteer CLI: an Usher issuer that emits onboarding share-links.
-    Runs on an operator's machine, emits a QR-friendly string, completes
-    the F1-F5 Usher handshake with one or more Stages, and then exits.
-    The QR transport step (print, photograph, OCR) happens out of band;
-    this CLI performs the digital half.
+    Paper 7 Phase 2 CLI: the "Rubicon-equivalent" issuer that emits
+    onboarding share-links for Docker hosts. Designed to run on an
+    operator's laptop, emit a QR-friendly string, complete the
+    F1-F5 Usher handshake with one or more Kora-equivalents
+    (PuppeteerHost containers), and then exit.
+
+    See notes/paper7_phase1_results.md for context. Phase 2's analog
+    Usher hop performs the QR transport step (print, photograph, OCR
+    to container) outside any wire; this CLI does the digital half.
+
+    Sits outside Puppeteer.sln by convention, matching the
+    UnitTestEShopOnPuppeteer / UnitTestPaper7EShop layout.
   -->
 
   <PropertyGroup>

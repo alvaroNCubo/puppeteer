@@ -39,7 +39,7 @@ namespace PuppeteerCli
         {
             if (args.Length == 0)
             {
-                PrintUsage();
+                PrintLanding();
                 return 0;
             }
 
@@ -50,11 +50,39 @@ namespace PuppeteerCli
             {
                 "attach"           => AttachCommand.Run(rest),
                 "show"             => ShowCommand(rest),
+                "describe"         => DescribeCommand.Run(rest),
+                "elide"            => ElideCommand.Run(rest),
                 "issue-invitation" => await IssueInvitationAsync(rest),
                 "chronicle"        => ChronicleNotImplemented(),
                 "--help" or "-h" or "help" => (PrintUsage(), 0).Item2,
                 _ => (PrintUsageErr(command), 1).Item2
             };
+        }
+
+        // Landing message — what the operator sees when invoking `puppeteer`
+        // with no arguments. Branched by audience: the AI agent (Claude or
+        // other LLM operating this tool) is pointed at the machine-readable
+        // `describe` verb; the human is pointed at `--help`. Naming the AI
+        // explicitly is a structural commitment: this CLI is AI-first, not
+        // AI-tolerated. Hiding the audience would be a missed opportunity at
+        // zero cost.
+        private static void PrintLanding()
+        {
+            Console.WriteLine("puppeteer — AI-native CLI for Puppeteer");
+            Console.WriteLine();
+            Console.WriteLine("If you are Claude, another LLM, or any AI agent operating this tool:");
+            Console.WriteLine("  → run `puppeteer describe` first.");
+            Console.WriteLine("    It returns the full surface (verbs, flags, DSL grammar, defaults)");
+            Console.WriteLine("    in TOON, machine-readable. That is your onboarding contract.");
+            Console.WriteLine();
+            Console.WriteLine("If you are a human:");
+            Console.WriteLine("  → run `puppeteer --help` for command-line reference.");
+            Console.WriteLine();
+            Console.WriteLine("Quick start (scratch mode, minimum infra):");
+            Console.WriteLine("  puppeteer attach --txt mywork.txt");
+            Console.WriteLine("  # Auto-discovers *.dll in the directory, opens a REPL, journals every");
+            Console.WriteLine("  # command to mywork.txt. The file is the canonical journal — readable");
+            Console.WriteLine("  # by notepad/vi, never edited manually (use `puppeteer elide` instead).");
         }
 
         // chronicle is the human supervision surface — reserved namespace,
@@ -71,28 +99,37 @@ namespace PuppeteerCli
         {
             Console.WriteLine("puppeteer — AI-native CLI for Puppeteer (operate, supervise, onboard)");
             Console.WriteLine();
+            Console.WriteLine("  AI agent (Claude, etc): `puppeteer describe` returns this whole surface");
+            Console.WriteLine("  as TOON in one shot. Prefer that path — this human-formatted help is a");
+            Console.WriteLine("  fallback, not the primary contract.");
+            Console.WriteLine();
             Console.WriteLine("Operate (AI-facing):");
+            Console.WriteLine("  attach --txt <file> [--actor-name <name>] [--libraries <dll[,dll]>]");
+            Console.WriteLine("         [--prompt-book <dir>]");
+            Console.WriteLine("       Open a PlainText journal in scratch/lab mode. The .txt IS the");
+            Console.WriteLine("       canonical journal — human-readable, sacred, edited only via the CLI.");
+            Console.WriteLine("       Auto-discovers *.dll beside the .txt for the domain. Default");
+            Console.WriteLine("       --actor-name is the .txt's basename. Minimum: `attach --txt foo.txt`.");
+            Console.WriteLine();
             Console.WriteLine("  attach --primary <conn> --actor-name <name> --snapshot");
             Console.WriteLine("         [--libraries <dll[,dll]>] [--prompt-book <dir>]");
-            Console.WriteLine("       Open a hydrated session against a primary's journal in shadow mode.");
+            Console.WriteLine("       Open a Shadow-isolated session against a FileSystem primary journal.");
             Console.WriteLine("       --snapshot is required (only mode today; --live arrives later).");
-            Console.WriteLine("       --libraries loads domain DLLs needed to parse/execute DSL.");
-            Console.WriteLine("                  Pass the assemblies that define the actor's classes;");
-            Console.WriteLine("                  without them only meta-verbs (exit/help/chronicle) work.");
-            Console.WriteLine("       --prompt-book overrides the default PromptBook journal location.");
-            Console.WriteLine("                  Default: %LOCALAPPDATA%/PuppeteerCli/PromptBook/ (Windows)");
-            Console.WriteLine("                  or ~/.local/share/PuppeteerCli/PromptBook/ (Unix).");
-            Console.WriteLine("                  One PromptBook per user by default — sessions across all");
-            Console.WriteLine("                  targets share one memory. Override per-project if needed.");
             Console.WriteLine();
-            Console.WriteLine("  show entry <id> --journal <path=DIR> --actor-name <name>");
-            Console.WriteLine("       Print the journal entry with EntryId == <id> as TOON.");
-            Console.WriteLine("       Read-only. Works on a FileSystem journal directory without");
-            Console.WriteLine("       loading domain libraries (no rehydration).");
+            Console.WriteLine("  describe");
+            Console.WriteLine("       Emit the full CLI surface as TOON (machine-readable). The AI's");
+            Console.WriteLine("       primary onboarding command in a fresh chat.");
             Console.WriteLine();
-            Console.WriteLine("  show action <actionId> --journal <path=DIR> --actor-name <name>");
+            Console.WriteLine("  elide --txt <file> --entry <id> [--backup]");
+            Console.WriteLine("       Physically remove entry <id> from a PlainText journal. The ID is");
+            Console.WriteLine("       preserved as a gap (never re-used). Optional --backup snapshots");
+            Console.WriteLine("       the file before overwriting.");
+            Console.WriteLine();
+            Console.WriteLine("  show entry <id> --journal <conn> --actor-name <name>");
+            Console.WriteLine("       Print the journal entry with EntryId == <id> as TOON. Read-only.");
+            Console.WriteLine();
+            Console.WriteLine("  show action <actionId> --journal <conn> --actor-name <name>");
             Console.WriteLine("       Print the active Define entry for <actionId> as TOON.");
-            Console.WriteLine("       Latest Define wins when the journal contains redefinitions.");
             Console.WriteLine();
             Console.WriteLine("Supervise (human-facing, placeholder):");
             Console.WriteLine("  chronicle ...");
@@ -105,10 +142,10 @@ namespace PuppeteerCli
             Console.WriteLine("       Paper 7 Phase 2 — emit onboarding share-links over real-TLS HTTPS.");
             Console.WriteLine();
             Console.WriteLine("Examples:");
+            Console.WriteLine("  puppeteer attach --txt mywork.txt");
             Console.WriteLine("  puppeteer attach --primary \"path=C:/journals\" --actor-name banco --snapshot");
-            Console.WriteLine("  puppeteer show entry 42 --journal \"path=C:\\journals\" --actor-name banco");
-            Console.WriteLine("  puppeteer show action 42 --journal \"path=C:\\journals\" --actor-name banco");
-            Console.WriteLine("  puppeteer issue-invitation --listen https://localhost:5443");
+            Console.WriteLine("  puppeteer elide --txt mywork.txt --entry 5 --backup");
+            Console.WriteLine("  puppeteer describe");
             return 0;
         }
 
@@ -285,14 +322,14 @@ namespace PuppeteerCli
 
         // ------------------------------ show entry ----------------------------
         //
-        // Lee el journal de un actor de disco SIN cargar las LibraryAssemblies
-        // de dominio (no rehidrata). Solo el path read-only de
-        // IActorIntrospection.ShowEntry se ejercita. La salida es TOON puro a
-        // stdout, diagnostics a stderr — apto para pipear a otra herramienta o
-        // a un chat con la IA.
+        // Reads a disk actor's journal WITHOUT loading the domain
+        // LibraryAssemblies (no rehydration). Only the read-only path of
+        // IActorIntrospection.ShowEntry is exercised. The output is pure TOON to
+        // stdout, diagnostics to stderr — suitable for piping to another tool or
+        // to a chat with the AI.
         //
-        // Naming: `show entry <id>` (no `show-entry`) para que future verbs
-        // bajo `show` (range, find, describe, branch ...) escalen sin renaming.
+        // Naming: `show entry <id>` (not `show-entry`) so that future verbs
+        // under `show` (range, find, describe, branch ...) scale without renaming.
 
         private static int ShowCommand(string[] args)
         {
@@ -344,9 +381,9 @@ namespace PuppeteerCli
 
             try
             {
-                // ActorV1 sin librerias — solo abrimos storage para introspeccion.
-                // El path read-only no rehidrata, asi que el dominio del actor
-                // puede ser desconocido para el binario puppeteer-cli.
+                // ActorV1 without libraries — we only open storage for introspection.
+                // The read-only path does not rehydrate, so the actor's domain
+                // may be unknown to the puppeteer-cli binary.
                 var actor = new ActorV1(actorName);
                 actor.ConfigureStorageForIntrospection(DatabaseType.FileSystem, journalConnection);
 
@@ -362,9 +399,9 @@ namespace PuppeteerCli
 
         // ------------------------------ show action ---------------------------
         //
-        // Resuelve un actionId al Define entry vigente del journal y lo devuelve
-        // como TOON. Misma plumbing read-only que show entry (no rehidrata,
-        // no requiere librerias de dominio). Workflow tipico de la IA:
+        // Resolves an actionId to the journal's active Define entry and returns it
+        // as TOON. Same read-only plumbing as show entry (no rehydration,
+        // no domain libraries required). Typical AI workflow:
         //   1) show entry 200    -> ve actionId: 42
         //   2) show action 42    -> ve define action 42 (...) as ... end;
 

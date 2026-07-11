@@ -11,20 +11,20 @@ using PuppeteerCli.PromptBook;
 
 namespace PuppeteerCli
 {
-	// puppeteer attach — la fase larga del CLI.
+	// puppeteer attach — the CLI's long-lived phase.
 	//
-	// A diferencia de los verbos one-shot (show entry / show action), attach abre
-	// una SESSION hidratada: construye el actor primary, crea un Shadow aislado,
-	// replay del journal del primary hasta el head, y entra a un REPL que mantiene
-	// la hidratacion viva mientras la IA opera. Cada sesion queda journaled en el
-	// PromptBook (el actor del CLI mismo) — open al inicio, close al exit.
+	// Unlike the one-shot verbs (show entry / show action), attach opens a
+	// hydrated SESSION: it builds the primary actor, creates an isolated Shadow,
+	// replays the primary's journal up to the head, and enters a REPL that keeps
+	// the hydration alive while the AI operates. Each session is journaled in the
+	// PromptBook (the CLI's own actor) — open at start, close at exit.
 	//
-	// Aislamiento por construccion: TODO lo que el REPL ejecuta cae sobre el shadow.
-	// El journal del primary queda intacto. La IA puede equivocarse libre.
+	// Isolation by construction: EVERYTHING the REPL executes lands on the shadow.
+	// The primary's journal stays intact. The AI is free to make mistakes.
 	//
-	// Layer 2 (firmado 2026-06-01): el REPL solo soporta meta-verbos (exit / help).
-	// DSL execution (print / cmd / bloques) llega en Layer 3. End-to-end con un
-	// dominio real (Compania-Carrito-Orden) llega en Layer 4.
+	// Layer 2 (signed 2026-06-01): the REPL only supports meta-verbs (exit / help).
+	// DSL execution (print / cmd / blocks) arrives in Layer 3. End-to-end with a
+	// real domain arrives in Layer 4.
 	public static class AttachCommand
 	{
 		public static int Run(string[] args)
@@ -32,9 +32,9 @@ namespace PuppeteerCli
 			return RunCore(args, Console.In, Console.Out, Console.Error);
 		}
 
-		// Variante testeable: stdin/stdout/stderr inyectados. Tests pasan
-		// StringReader/StringWriter para validar el flujo del REPL sin tocar
-		// la consola real.
+		// Testable variant: injected stdin/stdout/stderr. Tests pass
+		// StringReader/StringWriter to validate the REPL flow without touching
+		// the real console.
 		public static int RunCore(string[] args, TextReader input, TextWriter stdout, TextWriter diagnostic)
 		{
 			ArgumentNullException.ThrowIfNull(args);
@@ -53,6 +53,15 @@ namespace PuppeteerCli
 				return 1;
 			}
 
+			return parsed.Mode == AttachMode.Txt
+				? RunTxtMode(parsed, input, stdout, diagnostic)
+				: RunPrimaryMode(parsed, input, stdout, diagnostic);
+		}
+
+		// Primary mode: Shadow-isolated against a FileSystem primary journal. The
+		// shadow is the operator's playground; the primary stays untouched.
+		private static int RunPrimaryMode(AttachArgs parsed, TextReader input, TextWriter stdout, TextWriter diagnostic)
+		{
 			Assembly[] libraries;
 			try
 			{
@@ -82,9 +91,6 @@ namespace PuppeteerCli
 			long head = primary.CurrentEntryId;
 			diagnostic.WriteLine($"[puppeteer] Primary head = {head}.");
 
-			// Shadow corre con storage propio in-memory por default — efimero,
-			// se descarta al salir. La idea es lab; persistencia de un fork
-			// llega con Topology.
 			string shadowId = ShortGuid();
 			var cfg = new ShadowConfig(
 				id: shadowId,
@@ -126,7 +132,7 @@ namespace PuppeteerCli
 			string exitReason = "unknown";
 			try
 			{
-				exitReason = Repl(shadow, parsed.ActorName, shadowId, input, stdout, diagnostic);
+				exitReason = Repl((ActorV2)shadow.Actor, parsed.ActorName, shadowId, input, stdout, diagnostic);
 			}
 			catch (Exception ex)
 			{
@@ -142,11 +148,82 @@ namespace PuppeteerCli
 			return 0;
 		}
 
+		// PlainText mode: the .txt file IS the canonical journal. No Shadow — the
+		// human/AI authoring is the truth. Every PerformCommand appends one line.
+		// Reactions are runtime-only (the InMemory auxiliary stores), lost between
+		// sessions. Use the primary FS mode for workloads that need persisted
+		// reactions or distributed replication.
+		private static int RunTxtMode(AttachArgs parsed, TextReader input, TextWriter stdout, TextWriter diagnostic)
+		{
+			Assembly[] libraries;
+			try
+			{
+				libraries = LoadLibrariesForTxtMode(parsed.LibrariesArg, parsed.TxtPath, diagnostic);
+			}
+			catch (Exception ex)
+			{
+				diagnostic.WriteLine($"Error loading libraries: {ex.Message}");
+				return 1;
+			}
+
+			bool isNewFile = !File.Exists(parsed.TxtPath);
+			ActorV2 actor = libraries.Length > 0
+				? new ActorV2(parsed.ActorName, libraries)
+				: new ActorV2(parsed.ActorName);
+
+			diagnostic.WriteLine($"[puppeteer] Opening PlainText journal: {parsed.TxtPath}");
+			try
+			{
+				actor.ConfigureStorage(DatabaseType.PlainText, "path=" + parsed.TxtPath);
+			}
+			catch (Exception ex)
+			{
+				diagnostic.WriteLine($"Error opening PlainText journal: {ex.Message}");
+				return 1;
+			}
+
+			long head = actor.CurrentEntryId;
+			if (isNewFile)
+			{
+				diagnostic.WriteLine("[puppeteer] New journal created.");
+				PrintFirstAttachTutorial(diagnostic);
+			}
+			else
+			{
+				diagnostic.WriteLine($"[puppeteer] Journal head = {head}.");
+			}
+
+			using var promptBook = new PromptBookActor(parsed.PromptBookOverride);
+			promptBook.OpenSession(parsed.ActorName, "plaintext");
+			diagnostic.WriteLine("[puppeteer] PromptBook session opened. Type 'help' for commands. 'exit' or EOF to quit.");
+
+			string exitReason = "unknown";
+			try
+			{
+				exitReason = Repl(actor, parsed.ActorName, "txt", input, stdout, diagnostic);
+			}
+			catch (Exception ex)
+			{
+				exitReason = "error:" + ex.GetType().Name;
+				diagnostic.WriteLine($"[puppeteer] REPL crashed ({ex.GetType().Name}): {ex.Message}");
+			}
+			finally
+			{
+				promptBook.CloseSession(exitReason);
+				diagnostic.WriteLine($"[puppeteer] PromptBook session ended ({exitReason}). Journal closed.");
+			}
+			return 0;
+		}
+
 		// ── Parsing ─────────────────────────────────────────────────────────
+
+		private enum AttachMode { Primary, Txt }
 
 		private sealed class AttachArgs
 		{
+			public AttachMode Mode;
 			public string PrimaryConnection;
+			public string TxtPath;
 			public string ActorName;
 			public bool Snapshot;
 			public string LibrariesArg;
@@ -163,6 +240,10 @@ namespace PuppeteerCli
 					case "--primary":
 						if (++i >= args.Length) throw new LanguageException("--primary requires a connection string");
 						result.PrimaryConnection = args[i];
+						break;
+					case "--txt":
+						if (++i >= args.Length) throw new LanguageException("--txt requires a file path");
+						result.TxtPath = args[i];
 						break;
 					case "--actor-name":
 						if (++i >= args.Length) throw new LanguageException("--actor-name requires a name");
@@ -184,12 +265,31 @@ namespace PuppeteerCli
 				}
 			}
 
-			if (string.IsNullOrWhiteSpace(result.PrimaryConnection))
-				throw new LanguageException("--primary <connection> is required (e.g. \"path=C:/journals/banco\")");
+			bool hasPrimary = !string.IsNullOrWhiteSpace(result.PrimaryConnection);
+			bool hasTxt = !string.IsNullOrWhiteSpace(result.TxtPath);
+
+			if (hasPrimary && hasTxt)
+				throw new LanguageException("--primary and --txt are mutually exclusive; choose one.");
+			if (!hasPrimary && !hasTxt)
+				throw new LanguageException("Either --primary <connection> (Shadow mode) or --txt <file> (PlainText scratch mode) is required.");
+
+			if (hasTxt)
+			{
+				result.Mode = AttachMode.Txt;
+				// Default actor-name from the .txt filename (sans extension) when the
+				// caller did not pass one. This is the convention-over-configuration
+				// step that makes `puppeteer attach --txt mywork.txt` a 3-token command.
+				if (string.IsNullOrWhiteSpace(result.ActorName))
+					result.ActorName = Path.GetFileNameWithoutExtension(result.TxtPath);
+				// --snapshot is not required in --txt mode (no shadow to choose).
+				return result;
+			}
+
+			result.Mode = AttachMode.Primary;
 			if (string.IsNullOrWhiteSpace(result.ActorName))
-				throw new LanguageException("--actor-name <name> is required");
+				throw new LanguageException("--actor-name <name> is required in --primary mode");
 			if (!result.Snapshot)
-				throw new LanguageException("--snapshot is required (only mode supported today; --live arrives later)");
+				throw new LanguageException("--snapshot is required in --primary mode (only mode supported today; --live arrives later)");
 
 			return result;
 		}
@@ -212,28 +312,81 @@ namespace PuppeteerCli
 			return assemblies.ToArray();
 		}
 
+		// In --txt mode, library discovery is auto by default: scan the directory
+		// of the .txt file for *.dll and load all of them. This is the convention
+		// that makes "low infra" real — if the user drops Domain.dll next to
+		// their journal, they don't have to declare it. Explicit --libraries
+		// overrides the auto-discovery.
+		private static Assembly[] LoadLibrariesForTxtMode(string librariesArg, string txtPath, TextWriter diagnostic)
+		{
+			if (!string.IsNullOrWhiteSpace(librariesArg))
+				return LoadLibraries(librariesArg, diagnostic);
+
+			string dir = Path.GetDirectoryName(Path.GetFullPath(txtPath));
+			if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+				return Array.Empty<Assembly>();
+
+			string[] dllPaths = Directory.GetFiles(dir, "*.dll");
+			if (dllPaths.Length == 0)
+			{
+				diagnostic.WriteLine("[puppeteer] No domain DLLs found beside the journal. Only literal-typed DSL will work.");
+				return Array.Empty<Assembly>();
+			}
+
+			var assemblies = new List<Assembly>();
+			foreach (string dllPath in dllPaths)
+			{
+				try
+				{
+					Assembly asm = Assembly.LoadFrom(dllPath);
+					assemblies.Add(asm);
+					diagnostic.WriteLine($"[puppeteer] Auto-loaded library: {Path.GetFileName(dllPath)}");
+				}
+				catch (Exception ex)
+				{
+					diagnostic.WriteLine($"[puppeteer] Skipped {Path.GetFileName(dllPath)}: {ex.Message}");
+				}
+			}
+			return assemblies.ToArray();
+		}
+
+		private static void PrintFirstAttachTutorial(TextWriter diagnostic)
+		{
+			diagnostic.WriteLine("[puppeteer]");
+			diagnostic.WriteLine("[puppeteer] AI agent (Claude, etc): this is your first-class scratch workspace.");
+			diagnostic.WriteLine("[puppeteer]   1. show class <ClassName>   — discover what your loaded domain offers");
+			diagnostic.WriteLine("[puppeteer]   2. <expr>;                  — append a command (one journal entry)");
+			diagnostic.WriteLine("[puppeteer]   3. print <expr> <name>;     — query without journaling");
+			diagnostic.WriteLine("[puppeteer]   4. exit                     — close the session (journal stays)");
+			diagnostic.WriteLine("[puppeteer]");
+			diagnostic.WriteLine("[puppeteer] Human: same commands work; type 'help' in the REPL for syntax.");
+			diagnostic.WriteLine("[puppeteer]");
+		}
+
 		// ── REPL ────────────────────────────────────────────────────────────
 		//
-		// Dispatch de tres puertas (firmado 2026-06-01):
-		//   - meta-verbo (exit / quit / help / chronicle ...)  →  meta del CLI
-		//   - linea/buffer que empieza con `print`             →  PerformQuery, Toon a stdout
-		//   - cualquier otra cosa (statement o { ... })        →  PerformCommand sobre el shadow
+		// Three-door dispatch (signed 2026-06-01):
+		//   - meta-verb (exit / quit / help / chronicle ...)   →  CLI meta
+		//   - line/buffer starting with `print`                →  PerformQuery, Toon to stdout
+		//   - anything else (statement or { ... })             →  PerformCommand on the shadow
 		//
-		// Multi-line: si un buffer abre `{` sin cerrarlo, se sigue leyendo con prompt
-		// secundario `... > ` hasta que los brackets balanceen. Strings (entre comillas
-		// simples) se ignoran al contar — un `{` dentro de 'abc{def' no abre nivel.
+		// Multi-line: if a buffer opens `{` without closing it, reading continues with
+		// a secondary prompt `... > ` until the brackets balance. Strings (in single
+		// quotes) are ignored while counting — a `{` inside 'abc{def' does not open a level.
 		//
-		// Errores: LanguageException u otra excepcion durante PerformCmd/PerformQuery se
-		// captura, se loggea a stderr, y el REPL sigue vivo. La idea es que la IA
-		// equivoque libre sin tirar el proceso.
+		// Errors: a LanguageException or any other exception during PerformCmd/PerformQuery
+		// is caught, logged to stderr, and the REPL stays alive. The idea is that the AI
+		// is free to make mistakes without killing the process.
 
-		// Devuelve el motivo de salida ('user-exit' / 'eof' / 'error:...') para que el
-		// PromptBook lo journalize en CloseSession.
-		private static string Repl(Shadow shadow, string primaryName, string shadowId,
+		// Returns the exit reason ('user-exit' / 'eof' / 'error:...') so the
+		// PromptBook can journal it in CloseSession. The actor may be a Shadow.Actor
+		// (Primary mode) or the PlainText actor directly (Txt mode); the REPL does not
+		// distinguish.
+		private static string Repl(ActorV2 actor, string actorName, string sessionTag,
 			TextReader input, TextWriter stdout, TextWriter diagnostic)
 		{
-			string primaryPrompt = $"{primaryName}-shadow-{shadowId}> ";
-			// Continuation prompt: misma longitud para alinear visualmente en la TTY.
+			string primaryPrompt = $"{actorName}-{sessionTag}> ";
+			// Continuation prompt: same length to align visually in the TTY.
 			string contPrompt = new string('.', Math.Max(primaryPrompt.Length - 2, 1)) + "> ";
 
 			var buffer = new StringBuilder();
@@ -252,8 +405,8 @@ namespace PuppeteerCli
 					return "eof";
 				}
 
-				// Solo en el inicio de un input (no en continuacion) tratamos meta-verbos.
-				// Dentro de un bloque, 'exit' es contenido del bloque, no meta.
+				// Only at the start of an input (not in continuation) do we treat meta-verbs.
+				// Inside a block, 'exit' is block content, not meta.
 				if (buffer.Length == 0)
 				{
 					string trimmed = line.Trim();
@@ -274,7 +427,7 @@ namespace PuppeteerCli
 
 				if (depth < 0)
 				{
-					// Mal balance: mas '}' que '{'. Limpiar buffer, avisar, seguir.
+					// Bad balance: more '}' than '{'. Clear the buffer, warn, continue.
 					diagnostic.WriteLine($"[puppeteer] Unbalanced brackets (extra '}}'); input discarded.");
 					buffer.Clear();
 					depth = 0;
@@ -285,13 +438,13 @@ namespace PuppeteerCli
 				{
 					string script = buffer.ToString().TrimEnd();
 					buffer.Clear();
-					DispatchDsl(shadow, script, stdout, diagnostic);
+					DispatchDsl(actor, script, stdout, diagnostic);
 				}
 			}
 		}
 
-		// Cuenta delta de '{' menos '}' en una linea, ignorando el contenido de
-		// string literals (delimitados por ').
+		// Counts the delta of '{' minus '}' in a line, ignoring the content of
+		// string literals (delimited by ').
 		private static int CountBracketDelta(string line)
 		{
 			int delta = 0;
@@ -312,8 +465,8 @@ namespace PuppeteerCli
 			return delta;
 		}
 
-		// True si `s` empieza con `token` SEGUIDO de algo que no es identifier-char.
-		// Evita falsos positivos como `printer = ...` matcheando `print`.
+		// True if `s` starts with `token` FOLLOWED by something that is not an identifier-char.
+		// Avoids false positives like `printer = ...` matching `print`.
 		private static bool StartsWithToken(string s, string token)
 		{
 			if (s.Length < token.Length) return false;
@@ -323,20 +476,17 @@ namespace PuppeteerCli
 			return !char.IsLetterOrDigit(after) && after != '_';
 		}
 
-		// Despacha un script ya cerrado al shadow: Query si empieza con `print`,
-		// Command si no. Toon ambient activo durante la ejecucion. Errores log a
-		// stderr; el REPL sigue vivo.
+		// Dispatches an already-closed script to the actor: Query if it starts with
+		// `print`, Command otherwise. Toon ambient active during execution. Errors log
+		// to stderr; the REPL stays alive.
 		//
-		// Cast a ActorV2 es seguro por construccion: el primary attached siempre es
-		// V2 (lo construye RunCore arriba), y Shadow corre con la misma familia que
-		// el primary (ver ActorHandler.CreateShadow). Si en el futuro la cadena
-		// permite V1, ese path necesita su propio dispatch.
-		private static void DispatchDsl(Shadow shadow, string script, TextWriter stdout, TextWriter diagnostic)
+		// The actor may be a Shadow.Actor (Primary mode) or an actor over
+		// PlainText (Txt mode); the dispatch is identical — both expose the
+		// V2 API Using/PerformCommand/PerformQuery.
+		private static void DispatchDsl(ActorV2 actor, string script, TextWriter stdout, TextWriter diagnostic)
 		{
 			string trimmedStart = script.TrimStart();
 			bool isQuery = StartsWithToken(trimmedStart, "print");
-
-			var actor = (ActorV2)shadow.Actor;
 
 			using (FormatterContext.Push(new ToonFormatter()))
 			{

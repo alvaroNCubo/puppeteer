@@ -31,10 +31,10 @@ namespace PuppeteerCli.Mocks
 
         public Task MarkConsumedAsync(Guid nonce, CancellationToken ct)
         {
-            // Idempotente: el Usher.HandleSingleOnboardingAsync llama
-            // pending.MarkConsumed() ANTES del MarkConsumedAsync,
-            // asi que cuando llegamos aqui Status ya esta Consumed sobre la
-            // misma instancia (el store guarda referencias). Skip silencioso
+            // Idempotent: Usher.HandleSingleOnboardingAsync calls
+            // pending.MarkConsumed() BEFORE MarkConsumedAsync,
+            // so by the time we get here Status is already Consumed on the
+            // same instance (the store keeps references). Silent skip.
             if (store.TryGetValue(nonce, out var pending)
                 && pending.Status == PendingInvitationStatus.Pending)
                 pending.MarkConsumed();
