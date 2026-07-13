@@ -87,9 +87,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 }
             }
 
-            // Register the constructor call with its type and argument types.
+            // Register the constructor call with its type, arg types, the RESOLVED overload
+            // (its signature is the source of truth for ':T' selection) and the observed
+            // argument VALUES (so a constructor position can capture/constrain/compare $x like a
+            // method argument, not merely type-match). Values are extracted the same way as the
+            // method-call path (AstExpression.ExtractArgumentValues).
             Type constructorType = this.ComputeType();
-            patternAst.RegisterConstructorCall(constructorType, argumentTypes, position);
+            ConstructorInfo resolvedConstructor = ResolveConstructor();
+            List<object> argumentValues = AstExpression.ExtractArgumentValues(arguments);
+            patternAst.RegisterConstructorCall(constructorType, argumentTypes, resolvedConstructor, argumentValues, position);
 
             // Advance the position.
             position++;

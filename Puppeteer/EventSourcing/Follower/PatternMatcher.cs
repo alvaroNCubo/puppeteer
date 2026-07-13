@@ -254,10 +254,10 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						// Constraint: the value at this position must equal the
 						// previously captured value. Used for cross-Seek correlation.
+						// Shares ValuesUnifyForConstraint with the domain method-call path
+						// so both routes have ONE constraint semantics (promotion-aware).
 						object captured = capturedVariables[paramName]?.GetValue();
-						if (captured == null && scriptValue == null) return true;
-						if (captured == null || scriptValue == null) return false;
-						return captured.Equals(scriptValue) || scriptValue.Equals(captured);
+						return ValuesUnifyForConstraint(captured, scriptValue);
 					}
 					// First capture.
 					if (scriptValue != null)
@@ -279,6 +279,57 @@ namespace Puppeteer.EventSourcing.Follower
 					return false;
 			}
 		}
+		// Cross-Seek correlation constraint: does the value observed at THIS Seek unify
+		// with the value already bound to this pattern variable at an EARLIER Seek? A
+		// reused pattern variable ($x in foo($x) … endFoo($x)) is one logical variable —
+		// an equality JOIN — so the two must carry the same value for the tuple to be a
+		// solution; otherwise the candidate is discarded.
+		//
+		// Equality is PROMOTION-AWARE, comparing in the type already established for the
+		// variable at its first capture:
+		//   - exact/reference equality first (strings, enums, domain instances, same-typed
+		//     numerics) — cheap and covers the common case;
+		//   - then the interpreter's OpEqual (CompareValues) for numeric widening across
+		//     types (e.g. int captured, long observed) so promotable-equal values unify.
+		// A value that is neither equal nor promotable-equal fails the match — which is
+		// exactly "the position is not of $x's type nor promotable, or not the same value".
+		private bool ValuesUnifyForConstraint(object captured, object observed)
+		{
+			if (captured == null && observed == null) return true;
+			if (captured == null || observed == null) return false;
+
+			// Same type / same value.
+			if (captured.Equals(observed) || observed.Equals(captured)) return true;
+
+			Type tc = captured.GetType();
+			Type to = observed.GetType();
+
+			// Numeric widening among {byte..long, float, double, decimal}: 10 == 10.0 == 10m.
+			// The ONLY numeric equivalence; string<->number is NOT a DSL conversion.
+			if (IsNumericType(tc) && IsNumericType(to))
+			{
+				try { return Convert.ToDecimal(captured) == Convert.ToDecimal(observed); }
+				catch { return false; }
+			}
+
+			// string <-> enum BY NAME — the single cross-kind implicit conversion the DSL
+			// has here ('Lunes' -> EnumDias.Lunes). Directional in the type system
+			// (string->enum only), but for unification we always coerce the STRING side to
+			// the enum (the permitted direction), so either seek order unifies. Mirrors the
+			// DSL boundary coercion (Enum.Parse ignoreCase). enum<->int (underlying) is NOT
+			// admitted: 'Lunes' never denotes 0/1, so a numeric never correlates with an enum.
+			if (tc.IsEnum && to == typeof(string)) return EnumMatchesName(tc, (string)observed, captured);
+			if (to.IsEnum && tc == typeof(string)) return EnumMatchesName(to, (string)captured, observed);
+
+			return false;
+		}
+
+		private static bool EnumMatchesName(Type enumType, string name, object enumValue)
+		{
+			try { return Enum.Parse(enumType, name, ignoreCase: true).Equals(enumValue); }
+			catch { return false; }
+		}
+
 		// A receiver-type pattern ([_:T] or [name:T]) matches a script call/access when T
 		// names a type the receiver "is-a": any type on the chain from the receiver's static
 		// type up through its base types. When the receiver's static type was not resolved
@@ -634,17 +685,29 @@ namespace Puppeteer.EventSourcing.Follower
 					continue;
 
 				// Check the number of parameters.
-				if (constructor.Parameters.Count != scriptCall.Arguments.Count)
+				if (constructor.Parameters.Count != scriptCall.ArgumentValues.Count)
 					continue;
 
-				// Check each parameter.
+				// Match each argument by VALUE through the same path as method calls
+				// (MatchParameterValue), so a constructor position captures/constrains/compares
+				// $x, honors literals, and selects ':T' by the RESOLVED overload's declared
+				// parameter type (from scriptCall.Constructor). Previously this used a type-only
+				// helper that never captured, so foo(new C($x)) / C($x) could not correlate.
+				System.Reflection.ParameterInfo[] ctorParams = scriptCall.Constructor?.GetParameters();
+
 				bool allParametersMatch = true;
 				for (int i = 0; i < constructor.Parameters.Count; i++)
 				{
 					var patternParam = constructor.Parameters[i];
-					var scriptParamType = scriptCall.Arguments[i];
+					object scriptArgValue = scriptCall.ArgumentValues[i];
+					// Declared parameter type of the resolved overload at this position. Null for the
+					// params tail (i beyond the fixed parameters) — MatchParameterValue then falls back
+					// to the observed value's type, which is the sound behavior for a params element.
+					Type targetParameterType = (ctorParams != null && i < ctorParams.Length)
+						? ctorParams[i].ParameterType
+						: null;
 
-					if (!MatchParameter(patternParam, scriptParamType, capturedVariables))
+					if (!MatchParameterValue(patternParam, scriptArgValue, capturedVariables, targetParameterType))
 					{
 						allParametersMatch = false;
 						break;
@@ -687,19 +750,13 @@ namespace Puppeteer.EventSourcing.Follower
 
 				if (assignment.Value is ConstructorCallNode constructorPattern)
 				{
-					// The right-hand side of the pattern is a constructor.
-					// Verify the script value has the expected type.
-					if (scriptAssignment.Value is TypedValuePlaceholder placeholder)
+					// RHS is a constructor: match type + arity + ARGUMENTS (capturing/constraining
+					// $x, honoring literals, selecting ':T' by the resolved overload) via the shared
+					// constructor path — not merely the type name. This is what lets
+					// `o = ClaseObjeto($x)` correlate $x. The LHS type constraint (requiredType) was
+					// already applied above.
+					if (!MatchConstructorCall(constructorPattern, patternAst, capturedVariables, usedMemberAccessIndices, usedMethodCallIndices, ref lastMatchedPosition))
 					{
-						// Check that the type matches the pattern's constructor.
-						if (!placeholder.ValueType.Name.Equals(constructorPattern.TypeName, StringComparison.OrdinalIgnoreCase))
-						{
-							continue;
-						}
-					}
-					else
-					{
-						// The script value is not a placeholder (it's a literal), so it does not match a constructor.
 						continue;
 					}
 				}
@@ -726,6 +783,30 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						// The variable has not been captured yet; capture it now.
 						capturedVariables[actualVarName, typeof(string)] = scriptAssignment.TargetName;
+					}
+				}
+				else if (actualVarName.StartsWith("$"))
+				{
+					// LHS $y: capture/constrain the ASSIGNED VALUE, not the variable name. Only a
+					// literal or @parameter RHS records a real value; a constructor/method/variable
+					// RHS records a TypedValuePlaceholder (the assigned object has no journaled
+					// identity), so $y does NOT bind there — consistent with the $-capture contract
+					// (no value to bind). When bindable it correlates like any other $x.
+					object assignedValue = scriptAssignment.Value;
+					if (assignedValue != null && !(assignedValue is TypedValuePlaceholder))
+					{
+						string lhsCapture = actualVarName.Substring(1);
+						if (capturedVariables.ContainsParameter(lhsCapture))
+						{
+							if (!ValuesUnifyForConstraint(capturedVariables[lhsCapture]?.GetValue(), assignedValue))
+							{
+								continue;
+							}
+						}
+						else
+						{
+							capturedVariables[lhsCapture, assignedValue.GetType()] = assignedValue;
+						}
 					}
 				}
 
@@ -1071,6 +1152,22 @@ namespace Puppeteer.EventSourcing.Follower
 						// — the two paths diverge, and the downstream tell journals the wrong
 						// signature / a different content hash.
 						object captureValue = CoerceCapturedValueToParameterType(scriptValue, targetParameterType);
+
+						// CROSS-SEEK CORRELATION: a $x already bound at a PRIOR Seek is a
+						// CONSTRAINT, not a re-capture. The reused pattern variable is a single
+						// unified logical variable (a value-equality JOIN across seeks): the value
+						// observed here must unify with the one captured earlier, or this candidate
+						// is discarded. This is the same rule the Tell paths already apply via
+						// MatchOrConstraintParameter — consolidated here (ValuesUnifyForConstraint)
+						// so domain method-call arguments correlate too. Without it the variable was
+						// silently re-bound and every close matched every open regardless of key
+						// (foo($x) … endFoo($x) failed to correlate).
+						if (capturedVariables.ContainsParameter(paramName))
+						{
+							object priorValue = capturedVariables[paramName]?.GetValue();
+							return ValuesUnifyForConstraint(priorValue, captureValue);
+						}
+
 						capturedVariables[paramName, captureValue.GetType()] = captureValue;
 						return true;
 					}
@@ -1193,9 +1290,40 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					if (scriptValue == null)
 						return typed.ParameterType.IsClass;
-					Type scriptValueType = scriptValue.GetType();
-					return AreTypesCompatible(typed.ParameterType, scriptValueType) ||
-						   AstExpression.AreCompatible(typed.ParameterType, scriptValueType);
+
+					// ':T' is an OVERLOAD/SIGNATURE selector, not a value-type test: it must
+					// match the RESOLVED action's declared parameter type at this position
+					// (targetParameterType, sourced exactly from ActionId -> cached program ->
+					// MethodInfo.GetParameters()), NOT the observed value's runtime type. So
+					// foo($x:int, _:decimal) selects the foo(int, decimal) overload — 'decimal'
+					// means the declared param is decimal, not "a value that widens to decimal".
+					// Fallback: when the signature is unknown (targetParameterType == null, e.g.
+					// a ScriptEvent that carries no resolved method) use the observed value type.
+					bool typeOk = targetParameterType != null
+						? AreTypesCompatible(typed.ParameterType, targetParameterType)
+						: (AreTypesCompatible(typed.ParameterType, scriptValue.GetType()) ||
+						   AstExpression.AreCompatible(typed.ParameterType, scriptValue.GetType()));
+					if (!typeOk) return false;
+
+					// A TYPED capture ($x:T) is still a capture/constraint on $x — the :T
+					// only adds a type filter (checked just above). Correlate the value
+					// exactly like the untyped $x path (VariableParameterNode): capture on
+					// first sight, constrain (promotion-aware, ValuesUnifyForConstraint) on
+					// reuse from a prior seek. Without this a type hint silently disabled
+					// correlation (the close matched every open). Names that are not
+					// $-captures ('_', a bare instance name) bind no value.
+					if (!string.IsNullOrEmpty(typed.ParameterName) && typed.ParameterName.StartsWith("$"))
+					{
+						string typedParamName = typed.ParameterName.Substring(1);
+						object typedCaptureValue = CoerceCapturedValueToParameterType(scriptValue, targetParameterType);
+						if (capturedVariables.ContainsParameter(typedParamName))
+						{
+							object priorTyped = capturedVariables[typedParamName]?.GetValue();
+							return ValuesUnifyForConstraint(priorTyped, typedCaptureValue);
+						}
+						capturedVariables[typedParamName, typedCaptureValue.GetType()] = typedCaptureValue;
+					}
+					return true;
 
 				default:
 					return false;

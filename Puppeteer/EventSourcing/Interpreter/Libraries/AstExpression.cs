@@ -2,6 +2,7 @@ using Puppeteer.EventSourcing.Follower;
 using Puppeteer.EventSourcing.Interpreter.Utils;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
@@ -126,6 +127,67 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				default:
 					return false;
 			}
+		}
+
+		// Extracts the observed argument VALUES of a call for pattern matching, shared by the
+		// method-call path (DotAccess) and the constructor path (NewInstance) so both record the
+		// same thing. For each argument: a LITERAL yields its value; an @PARAMETER yields the value
+		// from the invocation channel (the journaled Arguments the Reaction hangs on the symbol
+		// table) or, failing that, its interpreted Execute(); an OUT parameter yields an
+		// OutParameterMarker; any non-bindable (a bare global/local variable, a declared parameter
+		// whose value failed to resolve, or a derived expression) yields a TypedValuePlaceholder so
+		// the argument COUNT is preserved and the capture contract can classify it. Value-free
+		// (types only) is NOT enough — a $-capture needs the value.
+		internal static List<object> ExtractArgumentValues(AstExpression[] arguments)
+		{
+			List<object> values = new List<object>();
+			if (arguments == null) return values;
+
+			foreach (var arg in arguments)
+			{
+				if (arg is LiteralBoolean || arg is LiteralDecimal || arg is LiteralDouble || arg is LiteralDateTime || arg is LiteralString || arg is LiteralList || arg is LiteralNull || arg is LiteralNumber)
+				{
+					values.Add(arg.Execute());
+				}
+				else if (arg is Id id)
+				{
+					if (id.IsParameter)
+					{
+						if (id.Parameter != null && id.Parameter.ParameterModifier == Parameter.Out)
+						{
+							values.Add(new OutParameterMarker(arg.ComputeType(), id.Name));
+						}
+						else
+						{
+							// Prefer the value from the INVOCATION (journaled Arguments exposed on the
+							// symbol table by the Reaction) so it does not depend on the program's
+							// per-instance parameter binding; fall back to Execute() outside a reaction.
+							Parameters invocation = id.SymbolTable?.CurrentActionArguments;
+							if (invocation != null && invocation.ContainsParameter(id.Name))
+								values.Add(invocation[id.Name]?.GetValue());
+							else
+								values.Add(arg.Execute());
+						}
+					}
+					else
+					{
+						// Only the type is known — placeholder. Distinguish a declared parameter whose
+						// value failed to resolve (graceful no-match) from a genuine variable (hard
+						// authoring error), per the capture contract.
+						bool isDeclaredParameter = id.IsParameter
+							|| (id.SymbolTable?.CurrentActionParameterNames?.Contains(id.Name) ?? false);
+						values.Add(new TypedValuePlaceholder(arg.ComputeType(), id.Name, isDeclaredParameter));
+					}
+				}
+				else
+				{
+					// Any other expression (nested call, chained access): not statically evaluable.
+					// Preserve the count with a typed placeholder.
+					values.Add(new TypedValuePlaceholder(arg.ComputeType()));
+				}
+			}
+
+			return values;
 		}
 
 		// Enum value (boxed) for interpreted mode.

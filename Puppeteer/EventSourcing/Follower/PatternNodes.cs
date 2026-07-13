@@ -227,12 +227,12 @@ namespace Puppeteer.EventSourcing.Follower
 
 			scriptChainedAccesses.Add(new ScriptChainedAccess(chain, position));
 		}
-		internal void RegisterConstructorCall(Type type, List<Type> arguments, int position)
+		internal void RegisterConstructorCall(Type type, List<Type> arguments, ConstructorInfo constructor, List<object> argumentValues, int position)
 		{
 			ArgumentNullException.ThrowIfNull(type);
 			ArgumentNullException.ThrowIfNull(arguments);
 
-			scriptConstructorCalls.Add(new ScriptConstructorCall(type, arguments, position));
+			scriptConstructorCalls.Add(new ScriptConstructorCall(type, arguments, constructor, argumentValues ?? new List<object>(), position));
 		}
 		internal void RegisterMethodCall(MethodInfo method, object target, List<object> arguments, int position, string targetName = null, Type receiverType = null)
 		{
@@ -373,12 +373,20 @@ namespace Puppeteer.EventSourcing.Follower
 	{
 		internal Type Type { get; }
 		internal List<Type> Arguments { get; }
+		// Resolved constructor overload (its GetParameters gives the declared signature — the
+		// source of truth for ':T' overload selection, same role as ScriptMethodCall.Method).
+		internal ConstructorInfo Constructor { get; }
+		// Observed invocation argument VALUES (parallel to ScriptMethodCall.Arguments), so a
+		// constructor position can capture/constrain/compare $x like a method argument.
+		internal List<object> ArgumentValues { get; }
 		internal int Position { get; }
 
-		internal ScriptConstructorCall(Type type, List<Type> arguments, int position)
+		internal ScriptConstructorCall(Type type, List<Type> arguments, ConstructorInfo constructor, List<object> argumentValues, int position)
 		{
 			Type = type;
 			Arguments = arguments;
+			Constructor = constructor;
+			ArgumentValues = argumentValues;
 			Position = position;
 		}
 	}

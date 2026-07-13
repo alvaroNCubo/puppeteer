@@ -308,21 +308,44 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		private Func<Parameters, Output, string> _executable;
+		// Guards the one-time build of _executable. A compiled Program is published to the
+		// shared cachedQueries BEFORE its lambda is built, and queries/emits/checks run under
+		// a READ lock (concurrent). Without this guard two concurrent first-executions of the
+		// same freshly-cached Program would both enter ProgramExpression() and the second
+		// AllocateStorageExpression would throw ("Storage ... already been generated"), because
+		// building mutates shared Id state. The lock is contended ONLY during that one-time
+		// build; once _executable is set every execution takes the lock-free fast path.
+		private readonly object compileLock = new object();
+		private volatile Func<Parameters, Output, string> _executable;
 		internal string ExecuteExpression(Parameters parameters)
 		{
+			bool builtByThisCall = false;
 			if (_executable == null)
 			{
-				this.SolveReferences(parameters, withStaticValidation: true);
+				lock (compileLock)
+				{
+					// Double-checked: a concurrent caller may have built it while we waited.
+					if (_executable == null)
+					{
+						this.SolveReferences(parameters, withStaticValidation: true);
 
-				var programExpression = this.ProgramExpression();
-				var sw = LabInstrumentation.OnCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
-				_executable = programExpression.Compile();
-				if (sw != null) { sw.Stop(); LabInstrumentation.OnCompileElapsedTicks(sw.ElapsedTicks); }
+						var programExpression = this.ProgramExpression();
+						var sw = LabInstrumentation.OnCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
+						_executable = programExpression.Compile();
+						if (sw != null) { sw.Stop(); LabInstrumentation.OnCompileElapsedTicks(sw.ElapsedTicks); }
 
-				this.idParameters = null;
+						this.idParameters = null;
+						// The builder resolved (and bound this call's parameters) via
+						// SolveReferences above, so it skips the SolveParameters below.
+						builtByThisCall = true;
+					}
+				}
 			}
-			else
+
+			// Every caller that did NOT build (lock-free fast path, or one that waited and
+			// found the lambda already built) rebinds ITS parameters for this invocation.
+			// Safe to run outside the lock: no build is in flight once _executable is set.
+			if (!builtByThisCall)
 			{
 				this.SolveParameters(parameters);
 			}
@@ -331,7 +354,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var result = _executable(parameters, output);
 
 			Output.Return(output);
-			parameters.Clear();	
+			parameters.Clear();
 
 			return result;
 		}
@@ -516,16 +539,27 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
         private string ExecuteCheckCompiled(Parameters parameters)
         {
+            // Same compile-once guard as ExecuteExpression: checks run under a READ lock, so
+            // the one-time build of the shared cached Program's lambda must be serialized.
+            bool builtByThisCall = false;
             if (_executable == null)
             {
-                this.SolveReferences(parameters, withStaticValidation: true);
-                var programExpression = this.ProgramExpression();
-                var sw = LabInstrumentation.OnCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
-                _executable = programExpression.Compile();
-                if (sw != null) { sw.Stop(); LabInstrumentation.OnCompileElapsedTicks(sw.ElapsedTicks); }
-                this.idParameters = null;
+                lock (compileLock)
+                {
+                    if (_executable == null)
+                    {
+                        this.SolveReferences(parameters, withStaticValidation: true);
+                        var programExpression = this.ProgramExpression();
+                        var sw = LabInstrumentation.OnCompileElapsedTicks != null ? System.Diagnostics.Stopwatch.StartNew() : null;
+                        _executable = programExpression.Compile();
+                        if (sw != null) { sw.Stop(); LabInstrumentation.OnCompileElapsedTicks(sw.ElapsedTicks); }
+                        this.idParameters = null;
+                        builtByThisCall = true;
+                    }
+                }
             }
-            else
+
+            if (!builtByThisCall)
             {
                 this.SolveParameters(parameters);
             }

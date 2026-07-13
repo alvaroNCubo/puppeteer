@@ -2084,84 +2084,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		}
 
 
+		// Delegates to the shared AstExpression.ExtractArgumentValues so the method-call and
+		// constructor (NewInstance) paths record argument values identically.
 		protected List<object> GetArgumentValues()
 		{
-			List<object> values = new List<object>();
-			if (arguments != null)
-			{
-				foreach (var arg in arguments)
-				{
-					if (arg is LiteralBoolean || arg is LiteralDecimal || arg is LiteralDouble || arg is LiteralDateTime || arg is LiteralString || arg is LiteralList || arg is LiteralNull || arg is LiteralNumber)
-					{
-						object value = arg.Execute();
-						values.Add(value);
-					}
-					else if (arg is Id id)
-					{
-						// If it is a parameter, execute it to obtain the value.
-						if (id.IsParameter)
-						{
-							// If it is an OUT parameter, use a special marker instead of the value.
-							// Wildcards still match, but literal matches are blocked.
-							if (id.Parameter != null && id.Parameter.ParameterModifier == Parameter.Out)
-							{
-								Type argType = arg.ComputeType();
-								values.Add(new Follower.OutParameterMarker(argType, id.Name));
-							}
-							else
-							{
-								// Prefer the value from the INVOCATION (the journaled Arguments,
-								// exposed on the symbol table by the Reaction) over executing the
-								// bound Id. Reading from the invocation does not depend on the
-								// program's per-instance parameter binding, which is what lets the
-								// resolved Action program be shared read-only. Falls back to the
-								// interpreted execute when no invocation channel is present (e.g.
-								// non-reaction matching contexts).
-								Parameters invocation = id.SymbolTable?.CurrentActionArguments;
-								if (invocation != null && invocation.ContainsParameter(id.Name))
-								{
-									values.Add(invocation[id.Name]?.GetValue());
-								}
-								else
-								{
-									values.Add(arg.Execute());
-								}
-							}
-						}
-						else
-						{
-							// Not a resolved parameter value — only the type is known, so use a
-							// placeholder. Distinguish a DECLARED PARAMETER whose value merely failed
-							// to resolve (its name is in the program's parameter signature) from a
-							// genuine global/local VARIABLE: the capture contract treats the former as
-							// a graceful no-match and the latter as a hard authoring error. The name
-							// lookup is authoritative regardless of whether value-resolution succeeded.
-							Type argType = arg.ComputeType();
-							// Authoritative source: the cached Action's declared parameter names,
-							// hung transiently on the SymbolTable by the Reaction before matching.
-							// The re-parsed matching program's own Parameters is NOT authoritative
-							// in the resolution-failure path (it re-parses signature-less), so relying
-							// on it would mis-classify an unresolved @parameter as a variable.
-							bool isDeclaredParameter = id.IsParameter
-								|| (id.SymbolTable?.CurrentActionParameterNames?.Contains(id.Name) ?? false);
-							values.Add(new Follower.TypedValuePlaceholder(argType, id.Name, isDeclaredParameter));
-						}
-					}
-					else
-					{
-						// Any other expression (e.g. a nested call as an argument, foo(goo(...)),
-						// or a chained access): the value is not statically evaluable. We preserve
-						// the argument COUNT with a typed placeholder — previously it was discarded
-						// and broke the count-based match. The matcher matches the placeholder by
-						// type (wildcard/typed) or, if the pattern uses a NestedCallParameterNode,
-						// ignores it and matches the inner call against the registered
-						// ScriptMethodCalls.
-						Type argType = arg.ComputeType();
-						values.Add(new Follower.TypedValuePlaceholder(argType));
-					}
-				}
-			}
-			return values;
+			return ExtractArgumentValues(arguments);
 		}
 
 	}

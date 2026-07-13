@@ -897,10 +897,13 @@ namespace Puppeteer.EventSourcing.Follower
 			return parent.OccurredAt;
 		}
 
-		// K.2: exact-family quantifier. Accumulates against the parent's eager-created
-		// Exact-child. Eager-fail if AccumulatedCount exceeds expected (Exactly/One with
-		// an additional match, None with any match). The satisfaction fire happens
-		// in TickPendingExactNodes when the window closes with count == expected.
+		// K.2: exact-family quantifier. Accumulates against the parent's eager-created Exact-child.
+		// Two modes by whether a window is present:
+		//   * WITH .Within (strict "exactly n, no more"): eager-fail on overflow; the satisfaction
+		//     fire happens in TickPendingExactNodes when the window closes with count == expected.
+		//   * WITHOUT .Within (n>=1 only; None/Exactly(0) is rejected at definition): the n-th match
+		//     closes the count on arrival — satisfy/advance immediately, and for a final seek fire
+		//     the elide and prune the closed cycle here (no window/tick involved).
 		private void TryMatchOrAccumulateExact(MatchNode parent, int level, ReactionEngine engine, EventData eventData, List<ReactionEngine> engines, string script, SymbolTable symbolTable, Program cachedProgram, bool cachedProgramIsCanonical)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -941,6 +944,17 @@ namespace Puppeteer.EventSourcing.Follower
 
 				engine.IncrementSeekMatched();
 
+				bool exactHasWindow = engine.HasWithinWindow;
+
+				// No-window n>=1: once the count reached n (node satisfied/advanceable) the cycle is
+				// closed — ignore any further match into it. We are NOT verifying "no (n+1)-th"; that
+				// strict variant is exactly what .Within adds. (The final-seek case prunes the cycle
+				// below, so this guard is reached only by an intermediate exact seek.)
+				if (!exactHasWindow && exactNode.IsAdvanceable)
+				{
+					return;
+				}
+
 				exactNode.AccumulateEventId(eventData.EntryId, eventData.OccurredAt);
 				exactNode.LastExpansionAttemptEntryId = eventData.EntryId;
 				if (exactNode.EntryId == 0)
@@ -952,10 +966,39 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 
 				int expected = engine.ExactCount.Value;
-				if (exactNode.AccumulatedCount > expected)
+
+				if (exactHasWindow)
 				{
-					// Eager-fail. The trajectory through this Exact-child is dead.
-					PruneNode(exactNode);
+					// Strict windowed mode: eager-fail on overflow; the satisfaction fire happens in
+					// TickPendingExactNodes when the window closes with count == expected.
+					if (exactNode.AccumulatedCount > expected)
+					{
+						// Eager-fail. The trajectory through this Exact-child is dead.
+						PruneNode(exactNode);
+					}
+				}
+				else if (exactNode.AccumulatedCount == expected)
+				{
+					// No-window n>=1: the n-th occurrence is a positive event that closes the count
+					// NOW — no boundary needed (None/Exactly(0) is the only case that needs one, and
+					// it is rejected at definition without .Within).
+					exactNode.IsAdvanceable = true;
+					if (engine.IsFinalSeek)
+					{
+						// Fire the elide, then prune the now-closed cycle so its anchor leaves the open
+						// set — this keeps the pass O(N) instead of re-visiting a settled anchor on
+						// every later event. ExecuteCompleteMatch prunes the exact leaf and removes it
+						// from its parent's Children; walking up, prune ancestors that are now childless
+						// (a shared ancestor with other live trajectories is left intact).
+						MatchNode ancestor = exactNode.Parent;
+						ExecuteCompleteMatch(exactNode);
+						while (ancestor != null && ancestor.Children.Count == 0)
+						{
+							MatchNode up = ancestor.Parent;
+							PruneNode(ancestor);
+							ancestor = up;
+						}
+					}
 				}
 			}
 			finally
@@ -1398,7 +1441,36 @@ namespace Puppeteer.EventSourcing.Follower
 				}
 				else
 				{
-					shouldExecuteAction = VerifyAndSaveTransactional(leafNode, reactionAction.EventIdsToSkip, _checkpointBuffer);
+					// Ordering is by the CLOSING (triggering) entryId, NOT the open anchor.
+						// A MULTI-seek elide (Seek -> ThenSeek, e.g. the correlated cycle
+						// foo($x) ... endFoo($x)) closes OUT of anchor order: several trajectories
+						// can close at the SAME closing event (foo(A)#1 and foo(A)#3 both close at
+						// endFoo(A)#5), and an older anchor can close AFTER a newer one already did
+						// (anchor #1 closes at #5, after anchor #2 closed at #4). The lexicographic
+						// anchor-first guard wrongly drops those (#1's close rejected because anchor
+						// 1 < committed anchor 2). Elide IDEMPOTENTLY by membership, exactly as the
+						// coverage (ForEach) path: re-eliding is a Skip-flag no-op and
+						// MarkEventsAsElided is transactional per row -> cross-pod safety by
+						// membership, not by order. A single-seek elide (anchor == close, one
+						// monotonic value) keeps the sound scalar checkpoint for resume.
+						if (leafNode.Parent != null)
+						{
+							// (1) MEMBERSHIP = the elision effect. Idempotent, order-independent —
+							// this is what lets out-of-order/concurrent closes (#1+#5 after #2+#4)
+							// all elide. NOT gated by any checkpoint.
+							diaryStorage.EventElisionStorage.MarkEventsAsElided(reactionAction.EventIdsToSkip.ToArray(), (int)reactionId, leafNode.OccurredAt);
+							// (2) SCALAR per-seek checkpoint = a RESUME cursor only, decoupled from
+							// (1): it must NEVER gate the elision (coupling them was the bug that
+							// dropped #1+#5). Saved best-effort so a later Execute has a restart
+							// hint and the two-phase checkpoint stays populated. Progressive/
+							// monotonic resume semantics over this cursor are still pending.
+							SaveCheckpointNonTransactional(_checkpointBuffer);
+							shouldExecuteAction = true;
+						}
+						else
+						{
+							shouldExecuteAction = VerifyAndSaveTransactional(leafNode, reactionAction.EventIdsToSkip, _checkpointBuffer);
+						}
 				}
 			}
 			else

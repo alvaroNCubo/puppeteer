@@ -644,20 +644,27 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"[Reaction.ValidateFinalSeek] Validation passed: FinalSeekCount={finalSeekCount}, LastSeekIndex={reactionEngines.Count - 1}, IsSingleSeek={reactionEngines.Count == 1}");
 		}
 
-		// K.2: exact-family quantifiers (None/One/Exactly) are undecidable without
-		// a closing point in an open journal. They require .Within(...) which defines the
-		// range (EntryIds or TimeSpan) where the quantifier is evaluated. Without Within,
-		// the count never finalizes and the fire stays pending forever.
+		// Exact-family window rule, split by whether the quantifier asserts an ABSENCE:
+		//   * None() / Exactly(0)  -> "zero occurrences". Absence is only decidable at a closing
+		//     boundary: in an append-only journal a matching event could always arrive later, so
+		//     "none happened" can never be affirmed on arrival. These REQUIRE .Within(...).
+		//   * One() / Exactly(n>=1) -> the n-th occurrence is a POSITIVE event that closes the
+		//     count on arrival (fire/advance + prune the cycle). No boundary is needed; .Within(...)
+		//     is OPTIONAL and only turns them into the strict "exactly n, and not an (n+1)-th"
+		//     variant (which does need a boundary to rule out the extra one).
 		private void ValidateExactRequiresWithin()
 		{
 			for (int i = 0; i < reactionEngines.Count; i++)
 			{
 				var engine = reactionEngines[i];
-				if (engine.IsExact && !engine.HasWithinWindow)
+				if (engine.IsExact && engine.ExactCount.Value == 0 && !engine.HasWithinWindow)
 				{
 					throw new LanguageException(
-						$"Seek '{engine.PatternDescription}' uses an exact-family quantifier (None/One/Exactly) without .Within(...). " +
-						"Exact counts are indecidible in an open journal without a closing window — chain .Within(entries) or .Within(span) after the quantifier.");
+						$"Seek '{engine.PatternDescription}' uses None()/Exactly(0) without .Within(...). " +
+						"Zero occurrences is an ABSENCE assertion: in an append-only journal a matching event " +
+						"could still arrive later, so 'none happened' is only decidable at a closing boundary. " +
+						"Chain .Within(entries) or .Within(span) to say WHERE the absence is judged. " +
+						"(One()/Exactly(n>=1) do not need it — the n-th occurrence is a positive event that closes the count.)");
 				}
 			}
 		}
