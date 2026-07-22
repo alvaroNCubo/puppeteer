@@ -20,20 +20,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return typeof(string);
 			}
 
-			if ((typeE1 == typeof(int) || typeE1 == typeof(double) || typeE1 == typeof(decimal)) && (typeE2 == typeof(int) || typeE2 == typeof(double) || typeE2 == typeof(decimal)))
+			if (IsPromotableNumeric(typeE1) && IsPromotableNumeric(typeE2))
 			{
-				if (typeE1 == typeof(decimal) || typeE2 == typeof(decimal))
-				{
-					return typeof(decimal);
-				}
-				else if (typeE1 == typeof(double) || typeE2 == typeof(double))
-				{
-					return typeof(double);
-				}
-				else if (typeE1 == typeof(int) && typeE2 == typeof(int))
-				{
-					return typeof(int);
-				}
+				return PromotesTo(typeE1, typeE2);
 			}
 			else if (typeE1 == typeof(string) || typeE2 == typeof(string))
 			{
@@ -65,7 +54,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (this.CoercesToString)
 			{
-				if (type1 == typeof(int) || type1 == typeof(double) || type1 == typeof(decimal))
+				if (IsPromotableNumeric(type1))
 				{
 					object1 = object1?.ToString();
 					type1 = typeof(string);
@@ -75,41 +64,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			object object2 = e2.Execute();
 			Type type2 = object2?.GetType();
 
-			if (type1 == typeof(int) && type2 == typeof(int))
+			if (type1 != null && type2 != null && IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
 			{
-				return (int)object1 + (int)object2;
-			}
-			else if (type1 == typeof(int) && type2 == typeof(double))
-			{
-				return Convert.ToDouble(object1) + (double)object2;
-			}
-			else if (type1 == typeof(int) && type2 == typeof(decimal))
-			{
-				return Convert.ToDecimal(object1) + (decimal)object2;
-			}
-			else if (type1 == typeof(double) && type2 == typeof(int))
-			{
-				return (double)object1 + Convert.ToDouble(object2);
-			}
-			else if (type1 == typeof(double) && type2 == typeof(double))
-			{
-				return (double)object1 + (double)object2;
-			}
-			else if (type1 == typeof(double) && type2 == typeof(decimal))
-			{
-				return Convert.ToDecimal(object1) + (decimal)object2;
-			}
-			else if (type1 == typeof(decimal) && type2 == typeof(int))
-			{
-				return (decimal)object1 + Convert.ToDecimal(object2);
-			}
-			else if (type1 == typeof(decimal) && type2 == typeof(double))
-			{
-				return (decimal)object1 + Convert.ToDecimal(object2);
-			}
-			else if (type1 == typeof(decimal) && type2 == typeof(decimal))
-			{
-				return (decimal)object1 + (decimal)object2;
+				Type promoted = PromotesTo(type1, type2);
+				object a = CoerceNumericValue(object1, promoted);
+				object b = CoerceNumericValue(object2, promoted);
+				if (promoted == typeof(int)) return (int)a + (int)b;
+				if (promoted == typeof(long)) return (long)a + (long)b;
+				if (promoted == typeof(double)) return (double)a + (double)b;
+				return (decimal)a + (decimal)b;
 			}
 			else if (type1 == typeof(string) && type2 == typeof(string))
 			{
@@ -118,6 +81,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (type1 == typeof(string) && type2 == typeof(int))
 			{
 				return (string)object1 + (int)object2;
+			}
+			else if (type1 == typeof(string) && type2 == typeof(long))
+			{
+				return (string)object1 + ((long)object2).ToString(CultureInfo.InvariantCulture);
 			}
 			else if (type1 == typeof(string) && type2 == typeof(double))
 			{
@@ -217,27 +184,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Call(operand, typeof(object).GetMethod(nameof(object.ToString)));
 			}
 
-			if (type1 == typeof(int) && type2 == typeof(int))
+			if (IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
 			{
-				return Expression.Add(expr1, expr2);
-			}
-			else if ((type1 == typeof(int) && type2 == typeof(double)) ||
-						(type1 == typeof(double) && type2 == typeof(int)) ||
-						(type1 == typeof(double) && type2 == typeof(double)))
-			{
-				var left = type1 == typeof(double) ? expr1 : Expression.Convert(expr1, typeof(double));
-				var right = type2 == typeof(double) ? expr2 : Expression.Convert(expr2, typeof(double));
-				return Expression.Add(left, right);
-			}
-			else if ((type1 == typeof(int) && type2 == typeof(decimal)) ||
-						(type1 == typeof(decimal) && type2 == typeof(int)) ||
-						(type1 == typeof(decimal) && type2 == typeof(double)) ||
-						(type1 == typeof(double) && type2 == typeof(decimal)) ||
-						(type1 == typeof(decimal) && type2 == typeof(decimal)))
-			{
-				var left = type1 == typeof(decimal) ? expr1 : Expression.Convert(expr1, typeof(decimal));
-				var right = type2 == typeof(decimal) ? expr2 : Expression.Convert(expr2, typeof(decimal));
-				return Expression.Add(left, right);
+				Type promoted = PromotesTo(type1, type2);
+				return Expression.Add(CoerceNumericExpression(expr1, promoted), CoerceNumericExpression(expr2, promoted));
 			}
 			else if (type1 == typeof(string) || type2 == typeof(string))
 			{

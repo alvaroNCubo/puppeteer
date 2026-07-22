@@ -821,6 +821,8 @@ namespace Puppeteer.EventSourcing.Follower
 			// Common primitive types.
 			if (typeName.Equals("int", StringComparison.OrdinalIgnoreCase))
 				return typeof(int);
+			else if (typeName.Equals("long", StringComparison.OrdinalIgnoreCase))
+				return typeof(long);
 			else if (typeName.Equals("string", StringComparison.OrdinalIgnoreCase))
 				return typeof(string);
 			else if (typeName.Equals("bool", StringComparison.OrdinalIgnoreCase))

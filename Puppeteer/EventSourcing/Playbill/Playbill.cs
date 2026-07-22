@@ -110,11 +110,16 @@ namespace Puppeteer.EventSourcing.Playbill
 			// as "not provided" by convention.
 			CoerceNullValuesToDefaults(values);
 
+			// Dense representation: persist ONLY the argument values. The column
+			// names+types (declarations) are held once by the schema registry, keyed
+			// by schemaName — the schema is the record's "action identity". They are
+			// resolved on the read/forensic path, not repeated per record.
+			//
 			// IN_MEMORY chosen as the wire-neutral serialization (Playbill does
 			// not do SQL-quote escapes — the blob persists via parametrized binding
 			// or via UTF-8 in a file, not via direct string concat).
-			string serialized = values.SerializeForTransport(DatabaseType.IN_MEMORY);
-			store.WriteRecord(entryId, schemaName, serialized);
+			string arguments = values.SerializeArgumentsForTransport(DatabaseType.IN_MEMORY);
+			store.WriteRecord(entryId, schemaName, arguments);
 		}
 
 		private static void CoerceNullValuesToDefaults(Parameters values)
@@ -138,6 +143,26 @@ namespace Puppeteer.EventSourcing.Playbill
 		public (string SchemaName, string SerializedParameters)? ReadRecord(long entryId)
 		{
 			return store.ReadRecord(entryId);
+		}
+
+		// Forensic reconstruction: rebuilds the typed Parameters of a record by
+		// pairing its stored argument values with the declarations resolved from
+		// the schema registry (the record itself no longer carries them). Null if
+		// the record does not exist. The '?' optionality marker on schema field
+		// names is stripped before parsing, mirroring the write path.
+		public Parameters ReadRecordAsParameters(long entryId)
+		{
+			var record = store.ReadRecord(entryId);
+			if (record == null) return null;
+
+			string declarations = store.GetSchemaDeclarations(record.Value.SchemaName);
+			if (declarations == null)
+			{
+				throw new LanguageException($"Playbill schema '{record.Value.SchemaName}' is not registered; cannot reconstruct record {entryId}.");
+			}
+
+			string parseableDeclarations = declarations.Replace("?:", ":");
+			return Parameters.DeserializeFromTransport(parseableDeclarations, record.Value.SerializedParameters);
 		}
 
 		public IEnumerable<(long EntryId, string SerializedParameters)> ReadRecordsForSchema(string schemaName)

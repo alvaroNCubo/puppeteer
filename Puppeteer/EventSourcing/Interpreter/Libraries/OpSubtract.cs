@@ -14,20 +14,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			Type typeE1 = e1.ComputeType();
 			Type typeE2 = e2.ComputeType();
-			if ((typeE1 == typeof(int) || typeE1 == typeof(double) || typeE1 == typeof(decimal)) && (typeE2 == typeof(int) || typeE2 == typeof(double) || typeE2 == typeof(decimal)))
+			if (IsPromotableNumeric(typeE1) && IsPromotableNumeric(typeE2))
 			{
-				if (typeE1 == typeof(decimal) || typeE2 == typeof(decimal))
-				{
-					return typeof(decimal);
-				}
-				else if (typeE1 == typeof(double) || typeE2 == typeof(double))
-				{
-					return typeof(double);
-				}
-				else if (typeE1 == typeof(int) && typeE2 == typeof(int))
-				{
-					return typeof(int);
-				}
+				return PromotesTo(typeE1, typeE2);
 			}
 			// Time arithmetic
 			if (typeE1 == typeof(DateTime) && typeE2 == typeof(DateTime)) return typeof(TimeSpan);
@@ -56,24 +45,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type type1 = object1.GetType();
 			Type type2 = object2.GetType();
 
-			if (type1 == typeof(int) && type2 == typeof(int))
-				return (int)object1 - (int)object2;
-			else if (type1 == typeof(int) && type2 == typeof(double))
-				return Convert.ToDouble(object1) - (double)object2;
-			else if (type1 == typeof(double) && type2 == typeof(int))
-				return (double)object1 - Convert.ToDouble(object2);
-			else if (type1 == typeof(double) && type2 == typeof(double))
-				return (double)object1 - (double)object2;
-			else if (type1 == typeof(int) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) - (decimal)object2;
-			else if (type1 == typeof(decimal) && type2 == typeof(int))
-				return (decimal)object1 - Convert.ToDecimal(object2);
-			else if (type1 == typeof(double) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) - (decimal)object2;
-			else if (type1 == typeof(decimal) && type2 == typeof(double))
-				return (decimal)object1 - Convert.ToDecimal(object2);
-			else if (type1 == typeof(decimal) && type2 == typeof(decimal))
-				return (decimal)object1 - (decimal)object2;
+			if (IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
+			{
+				Type promoted = PromotesTo(type1, type2);
+				object a = CoerceNumericValue(object1, promoted);
+				object b = CoerceNumericValue(object2, promoted);
+				if (promoted == typeof(int)) return (int)a - (int)b;
+				if (promoted == typeof(long)) return (long)a - (long)b;
+				if (promoted == typeof(double)) return (double)a - (double)b;
+				return (decimal)a - (decimal)b;
+			}
 			else if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
 				return (DateTime)object1 - (DateTime)object2;
 			else if (type1 == typeof(DateTime) && type2 == typeof(TimeSpan))
@@ -97,41 +78,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			Expression result = null;
 
-			if (left.Type == typeof(int) && right.Type == typeof(int))
+			if (IsPromotableNumeric(left.Type) && IsPromotableNumeric(right.Type))
 			{
-				result = Expression.Subtract(left, right);
-			}
-			else if (left.Type == typeof(int) && right.Type == typeof(double))
-			{
-				result = Expression.Subtract(Expression.Convert(left, typeof(double)), right);
-			}
-			else if (left.Type == typeof(int) && right.Type == typeof(decimal))
-			{
-				result = Expression.Subtract(Expression.Convert(left, typeof(decimal)), right);
-			}
-			else if (left.Type == typeof(double) && right.Type == typeof(int))
-			{
-				result = Expression.Subtract(left, Expression.Convert(right, typeof(double)));
-			}
-			else if (left.Type == typeof(double) && right.Type == typeof(double))
-			{
-				result = Expression.Subtract(left, right);
-			}
-			else if (left.Type == typeof(double) && right.Type == typeof(decimal))
-			{
-				result = Expression.Subtract(Expression.Convert(left, typeof(decimal)), right);
-			}
-			else if (left.Type == typeof(decimal) && right.Type == typeof(int))
-			{
-				result = Expression.Subtract(left, Expression.Convert(right, typeof(decimal)));
-			}
-			else if (left.Type == typeof(decimal) && right.Type == typeof(double))
-			{
-				result = Expression.Subtract(left, Expression.Convert(right, typeof(decimal)));
-			}
-			else if (left.Type == typeof(decimal) && right.Type == typeof(decimal))
-			{
-				result = Expression.Subtract(left, right);
+				Type promoted = PromotesTo(left.Type, right.Type);
+				result = Expression.Subtract(CoerceNumericExpression(left, promoted), CoerceNumericExpression(right, promoted));
 			}
 			else if (left.Type == typeof(DateTime) && right.Type == typeof(DateTime))
 			{

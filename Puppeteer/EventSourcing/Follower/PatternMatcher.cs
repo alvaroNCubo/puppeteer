@@ -844,6 +844,8 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				case "int":
 					return typeof(int);
+				case "long":
+					return typeof(long);
 				case "string":
 					return typeof(string);
 				case "bool":
@@ -1086,7 +1088,20 @@ namespace Puppeteer.EventSourcing.Follower
 				{
 					throw new LanguageException($"Cannot match an OUT parameter '{outMarker.ParameterName}' by its literal value. OUT parameters can only be matched by their identifier (e.g. {outMarker.ParameterName}:{outMarker.ValueType.Name}) or by a wildcard (_).");
 				}
-				// Wildcards and TypedParameterNodes can match OUT parameters.
+				// Reject attempts to CAPTURE an OUT parameter's VALUE into a result variable
+				// ($name or [$name:Type]). An OUT value is ephemeral: it is not journaled with
+				// the invocation (it is persisted as the '?' placeholder and re-seeded to a
+				// default on replay), so a Reaction — which runs deferred, not at command time —
+				// can never observe the value that existed when the command executed. Such a
+				// capture could therefore only ever fail the match silently; surface it as an
+				// authoring error the moment the usage is detected, and steer the author toward
+				// Expose (which IS persisted per invocation and is thus readable at match time).
+				if (IsValueCaptureNode(parameterNode, out string captureName))
+				{
+					throw new LanguageException($"Cannot match an OUT parameter '{outMarker.ParameterName}' by capturing its value into '{captureName}'. OUT parameter values are ephemeral: they are not journaled with the invocation, so a Reaction that runs after the command cannot read them. To capture this value, Expose it in the command and match the exposed alias instead (e.g. expose ... as '{outMarker.ParameterName}';), or match the OUT position with a wildcard (_) or by its identifier ({outMarker.ParameterName}:{outMarker.ValueType.Name}).");
+				}
+				// Wildcards and non-capturing TypedParameterNodes (match by type or by
+				// identifier, no value bind) can match OUT parameters.
 				// Convert OutParameterMarker into a TypedValuePlaceholder for the normal flow.
 				scriptValue = new TypedValuePlaceholder(outMarker.ValueType, outMarker.ParameterName);
 			}
@@ -1326,6 +1341,28 @@ namespace Puppeteer.EventSourcing.Follower
 					return true;
 
 				default:
+					return false;
+			}
+		}
+
+		// A "value capture" node binds the observed argument's runtime VALUE into the
+		// results as a parameter: an untyped $name (VariableParameterNode) or a typed
+		// [$name:Type] (TypedParameterNode whose name starts with '$'). Distinguished
+		// from a free identifier (foo, which binds the identifier NAME), a typed/named
+		// match (foo:Type, @param:Type) and a wildcard (_, _:Type), none of which read
+		// the argument's value.
+		private static bool IsValueCaptureNode(ParameterNode node, out string captureName)
+		{
+			switch (node)
+			{
+				case VariableParameterNode variable:
+					captureName = variable.VariableName;
+					return true;
+				case TypedParameterNode typed when !string.IsNullOrEmpty(typed.ParameterName) && typed.ParameterName.StartsWith("$"):
+					captureName = typed.ParameterName;
+					return true;
+				default:
+					captureName = null;
 					return false;
 			}
 		}

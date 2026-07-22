@@ -50,6 +50,22 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal PatternListNode PatternAst => patternAst;
 
+		// Router support (Tier-1 structural admission). Runs this pattern's QuickTest — the
+		// SAME ordered-substring prefilter Match() uses as its first gate — against a FIXED
+		// Action body text (entry.Script, which carries @param NAMES, not per-invocation
+		// values). Since that text is invariant per ActionId, so is this verdict, which is
+		// what lets the router memoize it per ActionId. QuickTest never rejects a script the
+		// full matcher would accept (its no-false-negative contract), so a `false` here
+		// proves this pattern can NEVER match any invocation of that Action — the Seek level
+		// is safe to skip. A `true` is only "maybe": Match() still applies the literal /
+		// $-correlation / Where tests per event. (Alternatives contribute no substrings, so
+		// QuickTest passes and the level is routed — graceful, sound degradation.)
+		internal bool StructurallyAdmits(string actionBodyText)
+		{
+			ArgumentNullException.ThrowIfNull(actionBodyText);
+			return quickTest.Execute(actionBodyText);
+		}
+
 		internal bool Match(string script, DateTime eventTimestamp, Parameters parameters, SymbolTable symbolTable, Program cachedProgram = null, bool cachedProgramIsCanonical = false, string exposeDataJson = null)
 		{
 			ArgumentNullException.ThrowIfNull(script);
@@ -372,6 +388,128 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
+		// Collects the value-capture names this pattern binds — each '$name' stripped of
+		// its '$' — i.e. the parameters the matcher would place into a match's
+		// CapturedParams. Mirrors PatternMatcher.IsValueCaptureNode: only an untyped
+		// '$name' (VariableParameterNode) or a typed '[$name:Type]' (TypedParameterNode
+		// whose name starts with '$') binds a value into the results; a wildcard, a free
+		// identifier and a 'name:Type' match read no value and contribute nothing.
+		// Consumed at definition time so a ForEach can prove its source collection was
+		// captured by a prior Seek before the Reaction ever replays an event.
+		internal void CollectCaptureNames(ISet<string> names)
+		{
+			ArgumentNullException.ThrowIfNull(names);
+
+			foreach (var expression in patternAst.Expressions)
+			{
+				CollectCaptureNamesFromExpression(expression, names);
+			}
+		}
+
+		private static void CollectCaptureNamesFromExpression(ExpressionNode expression, ISet<string> names)
+		{
+			if (expression == null) return;
+
+			switch (expression)
+			{
+				case TypeAccessNode typeAccess:
+					CollectCaptureNamesFromMemberAccess(typeAccess.MemberAccess, names);
+					break;
+
+				case InstanceAccessNode instanceAccess:
+					CollectCaptureNamesFromMemberAccess(instanceAccess.MemberAccess, names);
+					break;
+
+				case ConstructorCallNode constructor:
+					foreach (var parameter in constructor.Parameters)
+						CollectCaptureNamesFromParameter(parameter, names);
+					break;
+
+				case AssignmentNode assignment:
+					AddCaptureName(assignment.VariableName, names);
+					CollectCaptureNamesFromExpression(assignment.Value, names);
+					break;
+
+				case PartialPatternNode partial:
+					foreach (var pattern in partial.Patterns)
+						CollectCaptureNamesFromExpression(pattern, names);
+					break;
+
+				case GuardedExpressionNode guarded:
+					// A guard ('where' clause) only REFERENCES a capture; the value is bound
+					// by the inner expression, so only that is walked.
+					CollectCaptureNamesFromExpression(guarded.InnerExpression, names);
+					break;
+
+				case AlternativeExpressionNode alternative:
+					foreach (var branch in alternative.Branches)
+						CollectCaptureNamesFromExpression(branch.Expression, names);
+					break;
+
+				case ExposeNode expose:
+					CollectCaptureNamesFromParameter(expose.Expression, names);
+					break;
+
+				case TellPatternNode tell:
+					foreach (var parameter in tell.WithParameters)
+						CollectCaptureNamesFromParameter(parameter, names);
+					CollectCaptureNamesFromParameter(tell.AddresseeInstanceParameter, names);
+					CollectCaptureNamesFromParameter(tell.OnceParameter, names);
+					break;
+
+				case TellAckPatternNode ack:
+					CollectCaptureNamesFromParameter(ack.AckIdParameter, names);
+					CollectCaptureNamesFromParameter(ack.FromAddresseeInstanceParameter, names);
+					break;
+			}
+		}
+
+		private static void CollectCaptureNamesFromMemberAccess(MemberAccessNode memberAccess, ISet<string> names)
+		{
+			while (memberAccess != null)
+			{
+				if (memberAccess.Parameters != null)
+				{
+					foreach (var parameter in memberAccess.Parameters)
+						CollectCaptureNamesFromParameter(parameter, names);
+				}
+				memberAccess = memberAccess.NextAccess;
+			}
+		}
+
+		private static void CollectCaptureNamesFromParameter(ParameterNode parameter, ISet<string> names)
+		{
+			switch (parameter)
+			{
+				case VariableParameterNode variable:
+					AddCaptureName(variable.VariableName, names);
+					break;
+
+				case TypedParameterNode typed:
+					AddCaptureName(typed.ParameterName, names);
+					break;
+
+				case NestedCallParameterNode nested:
+					CollectCaptureNamesFromExpression(nested.Call, names);
+					break;
+			}
+		}
+
+		// A name only enters the results as a capture when its source token is a '$name'
+		// (an untyped '$x' or a typed '$x:Type'); a free identifier or a 'name:Type' match
+		// carries no '$' and binds no value, so it is ignored. The stored parameter name
+		// drops the '$' (matching PatternMatcher), and a trailing ':Type' suffix — possible
+		// on an assignment target like '$x:Type = ...' — is discarded.
+		private static void AddCaptureName(string rawName, ISet<string> names)
+		{
+			if (string.IsNullOrEmpty(rawName) || rawName[0] != '$') return;
+
+			string name = rawName.Substring(1);
+			int colon = name.IndexOf(':');
+			if (colon >= 0) name = name.Substring(0, colon);
+			if (name.Length > 0) names.Add(name);
+		}
+
 		private void ValidateTypesInPattern(PatternListNode patternAst)
 		{
 			foreach (var expression in patternAst.Expressions)
@@ -500,6 +638,7 @@ namespace Puppeteer.EventSourcing.Follower
 			if (
 				String.Equals(typeName, "string", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "int", StringComparison.OrdinalIgnoreCase) ||
+				String.Equals(typeName, "long", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "double", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "decimal", StringComparison.OrdinalIgnoreCase) ||
 				String.Equals(typeName, "bool", StringComparison.OrdinalIgnoreCase) ||

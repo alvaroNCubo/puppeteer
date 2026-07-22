@@ -109,7 +109,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				{
 					throw new LanguageException($"Playbill record for EntryId {entryId} already exists (expected at most one per entry).");
 				}
-				storage.Records[entryId] = (schemaName, serializedParameters);
+				storage.Records[entryId] = (schemaName, ToStoredArguments(serializedParameters));
 				fireCallback = true;
 			}
 			if (fireCallback) OnRecordWritten?.Invoke(entryId, schemaName, serializedParameters);
@@ -120,7 +120,8 @@ namespace Puppeteer.EventSourcing.Playbill
 			if (entryId <= 0) throw new LanguageException($"EntryId {entryId} must be greater than zero.");
 			lock (storage.gate)
 			{
-				return storage.Records.TryGetValue(entryId, out var rec) ? rec : null;
+				if (!storage.Records.TryGetValue(entryId, out var rec)) return null;
+				return (rec.SchemaName, ToLogicalArguments(rec.SerializedParameters));
 			}
 		}
 
@@ -133,7 +134,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				foreach (var kvp in storage.Records)
 				{
 					if (kvp.Value.SchemaName == schemaName)
-						copy.Add((kvp.Key, kvp.Value.SerializedParameters));
+						copy.Add((kvp.Key, ToLogicalArguments(kvp.Value.SerializedParameters)));
 				}
 				return copy;
 			}
@@ -150,7 +151,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				foreach (var kvp in storage.Records)
 				{
 					if (kvp.Key <= afterEntryId) continue;
-					result.Add(new PlaybillRecord(kvp.Key, kvp.Value.SchemaName, kvp.Value.SerializedParameters));
+					result.Add(new PlaybillRecord(kvp.Key, kvp.Value.SchemaName, ToLogicalArguments(kvp.Value.SerializedParameters)));
 				}
 			}
 		}

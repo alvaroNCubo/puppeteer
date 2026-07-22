@@ -23,7 +23,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return typeof(double);
 			}
-			else if (typeE1 == typeof(int) && typeE2 == typeof(int))
+			else if ((typeE1 == typeof(int) || typeE1 == typeof(long)) && (typeE2 == typeof(int) || typeE2 == typeof(long)))
 			{
 				var noPerderPrecision = typeof(double);
 				return noPerderPrecision;
@@ -69,6 +69,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return (decimal)object1 / Convert.ToDecimal(object2);
 			if (type1 == typeof(decimal) && type2 == typeof(decimal))
 				return (decimal)object1 / (decimal)object2;
+			if (type1 == typeof(long) && type2 == typeof(long))
+				return (long)object1 / (long)object2;
+			if (type1 == typeof(long) && type2 == typeof(int))
+				return (long)object1 / Convert.ToInt64(object2);
+			if (type1 == typeof(int) && type2 == typeof(long))
+				return Convert.ToInt64(object1) / (long)object2;
+			if (type1 == typeof(long) && type2 == typeof(double))
+				return Convert.ToDouble(object1) / (double)object2;
+			if (type1 == typeof(double) && type2 == typeof(long))
+				return (double)object1 / Convert.ToDouble(object2);
+			if (type1 == typeof(long) && type2 == typeof(decimal))
+				return Convert.ToDecimal(object1) / (decimal)object2;
+			if (type1 == typeof(decimal) && type2 == typeof(long))
+				return (decimal)object1 / Convert.ToDecimal(object2);
 
 			throw new LanguageException($"Cannot divide a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 		}
@@ -113,6 +127,27 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (type1 == typeof(decimal) && type2 == typeof(decimal))
 				return Expression.Divide(left, right);
+
+			if (type1 == typeof(long) && type2 == typeof(long))
+				return Expression.Divide(left, right);
+
+			if (type1 == typeof(long) && type2 == typeof(int))
+				return Expression.Divide(left, Expression.Convert(right, typeof(long)));
+
+			if (type1 == typeof(int) && type2 == typeof(long))
+				return Expression.Divide(Expression.Convert(left, typeof(long)), right);
+
+			if (type1 == typeof(long) && type2 == typeof(double))
+				return Expression.Divide(Expression.Convert(left, typeof(double)), right);
+
+			if (type1 == typeof(double) && type2 == typeof(long))
+				return Expression.Divide(left, Expression.Convert(right, typeof(double)));
+
+			if (type1 == typeof(long) && type2 == typeof(decimal))
+				return Expression.Divide(Expression.Convert(left, typeof(decimal)), right);
+
+			if (type1 == typeof(decimal) && type2 == typeof(long))
+				return Expression.Divide(left, Expression.Convert(right, typeof(decimal)));
 
 			throw new LanguageException($"Cannot divide a value of type '{type1.Name}' by a value of type '{type2.Name}'.");
 		}

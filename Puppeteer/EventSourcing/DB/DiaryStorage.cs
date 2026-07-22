@@ -261,23 +261,111 @@ namespace Puppeteer.EventSourcing.DB
 		// Confirmed is saved afterwards with SaveReactionConfirmedCheckpoint after executing PerformCommand
 		protected internal abstract bool MarkEventsAsElidedWithCheckpoint(Follower.CheckpointCommit commit);
 
-		// Journal-outbox emit (.Outbox.Emit). The diary's outbox side table. Like
-		// EventElisionStorage / EventMaterializationStorage it is owned per-actor by
-		// the concrete storage; null on backends that have not adopted the outbox.
+		// Journal-outbox emit (.Outbox.Emit). The diary's outbox row table. Like
+		// EventElisionStorage / EventMaterializationStorage it is owned per-actor.
+		// The framework's default durable outbox is a persistent local queue
+		// (OutboxStorageFileSystem) — the same local-buffer strategy the diary uses
+		// for perform-command writes — so the outbox works on ANY diary backend, not
+		// just in-memory. Each backend/wrapper assigns it: the FileSystem and
+		// in-memory backends self-wire it in their constructor; for a SQL / plain-text
+		// backend the Diary facade injects the local-buffer queue when a
+		// localBufferPath is configured (SetOutboxStorage). An author whose
+		// architecture cannot host that queue can inject their own OutboxStorage
+		// through the same seam.
 		protected OutboxStorage outboxStorage;
 		internal OutboxStorage OutboxStorage => outboxStorage;
 
-		// Record an outgoing message AND advance the reaction cursor in ONE store
-		// write — the exactly-once-recording primitive. Mirrors
-		// MarkEventsAsElidedWithCheckpoint: monotonic-compare the commit's vector
-		// against the persisted detected cursor; if not greater, no-op (another pod
-		// already recorded this match) and return false; otherwise insert the
-		// outbox row (idempotent on the key) and advance the cursor, atomically.
-		// virtual (not abstract) so backends adopt it incrementally — the default
-		// signals non-adoption rather than silently dropping the message.
+		// Serializes the guard+record+advance critical section of the default
+		// RecordOutboxWithCheckpoint within this process. Cross-process safety
+		// (red-black takeover) does not rely on it: the monotonic detected-cursor
+		// guard plus the idempotency-key uniqueness make a concurrent re-detection on
+		// another pod a no-op regardless of this lock.
+		private readonly object outboxCheckpointLock = new object();
+
+		// Injection seam for the outbox row store. Used by the Diary facade to wire
+		// the persistent local-buffer queue into a SQL / plain-text backend, and by
+		// an author supplying their own OutboxStorage.
+		internal void SetOutboxStorage(OutboxStorage storage)
+		{
+			ArgumentNullException.ThrowIfNull(storage);
+			this.outboxStorage = storage;
+		}
+
+		// Record an outgoing message AND advance the reaction cursor — the
+		// exactly-once-recording primitive. Backend-agnostic default: it drives the
+		// per-backend checkpoint store through the abstract GetReactionCheckpoint /
+		// SaveReactionLastProcessedEntryId primitives and inserts the row into the
+		// pluggable OutboxStorage, so every backend gets a working outbox without a
+		// per-backend override. Mirrors MarkEventsAsElidedWithCheckpoint: monotonic-
+		// compare the commit's vector against the persisted detected cursor; if not
+		// greater, no-op (another pod already recorded this match) and return false.
+		//
+		// The row is inserted BEFORE the cursor advances. When the row store and the
+		// checkpoint store are the same medium (in-memory) this is a single atomic
+		// write; when they are distinct media (e.g. a SQL checkpoint + a local-queue
+		// row) the two writes are not one transaction, but the ORDER makes a crash
+		// between them safe: a recorded-but-not-yet-advanced row is re-detected on
+		// replay, TryInsert is an idempotent no-op on the key, and the cursor then
+		// advances. The reverse order (advance then insert) could lose the message;
+		// this order cannot. Backends that CAN make the two writes one transaction
+		// (in-memory) override this for the stronger single-write guarantee.
+		//
+		// virtual so a backend can substitute a truly atomic implementation.
 		protected internal virtual bool RecordOutboxWithCheckpoint(Follower.OutboxCommit commit)
 		{
-			throw new NotImplementedException($"{GetType().Name} has not adopted RecordOutboxWithCheckpoint yet (journal-outbox emit prototype, IN_MEMORY only).");
+			ArgumentNullException.ThrowIfNull(commit);
+			if (outboxStorage == null)
+				throw new LanguageException(
+					$"{GetType().Name} has no OutboxStorage configured, so `.Outbox.Emit(...)` cannot record. " +
+					"The framework's default durable outbox is the persistent local queue: use the FileSystem or " +
+					"IN_MEMORY backend, add 'localBufferPath=<path>' to the connection string to enable the local " +
+					"buffer, or inject your own OutboxStorage. See notes/reactions-outbox-emit.md.");
+
+			long reactionId = commit.ReactionId;
+			Follower.CheckpointVector newCheckpoint = commit.CheckpointVector;
+
+			lock (outboxCheckpointLock)
+			{
+				// Monotonic detected-cursor guard (identical to the elide path): the
+				// first seek level where new != current decides. Not greater => a peer
+				// pod already recorded this match; no-op.
+				bool isGreater = false;
+				for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+				{
+					long newDetected = newCheckpoint.Get(seekLevel);
+					var (currentDetected, _) = GetReactionCheckpoint(reactionId, seekLevel);
+
+					if (newDetected > currentDetected) { isGreater = true; break; }
+					if (newDetected < currentDetected) { isGreater = false; break; }
+				}
+
+				if (!isGreater)
+					return false;
+
+				var record = new OutboxRecord(
+					reactionId: commit.ReactionId,
+					anchorEntryId: commit.AnchorEntryId,
+					destination: commit.Destination,
+					payload: commit.Payload,
+					idempotencyKey: commit.IdempotencyKey,
+					recordedAt: commit.Timestamp);
+
+				// Insert BEFORE advancing the cursor (see the crash-safety note above).
+				// Idempotent on the key: a re-detected match does not create a second row.
+				outboxStorage.TryInsert(record);
+
+				// Advance BOTH cursors (detected and confirmed) to newDetected — the
+				// recording IS the action, so there is no later SaveReactionConfirmedCheckpoint
+				// (unlike the elide path). SaveReactionLastProcessedEntryId sets both.
+				for (int seekLevel = 0; seekLevel < newCheckpoint.SeekCount; seekLevel++)
+				{
+					long newDetected = newCheckpoint.Get(seekLevel);
+					if (newDetected > 0)
+						SaveReactionLastProcessedEntryId(reactionId, seekLevel, newDetected);
+				}
+
+				return true;
+			}
 		}
 
 		// ===== RESUME OPTIMIZATION: two global cursors per reaction (checkpoint redesign,

@@ -757,6 +757,16 @@ namespace Puppeteer.EventSourcing.Interpreter
 				input.SkipChar();
 				result = new Token(TokenType.@double, input.LexemeStart, input.LexemeEnd);
 			}
+			// Check long suffix 'l' or 'L'
+			else if (IsLongSuffix())
+			{
+				if (isDecimal)
+				{
+					throw new LanguageException($"A long literal cannot have a decimal point at line {input.Row}, column {input.Column}.", input.CurrentString().ToString(), input.Row, input.Column);
+				}
+				input.SkipChar();
+				result = new Token(TokenType.@long, input.LexemeStart, input.LexemeEnd);
+			}
 			else if (isDecimal)
 			{
 				result = new Token(TokenType.@double, input.LexemeStart, input.LexemeEnd);
@@ -887,6 +897,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			bool isDoubleSuffix = input.CurrentChar == 'd' || input.CurrentChar == 'D';
 			return isDoubleSuffix;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private bool IsLongSuffix()
+		{
+			bool isLongSuffix = input.CurrentChar == 'l' || input.CurrentChar == 'L';
+			return isLongSuffix;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]

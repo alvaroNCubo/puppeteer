@@ -123,6 +123,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (elseBranchStatement != null) elseBranchStatement.Visit(v);
 		}
 
+		internal override void PropagateProgram(Program program)
+		{
+			base.PropagateProgram(program);
+			ifBranchStatement.PropagateProgram(program);
+			if (elseBranchStatement != null) elseBranchStatement.PropagateProgram(program);
+		}
+
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
 			if (WasFiltered) return;

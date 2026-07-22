@@ -13,7 +13,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override Type ComputeType()
 		{
 			Type type = e.ComputeType();
-			if (type == typeof(double) || type == typeof(int) || type == typeof(decimal))
+			if (type == typeof(double) || type == typeof(int) || type == typeof(long) || type == typeof(decimal))
 			{
 				return type;
 			}
@@ -38,6 +38,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return -(int)object1;
 			}
+			else if (object1.GetType() == typeof(long))
+			{
+				return -(long)object1;
+			}
 			else if (object1.GetType() == typeof(double))
 			{
 				return -(double)object1;
@@ -61,7 +65,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 
 			Expression result = null;
-			if (value.Type == typeof(int) || value.Type == typeof(double) || value.Type == typeof(decimal))
+			if (value.Type == typeof(int) || value.Type == typeof(long) || value.Type == typeof(double) || value.Type == typeof(decimal))
 			{
 				result = Expression.Negate(value);
 			}

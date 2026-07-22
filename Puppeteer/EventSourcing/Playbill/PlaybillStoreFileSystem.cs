@@ -232,7 +232,7 @@ namespace Puppeteer.EventSourcing.Playbill
 					throw new LanguageException($"Playbill record for EntryId {entryId} already exists (expected at most one per entry).");
 				}
 
-				long appendedOffset = AppendRecordEntry(entryId, schemaName, serializedParameters);
+				long appendedOffset = AppendRecordEntry(entryId, schemaName, ToStoredArguments(serializedParameters));
 				AppendIndexEntry(entryId, appendedOffset);
 			}
 			// Invoke OUTSIDE the lock to avoid deadlock if the subscriber
@@ -391,7 +391,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				if (offset < 0) return null;
 				var rec = ReadRecordAtOffset(offset);
 				if (rec == null) return null;
-				return (rec.Value.SchemaName, rec.Value.SerializedParameters);
+				return (rec.Value.SchemaName, ToLogicalArguments(rec.Value.SerializedParameters));
 			}
 		}
 
@@ -406,7 +406,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				{
 					if (entry.SchemaName == schemaName)
 					{
-						result.Add((entry.EntryId, entry.SerializedParameters));
+						result.Add((entry.EntryId, ToLogicalArguments(entry.SerializedParameters)));
 					}
 				}
 			}
@@ -427,7 +427,7 @@ namespace Puppeteer.EventSourcing.Playbill
 				{
 					if (entry.EntryId > afterEntryId)
 					{
-						temp.Add(new PlaybillRecord(entry.EntryId, entry.SchemaName, entry.SerializedParameters));
+						temp.Add(new PlaybillRecord(entry.EntryId, entry.SchemaName, ToLogicalArguments(entry.SerializedParameters)));
 					}
 				}
 			}

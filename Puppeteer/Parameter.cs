@@ -131,9 +131,20 @@ namespace Puppeteer
 
 					if (argumentType.IsArray)
 					{
+						// Materialize the array into a List<elementType> so every collection
+						// parameter holds the same shape whether the value arrived as a raw array
+						// or a List (the deserialization path already stores List<T>). The array is
+						// copied element-wise: Convert.ChangeType to IEnumerable<T> is not a valid
+						// conversion (an array does not implement IConvertible) and threw for element
+						// types without a dedicated array->List branch in TypeConversion (e.g. long).
 						var elementType = argumentType.GetElementType();
-						var CastArrayType = typeof(IEnumerable<>).MakeGenericType(new[] { elementType });
-						instance.value = Convert.ChangeType(value, CastArrayType);
+						var listType = typeof(List<>).MakeGenericType(elementType);
+						var list = (System.Collections.IList)Activator.CreateInstance(listType);
+						foreach (var item in (System.Collections.IEnumerable)result)
+						{
+							list.Add(item);
+						}
+						instance.value = list;
 					}
 					else
 					{

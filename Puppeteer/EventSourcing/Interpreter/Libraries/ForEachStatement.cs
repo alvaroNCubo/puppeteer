@@ -435,6 +435,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			body.Visit(v);
 		}
 
+		internal override void PropagateProgram(Program program)
+		{
+			base.PropagateProgram(program);
+			body.PropagateProgram(program);
+		}
+
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
 			if (WasFiltered) return;

@@ -499,6 +499,7 @@ namespace Puppeteer
 		private static string CanonicalTypeName(Type type)
 		{
 			if (type == typeof(int)) return "int";
+			if (type == typeof(long)) return "long";
 			if (type == typeof(string)) return "string";
 			if (type == typeof(bool)) return "bool";
 			if (type == typeof(double)) return "double";
@@ -599,6 +600,10 @@ namespace Puppeteer
 			else if (type == typeof(int))
 			{
 				sb.Append("int");
+			}
+			else if (type == typeof(long))
+			{
+				sb.Append("long");
 			}
 			else if (type == typeof(bool))
 			{
@@ -734,6 +739,10 @@ namespace Puppeteer
 					case 'I':
 						baseType = IntType(parameters, ref position);
 						break;
+					case 'l':
+					case 'L':
+						baseType = LongType(parameters, ref position);
+						break;
 					case 'b':
 					case 'B':
 						baseType = BooleanType(parameters, ref position);
@@ -773,8 +782,8 @@ namespace Puppeteer
 			return baseType;
 		}
 
-		// True if the type token at `position` is exactly one of the 6 primitives
-		// (int/string/bool/datetime/decimal/double), case-insensitive. The token is delimited
+		// True if the type token at `position` is exactly one of the primitives
+		// (int/long/string/bool/datetime/decimal/double), case-insensitive. The token is delimited
 		// by the first non-alphanumeric character (':' separates name:type; '[' starts the array
 		// suffix; ',' separates parameters). Only in that case is the primitive route used.
 		private static bool IsPrimitiveTypeKeyword(string parameters, int position)
@@ -788,6 +797,7 @@ namespace Puppeteer
 			}
 			ReadOnlySpan<char> token = parameters.AsSpan(position, end - position);
 			return token.Equals("int".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("long".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("string".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("bool".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("datetime".AsSpan(), StringComparison.OrdinalIgnoreCase)
@@ -983,6 +993,33 @@ namespace Puppeteer
 			return typeof(int);
 		}
 
+		private Type LongType(string parameters, ref int position)
+		{
+			if (parameters.Length < position + 4)
+			{
+				throw new LanguageException($"{parameters.Substring(position)} is not a known type");
+			}
+
+			bool valid =
+				(parameters[position + 0] == 'l' || parameters[position + 0] == 'L') &&
+				(parameters[position + 1] == 'o' || parameters[position + 1] == 'O') &&
+				(parameters[position + 2] == 'n' || parameters[position + 2] == 'N') &&
+				(parameters[position + 3] == 'g' || parameters[position + 3] == 'G');
+
+			if (!valid)
+			{
+				throw new LanguageException($"{parameters.Substring(position, position + 4 - position)} is not a known type");
+			}
+			position += 4;
+
+			if (IsArray(parameters, ref position))
+			{
+				return typeof(long[]);
+			}
+
+			return typeof(long);
+		}
+
 		private Type StringType(string parameters, ref int position)
 		{
 			if (parameters.Length < position + 6)
@@ -1122,6 +1159,10 @@ namespace Puppeteer
 			{
 				parameter.Value = ValueCollectionInt(agumentsAsString, ref position);
 			}
+			else if (parameterType.GenericTypeArguments[0] == typeof(long))
+			{
+				parameter.Value = ValueCollectionLong(agumentsAsString, ref position);
+			}
 			else if (parameterType.GenericTypeArguments[0] == typeof(string))
 			{
 				parameter.Value = ValueCollectionString(agumentsAsString, ref position);
@@ -1146,6 +1187,41 @@ namespace Puppeteer
 			{
 				throw new LanguageException("Parameter type is not valid");
 			}
+		}
+
+		private object ValueCollectionLong(string agumentsAsString, ref int position)
+		{
+			List<long> list = new List<long>();
+			if (agumentsAsString[position] != '{') throw new LanguageException("Parameter definition is not valid");
+			position++;
+			int startPosition = position;
+			if (agumentsAsString[position] == '}')
+			{
+				position++;
+				return Enumerable.Empty<long>();
+			}
+
+			while (position < agumentsAsString.Length)
+			{
+				if (agumentsAsString[position] == ',')
+				{
+					list.Add(long.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
+					startPosition = position + 1;
+				}
+				else if (agumentsAsString[position] == '}')
+				{
+					list.Add(long.Parse(agumentsAsString.AsSpan(startPosition, position - startPosition), CultureInfo.InvariantCulture));
+					position++;
+					break;
+				}
+				else if (position >= agumentsAsString.Length)
+				{
+					throw new LanguageException("Parameter definition is not valid");
+				}
+				position++;
+			}
+
+			return list;
 		}
 
 		private object ValueCollectionInt(string agumentsAsString, ref int position)
@@ -1405,6 +1481,10 @@ namespace Puppeteer
 			{
 				parameter.SetParsedScalar(BoxCache.Box(int.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture)));
 			}
+			else if (parameterType == typeof(long))
+			{
+				parameter.SetParsedScalar(long.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture));
+			}
 			else if (parameterType == typeof(bool))
 			{
 				parameter.SetParsedScalar(BoxCache.Box(bool.Parse(Value(agumentsAsString, ref position))));
@@ -1478,6 +1558,21 @@ namespace Puppeteer
 				else
 				{
 					Append((int[])value, sb);
+				}
+			}
+			else if (parameterType.GenericTypeArguments[0] == typeof(long))
+			{
+				if (parameterType == typeof(List<long>))
+				{
+					Append((List<long>)value, sb);
+				}
+				else if (parameterType == typeof(IEnumerable<long>))
+				{
+					Append((IEnumerable<long>)value, sb);
+				}
+				else
+				{
+					Append((long[])value, sb);
 				}
 			}
 			else if (parameterType.GenericTypeArguments[0] == typeof(string))
@@ -1572,6 +1667,10 @@ namespace Puppeteer
 			{
 				Append((int)parameter.GetValue(), sb);
 			}
+			else if (parameterType == typeof(long))
+			{
+				Append((long)parameter.GetValue(), sb);
+			}
 			else if (parameterType == typeof(bool))
 			{
 				Append((bool)parameter.GetValue(), sb);
@@ -1663,6 +1762,45 @@ namespace Puppeteer
 		}
 
 		private void Append(int[] values, StringBuilder sb)
+		{
+			var isFirst = true;
+			sb.Append('{');
+			foreach (var value in values)
+			{
+				if (!isFirst) sb.Append(',');
+				sb.Append(value);
+				isFirst = false;
+			}
+			sb.Append('}');
+		}
+
+		private void Append(long[] values, StringBuilder sb)
+		{
+			var isFirst = true;
+			sb.Append('{');
+			foreach (var value in values)
+			{
+				if (!isFirst) sb.Append(',');
+				sb.Append(value);
+				isFirst = false;
+			}
+			sb.Append('}');
+		}
+
+		private void Append(List<long> values, StringBuilder sb)
+		{
+			var isFirst = true;
+			sb.Append('{');
+			foreach (var value in values)
+			{
+				if (!isFirst) sb.Append(',');
+				sb.Append(value);
+				isFirst = false;
+			}
+			sb.Append('}');
+		}
+
+		private void Append(IEnumerable<long> values, StringBuilder sb)
 		{
 			var isFirst = true;
 			sb.Append('{');
@@ -1895,6 +2033,11 @@ namespace Puppeteer
 			sb.Append(value);
 		}
 
+		private void Append(long value, StringBuilder sb)
+		{
+			sb.Append(value);
+		}
+
 		private void Append(string value, StringBuilder sb, DatabaseType databaseType)
 		{
 			LiteralString.Write(sb, value, databaseType);
@@ -1966,6 +2109,35 @@ namespace Puppeteer
 
 			string declarations = serialized.Substring(0, separatorIndex);
 			string arguments = serialized.Substring(separatorIndex + 1);
+
+			var parameters = new Parameters(declarations);
+			if (!string.IsNullOrEmpty(arguments))
+			{
+				parameters.LoadArguments(arguments);
+			}
+			return parameters;
+		}
+
+		// Dense transport: serialize ONLY the argument values, dropping the
+		// declarations. Callers that already hold the declarations out-of-band
+		// (e.g. a schema registered once) pair this with the two-argument
+		// DeserializeFromTransport overload to rebuild the full Parameters. This
+		// is the value-only half of SerializeForTransport.
+		public string SerializeArgumentsForTransport(DatabaseType databaseType)
+		{
+			if (databaseType < 0) throw new ArgumentOutOfRangeException(nameof(databaseType));
+			if (!HasAnyParameter()) return string.Empty;
+
+			return ArgumentsAsString(databaseType);
+		}
+
+		// Rebuilds a Parameters from declarations supplied out-of-band and a
+		// value-only argument string (the output of SerializeArgumentsForTransport).
+		// Mirrors the single-argument overload but takes the declarations
+		// separately instead of splitting them off a combined blob.
+		public static Parameters DeserializeFromTransport(string declarations, string arguments)
+		{
+			if (string.IsNullOrEmpty(declarations)) return null;
 
 			var parameters = new Parameters(declarations);
 			if (!string.IsNullOrEmpty(arguments))

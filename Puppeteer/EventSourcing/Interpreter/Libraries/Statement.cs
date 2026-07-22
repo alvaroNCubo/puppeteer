@@ -30,6 +30,20 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// Propagate the owning Program backref to this statement and, for a
+		// container statement, to every statement nested in its body. Program.
+		// SetContextInfo sets the backref only on the TOP-LEVEL statements, so a
+		// statement nested in an if/foreach/block body would otherwise keep a null
+		// Program. Anything that reads Statement.Program at execution needs it at
+		// any depth — e.g. a `tell` nested in an `if` reads Program.Parameters to
+		// resolve a captured @-argument by name; without the backref the capture
+		// fails to resolve. The base sets its own backref; container statements
+		// override to recurse, mirroring the recursion their Visit already performs.
+		internal virtual void PropagateProgram(Program program)
+		{
+			this.Program = program;
+		}
+
 		public override string ToString()
 		{
 			StringBuilder builder = new StringBuilder();

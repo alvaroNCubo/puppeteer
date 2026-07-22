@@ -609,34 +609,40 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		protected Type PromotesTo(Type leftType, Type rightType)
 		{
-			if (leftType == typeof(int) && rightType == typeof(int))
-				return typeof(int);
+			// Numeric promotion ladder: decimal dominates double dominates long dominates int.
+			// int widens to long (safe); long never narrows to int implicitly.
+			if (!IsPromotableNumeric(leftType) || !IsPromotableNumeric(rightType))
+				throw new LanguageException($"Binary operation {this.GetType().Name} cannot combine {leftType.Name} and {rightType.Name}");
 
-			if (leftType == typeof(int) && rightType == typeof(double))
+			if (leftType == typeof(decimal) || rightType == typeof(decimal))
+				return typeof(decimal);
+			if (leftType == typeof(double) || rightType == typeof(double))
 				return typeof(double);
+			if (leftType == typeof(long) || rightType == typeof(long))
+				return typeof(long);
+			return typeof(int);
+		}
 
-			if (leftType == typeof(int) && rightType == typeof(decimal))
-				return typeof(decimal);
+		internal static bool IsPromotableNumeric(Type t)
+		{
+			return t == typeof(int) || t == typeof(long) || t == typeof(double) || t == typeof(decimal);
+		}
 
-			if (leftType == typeof(double) && rightType == typeof(int))
-				return typeof(double);
+		// Widens an already-evaluated boxed numeric value to the promoted target type
+		// (interpreted operators). Only widenings occur here (int->long->double->decimal),
+		// so no value is ever narrowed/lost.
+		protected static object CoerceNumericValue(object value, Type target)
+		{
+			if (target == typeof(long)) return Convert.ToInt64(value);
+			if (target == typeof(double)) return Convert.ToDouble(value);
+			if (target == typeof(decimal)) return Convert.ToDecimal(value);
+			return Convert.ToInt32(value);
+		}
 
-			if (leftType == typeof(double) && rightType == typeof(double))
-				return typeof(double);
-
-			if (leftType == typeof(double) && rightType == typeof(decimal))
-				return typeof(decimal);
-
-			if (leftType == typeof(decimal) && rightType == typeof(int))
-				return typeof(decimal);
-
-			if (leftType == typeof(decimal) && rightType == typeof(double))
-				return typeof(decimal);
-
-			if (leftType == typeof(decimal) && rightType == typeof(decimal))
-				return typeof(decimal);
-
-			throw new LanguageException($"Binary operation {this.GetType().Name} cannot combine {leftType.Name} and {rightType.Name}");
+		// Widens a numeric operand expression to the promoted target type (compiled operators).
+		protected static Expression CoerceNumericExpression(Expression operand, Type target)
+		{
+			return operand.Type == target ? operand : Expression.Convert(operand, target);
 		}
 
 	}

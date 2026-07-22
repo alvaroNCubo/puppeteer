@@ -177,6 +177,16 @@ namespace Puppeteer.EventSourcing.Follower
 		private int cacheAccessTick = 0;
 		private const int MAX_CACHE_SIZE = 100;
 
+		// ===== TRAJECTORY INDEX (event routing) =====
+		// Per-ActionId bitmask over Seek levels the ActionId can STRUCTURALLY satisfy (bit k
+		// set <=> reactionEngines[k].StructurallyAdmits(entry.Script)). mask == 0 => the
+		// ActionId is globally irrelevant to this Reaction. Derived state: computed lazily on
+		// the first sighting of each ActionId (from its FIXED body, no argument values), never
+		// persisted, rebuilt fresh each Execute — so it re-warms after a resume and a new
+		// ActionId defined mid-replay is just a new first-sighting (no invalidation). Read only
+		// when ActorHandler.ReactionEventRoutingEnabled.
+		private Dictionary<int, long> actionIdSeekMask;
+
 		// ===== OPTIMIZATION METRICS (Commit E) =====
 		// Metrics that evaluate Program-cache effectiveness.
 		private int cacheHits = 0;              // How many times a cached Program was reused.
@@ -506,6 +516,34 @@ namespace Puppeteer.EventSourcing.Follower
 			return this;
 		}
 
+		// Intent-named aliases for the two hydration strategies. They name the OUTCOME (how
+		// concurrent trajectories relate to each other) rather than the traversal mechanism:
+		//   Shared()   == WithSharedHydration()      -> trajectories share one hydrated context.
+		//   Isolated() == WithIndependentHydration() -> each trajectory gets its own isolated context.
+		//
+		// TODO (revisit in a future session — NOT now): today the pattern matcher is STATELESS
+		// (one SymbolTable across every level), so Shared/Isolated produce the SAME matches and
+		// differ only in search strategy + memory (Shared = breadth-first, wide open frontier;
+		// Isolated = depth-first, one branch at a time with early pruning). The names above will
+		// only earn a *semantic* difference once stateful reactions exist, where each Isolated
+		// branch rehydrates its own actor state and cannot contaminate a sibling's. Until then this
+		// is effectively a performance knob; a reasonable simplification is to hide it behind a
+		// default and re-expose Shared()/Isolated() when isolation becomes observable.
+		//
+		// Mental model to carry forward (the nested-for): a correlated chain is
+		//   for i = 1..N (the anchor that binds $x)
+		//     for j = i..N (a LATER seek, same $x)          <- forward inner loop: works today
+		// The shape that does NOT exist yet is the backward inner loop
+		//   for i = 1..N
+		//     for j = 1..i (events BEFORE the anchor)        <- look-behind guard (leading None)
+		// which needs a bounded retrospective scan, expressed as a guard on the FIRST seek, e.g.
+		//   Seek("SinDescuento").None()[Descuento($x)].Within(2.hours).Before("Compra")
+		// (the window anchors to the positive event "Compra" and extends backward; a None can never
+		// be a trajectory opener, so it is characterized in place rather than bolted onto a later seek).
+		public Reaction Shared(string untilSeek = null) => WithSharedHydration(untilSeek);
+
+		public Reaction Isolated(string untilSeek = null) => WithIndependentHydration(untilSeek);
+
 		internal ForEachSpec ForEachSpec => forEachSpec;
 
 		// Universal quantifier: declares the tuple and the cartesian product of
@@ -520,9 +558,45 @@ namespace Puppeteer.EventSourcing.Follower
 			if (this.forEachSpec != null) throw new LanguageException("ForEach() can be declared only once per Reaction.");
 			if (reactionEngines.Count == 0) throw new LanguageException("ForEach() must be declared after the Seek that captures the source collections.");
 
-			this.forEachSpec = ForEachSpec.Parse(spec);
+			var parsedSpec = ForEachSpec.Parse(spec);
+			ValidateForEachSourcesCaptured(parsedSpec);
+			this.forEachSpec = parsedSpec;
 
 			return this;
+		}
+
+		// A ForEach quantifies over the collections captured by a PRIOR Seek: its tuple
+		// ranges over '$source' variables that some earlier Seek must bind. If a source
+		// names a variable NO prior Seek captures, the quantifier ranges over nothing —
+		// there is no collection to iterate — so the definition is malformed. This is
+		// resolved here, at definition time (every prior Seek is already declared when
+		// ForEach is called), rather than deferred to a match that may never arrive: an
+		// unbound source is an authoring error, not a silent empty iteration. Matching is
+		// static, so this proves only that the source name is BOUND; whether the bound
+		// value is actually a collection (and not a scalar) depends on the runtime value
+		// and stays a match-time check (MatchTree.MaterializeObligations). Capture lookup
+		// is case-insensitive to match the runtime resolution (Parameters.ContainsParameter).
+		private void ValidateForEachSourcesCaptured(ForEachSpec spec)
+		{
+			ArgumentNullException.ThrowIfNull(spec);
+
+			var captured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var engine in reactionEngines)
+			{
+				engine.CollectCaptureNames(captured);
+			}
+
+			foreach (string source in spec.SourceVars)
+			{
+				if (captured.Contains(source)) continue;
+
+				throw new LanguageException(
+					$"ForEach references the source collection '${source}', but no prior Seek captures it. " +
+					$"A ForEach iterates a collection bound by an earlier Seek — capture it with a '$' pattern, " +
+					$"e.g. .Seek(\"...\").OnMatch(\"[_:SomeType].SomeMethod(${source})\") binds '${source}'. " +
+					$"With no captured collection there is nothing to iterate over: capture '${source}' in a Seek " +
+					$"declared before this ForEach, or remove it from the ForEach.");
+			}
 		}
 
 		// Resume optimization (step 4): opt-in for the snapshot-based cold-start for the
@@ -558,6 +632,20 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException($"'{patternDescription}' is a reserved word and cannot be used as a Seek name. Reserved names: {string.Join(", ", ReservedSeekNames)}.");
 		}
 
+		// Router support (D1): the forward router encodes the set of Seek levels an ActionId
+		// can satisfy as a bitmask in a long, using bits 0..62 (bit 63 stays unused so the
+		// mask is never negative). A Reaction therefore admits at most 63 Seeks. This is a
+		// safety rail — real trajectories have a handful of Seeks — enforced at definition
+		// time so the ceiling can never be exceeded once matching starts.
+		private const int MaxSeekCount = 63;
+
+		private void ValidateSeekCeiling()
+		{
+			if (reactionEngines.Count >= MaxSeekCount)
+				throw new LanguageException(
+					$"A Reaction may declare at most {MaxSeekCount} Seeks: the forward router encodes the reachable Seek levels of an ActionId as a bitmask, which bounds the trajectory length. This Reaction already has {reactionEngines.Count} Seek(s).");
+		}
+
 		public ReactionEngine Seek(string patternDescription)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(patternDescription);
@@ -582,6 +670,8 @@ namespace Puppeteer.EventSourcing.Follower
 
 			if (HasFinalSeek()) throw new LanguageException("Cannot add ThenSeek() after ThenFinalSeek(). ThenFinalSeek() must be the last Seek of the Reaction.");
 
+			ValidateSeekCeiling();
+
 			var engine = new ReactionEngine(this, patternDescription, isFinalSeek: false);
 
 			this.reactionEngines.Add(engine);
@@ -597,6 +687,8 @@ namespace Puppeteer.EventSourcing.Follower
 			if (reactionEngines.Count == 0) throw new LanguageException("ThenFinalSeek() is used to add a subsequent pattern step. At the start of a Reaction you must use Seek() first.");
 
 			if (HasFinalSeek()) throw new LanguageException("Only one ThenFinalSeek() is allowed per Reaction, and it must be the last Seek.");
+
+			ValidateSeekCeiling();
 
 			var engine = new ReactionEngine(this, patternDescription, isFinalSeek: true);
 
@@ -644,27 +736,54 @@ namespace Puppeteer.EventSourcing.Follower
 			System.Diagnostics.Debug.WriteLine($"[Reaction.ValidateFinalSeek] Validation passed: FinalSeekCount={finalSeekCount}, LastSeekIndex={reactionEngines.Count - 1}, IsSingleSeek={reactionEngines.Count == 1}");
 		}
 
-		// Exact-family window rule, split by whether the quantifier asserts an ABSENCE:
-		//   * None() / Exactly(0)  -> "zero occurrences". Absence is only decidable at a closing
-		//     boundary: in an append-only journal a matching event could always arrive later, so
-		//     "none happened" can never be affirmed on arrival. These REQUIRE .Within(...).
-		//   * One() / Exactly(n>=1) -> the n-th occurrence is a POSITIVE event that closes the
-		//     count on arrival (fire/advance + prune the cycle). No boundary is needed; .Within(...)
-		//     is OPTIONAL and only turns them into the strict "exactly n, and not an (n+1)-th"
-		//     variant (which does need a boundary to rule out the extra one).
+		// Exact-family window rule, split by whether the quantifier asserts an ABSENCE and whether a
+		// later seek can bound it:
+		//   * One() / Exactly(n>=1): the n-th occurrence is a POSITIVE event that closes the count on
+		//     arrival — no boundary needed. .Within is OPTIONAL (strict "exactly n, no (n+1)-th").
+		//   * None() / Exactly(0): "zero occurrences" is an ABSENCE, only decidable at a closing
+		//     boundary. The boundary can be EITHER an explicit .Within OR the SUBSEQUENT seek:
+		//       - a NON-FINAL None is bounded by the next seek ("no forbidden event until the next
+		//         seek matches") -> .Within is OPTIONAL;
+		//       - a FINAL None has no later seek to bound it -> it REQUIRES .Within.
 		private void ValidateExactRequiresWithin()
 		{
 			for (int i = 0; i < reactionEngines.Count; i++)
 			{
 				var engine = reactionEngines[i];
-				if (engine.IsExact && engine.ExactCount.Value == 0 && !engine.HasWithinWindow)
+				bool isFinal = i == reactionEngines.Count - 1;
+				if (engine.IsExact && engine.ExactCount.Value == 0 && !engine.HasWithinWindow && isFinal)
 				{
 					throw new LanguageException(
-						$"Seek '{engine.PatternDescription}' uses None()/Exactly(0) without .Within(...). " +
-						"Zero occurrences is an ABSENCE assertion: in an append-only journal a matching event " +
-						"could still arrive later, so 'none happened' is only decidable at a closing boundary. " +
-						"Chain .Within(entries) or .Within(span) to say WHERE the absence is judged. " +
-						"(One()/Exactly(n>=1) do not need it — the n-th occurrence is a positive event that closes the count.)");
+						$"Seek '{engine.PatternDescription}' uses None()/Exactly(0) as the LAST seek without .Within(...). " +
+						"Zero occurrences is an ABSENCE assertion, and this is the final seek, so there is no later seek " +
+						"to bound it: in an append-only journal a matching event could still arrive after, and 'none happened' " +
+						"is only decidable at a closing boundary. Chain .Within(entries) or .Within(span) to say WHERE the " +
+						"absence is judged. (A NON-final None needs no .Within — the next seek is its boundary; and " +
+						"One()/Exactly(n>=1) never need it — the n-th occurrence closes the count.)");
+				}
+			}
+		}
+
+		// (c) Quantifiers are mandatory on a multi-seek reaction. An unquantified seek silently opens
+		// one trajectory PER MATCH, so a shared close fans out over all of them -> O(N^2); it also
+		// hides the author's intent (one? many? exactly n?). Force the choice so the engine can bound
+		// and prune. Exemptions: a single-seek reaction (per-event, no trajectory to size) and a
+		// ForEach reaction (the ForEach clause already declares the coverage multiplicity).
+		private void ValidateQuantifiersPresent()
+		{
+			if (reactionEngines.Count < 2) return;
+			if (forEachSpec != null) return;
+
+			foreach (var engine in reactionEngines)
+			{
+				if (!engine.IsMany && !engine.IsExact)
+				{
+					throw new LanguageException(
+						$"Seek '{engine.PatternDescription}' declares no multiplicity. In a multi-seek reaction every " +
+						"seek must say how many events of its kind form ONE trajectory — otherwise each match silently " +
+						"opens its own trajectory (N of them) and every close re-scans them all → O(N²). Declare it: " +
+						".One() (one per trajectory), .Many() (collapse several), .Exactly(n), or .None() (the last needs " +
+						".Within unless a later seek bounds it).");
 				}
 			}
 		}
@@ -736,6 +855,9 @@ namespace Puppeteer.EventSourcing.Follower
 			// — without a window there is no closing point in an open journal.
 			ValidateExactRequiresWithin();
 
+			// (c) Quantifiers are mandatory on a multi-seek reaction (see ValidateQuantifiersPresent).
+			ValidateQuantifiersPresent();
+
 			var diaryStorage = DiaryStorage;
 
 			// Step 0: resolve the ReactionId using the Reaction's textual form.
@@ -798,6 +920,7 @@ namespace Puppeteer.EventSourcing.Follower
 			matchTree = new MatchTree(ActorHandler, reactionAction, hydrationMode, untilSeekIndex, checkpointVector, diaryStorage, reactionId, forEachSpec: forEachSpec);
 			symbolTable = new SymbolTable();
 			cachedPrograms = new Dictionary<int, (Program program, int lastAccessTick)>();
+			actionIdSeekMask = new Dictionary<int, long>();
 
 			// Resume optimization (checkpoint redesign, steps 2-4 — notes/reactions-checkpoint-policy.md).
 			// For coverage the resume is NOT from genesis: it is governed by the closed-frontier (local
@@ -1984,8 +2107,12 @@ namespace Puppeteer.EventSourcing.Follower
 		// Where compilation: the parsed Program is cached on the engine
 		// (CachedWhereProgram) so MatchTree.EvaluateWhere can compile-once /
 		// execute-many via Program.ExecuteExpression instead of re-parsing per event.
+		// The only cross-seek symbol is SeekName.@OccurredAt (the occurrence time of an event that
+		// matched an earlier seek of the same trajectory). Time is the sole system value the
+		// matcher carries per matched event; Ip/User are Playbill-only and EntryId is a
+		// Program-level property, so none is a valid cross-seek symbol.
 		private static readonly System.Text.RegularExpressions.Regex SeekScopedRefPattern =
-			new System.Text.RegularExpressions.Regex(@"(\w+)\.@(Now|User|Ip|EntryId)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+			new System.Text.RegularExpressions.Regex(@"(\w+)\.@(OccurredAt)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
 		// Test-only switch that forces EvaluateWhere down the re-parse fallback path
 		// by suppressing population of engine.CachedWhereProgram. Used by parity and
@@ -2266,6 +2393,28 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			ArgumentNullException.ThrowIfNull(eventData);
 
+			// Global relevance filter (trajectory index). A routed Action event whose ActionId
+			// structurally satisfies NO Seek (mask == 0) can never match anything, so skip the
+			// per-event argument materialization (ResolveEventForMatching's BuildInvocationArguments
+			// / SolveActionParameters) entirely — the dominant cost of an irrelevant event. Only the
+			// housekeeping tick runs, then the cursor advances.
+			//
+			// The tick must still run for window/settle firing PARITY with the full scan: under the
+			// full scan a RESOLVABLE Action resolves-and-ticks even when it matches no Seek. It is
+			// gated on TryGetAction so an UNKNOWN ActionId does NOT tick here — under the full scan
+			// an unknown ActionId makes ResolveEventForMatching return false (no tick); that case
+			// falls through to the resolve path below to keep identical behavior. Only diagnostic
+			// counters (SeekEntered, actionEventsProcessed) drift, never a match/elision.
+			if (actorHandler.ReactionEventRoutingEnabled
+				&& eventData is ActionEventData relevanceProbe
+				&& actorHandler.TryGetAction(relevanceProbe.ActionId, out _)
+				&& GetOrComputeSeekMask(relevanceProbe.ActionId) == 0)
+			{
+				matchTree.TickHousekeeping(eventData.EntryId, eventData.OccurredAt);
+				lastProcessedEntryId = eventData.EntryId;
+				return;
+			}
+
 			// PERF (Tier 1): resolve the per-event work ONCE before the level loop.
 			// Script extraction, cached-Program resolution and parameter (re)load do
 			// not depend on `level`; previously they ran inside ConsumeEvent on every
@@ -2274,13 +2423,82 @@ namespace Puppeteer.EventSourcing.Follower
 			// match attempt (matchTree.TryMatchAtLevel), which stays inside the loop.
 			if (ResolveEventForMatching(eventData, out string script, out Program cachedProgram, out bool cachedProgramIsCanonical))
 			{
-				for (int level = 0; level < MaxDepth; level++)
+				// Per-event window/settle housekeeping runs once here, before the per-level
+				// dispatch (formerly inside TryMatchAtLevel's level==0 case). Same timing as
+				// before: once per resolved event, ahead of level 0.
+				matchTree.TickHousekeeping(eventData.EntryId, eventData.OccurredAt);
+
+				if (actorHandler.ReactionEventRoutingEnabled)
 				{
-					matchTree.TryMatchAtLevel(level, eventData, reactionEngines, script, symbolTable, cachedProgram, cachedProgramIsCanonical);
+					// Trajectory index: attempt only the Seek levels this event can advance.
+					RouteEventToSeeks(eventData, script, cachedProgram, cachedProgramIsCanonical);
+				}
+				else
+				{
+					// Naive full scan: attempt every Seek level (the pre-routing behavior).
+					for (int level = 0; level < MaxDepth; level++)
+					{
+						matchTree.TryMatchAtLevel(level, eventData, reactionEngines, script, symbolTable, cachedProgram, cachedProgramIsCanonical);
+					}
 				}
 			}
 
 			lastProcessedEntryId = eventData.EntryId;
+		}
+
+		// Event routing (trajectory index). Attempts only the Seek levels that CAN advance on
+		// this event: (a) the ActionId's structural mask has the level's bit set — a NECESSARY
+		// condition for Pattern.Match to succeed (see Pattern.StructurallyAdmits) — and (b) for
+		// level>0, a predecessor cursor sits at level-1 (ExpandExistingMatches has nothing to
+		// expand otherwise). Both conditions are necessary, so the levels skipped here could
+		// not have produced a match: results are identical to the full scan, only cheaper. A
+		// non-Action event (which a Reaction should not observe — it matches Actions) routes to
+		// all levels defensively.
+		private void RouteEventToSeeks(DB.EventData eventData, string script, Program cachedProgram, bool cachedProgramIsCanonical)
+		{
+			long mask;
+			if (eventData is ActionEventData actionData)
+				mask = GetOrComputeSeekMask(actionData.ActionId);
+			else
+				mask = (reactionEngines.Count >= 63) ? long.MaxValue : ((1L << reactionEngines.Count) - 1);
+
+			for (int level = 0; level < MaxDepth; level++)
+			{
+				if ((mask & (1L << level)) == 0) continue;                             // ActionId cannot structurally satisfy this Seek
+				if (level > 0 && matchTree.OpenNodesAtDepth(level - 1) == 0) continue;  // no predecessor cursor at level-1 to expand
+				matchTree.TryMatchAtLevel(level, eventData, reactionEngines, script, symbolTable, cachedProgram, cachedProgramIsCanonical);
+			}
+		}
+
+		// Structural mask of an Action body: bit k set <=> Seek k structurally admits the body
+		// (all of its OnMatch patterns pass their QuickTest). Value-blind and invariant per
+		// ActionId. mask == 0 => the body matches no Seek (globally irrelevant to this Reaction).
+		private long ComputeSeekMask(string actionBodyText)
+		{
+			long mask = 0L;
+			for (int k = 0; k < reactionEngines.Count; k++)
+			{
+				if (reactionEngines[k].StructurallyAdmits(actionBodyText))
+					mask |= (1L << k);
+			}
+			return mask;
+		}
+
+		// Seek mask for an ActionId, memoized (lazy first-sighting build). Computed from the
+		// Action's FIXED body (entry.Script) via the registry — no argument values needed. An
+		// unknown ActionId (should not happen: Define precedes Invoke) is treated as irrelevant
+		// WITHOUT caching, so a later sighting recomputes once it is registered.
+		private long GetOrComputeSeekMask(int actionId)
+		{
+			if (actionIdSeekMask.TryGetValue(actionId, out long mask))
+				return mask;
+
+			if (!actorHandler.TryGetAction(actionId, out var entry) || entry.Script == null)
+				return 0L;
+
+			mask = ComputeSeekMask(entry.Script);
+			actionIdSeekMask[actionId] = mask;
+			return mask;
 		}
 
 		// Push-loop resilience: a single event whose match throws must NOT permanently

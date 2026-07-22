@@ -12,6 +12,13 @@ namespace Choreography.Transport
     // a PlaybillSchemaCue when a new schema is registered or an existing schema is
     // re-registered (idempotent), and a PlaybillCue when a new PlaybillRecord is
     // persisted. The Cast applies it to the local PlaybillStore.
+    //
+    // Density: the PlaybillCue carries ONLY the argument values, keyed by
+    // SchemaName. The column names+types travel once in the PlaybillSchemaCue and
+    // are guaranteed to reach the Cast first — live because both cues share the
+    // per-link FIFO queue, and on catch-up because SendCatchUpAsync sends all
+    // schemas before any records. So the record cue never needs to repeat the
+    // declarations; the schema name is the record's "action identity".
 
     public sealed class PlaybillSchemaCue : StageMessage
     {

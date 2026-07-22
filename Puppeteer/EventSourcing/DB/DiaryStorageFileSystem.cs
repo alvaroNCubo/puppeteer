@@ -57,6 +57,7 @@ namespace Puppeteer.EventSourcing.DB
 			string reactionsDir = Path.Combine(basePath, "reactions");
 			string elisionDir = Path.Combine(basePath, "elision");
 			string materializationDir = Path.Combine(basePath, "materialization");
+			string outboxDir = Path.Combine(basePath, "outbox");
 
 			Directory.CreateDirectory(journalDir);
 			Directory.CreateDirectory(skipsDir);
@@ -65,6 +66,7 @@ namespace Puppeteer.EventSourcing.DB
 			Directory.CreateDirectory(reactionsDir);
 			Directory.CreateDirectory(elisionDir);
 			Directory.CreateDirectory(materializationDir);
+			Directory.CreateDirectory(outboxDir);
 
 			this.atomicOp = AtomicFileOperationFactory.Create();
 
@@ -143,6 +145,13 @@ namespace Puppeteer.EventSourcing.DB
 				connectionString,
 				Path.Combine(materializationDir, "checkpoint.bin"),
 				atomicOp);
+
+			// Default durable outbox: a persistent local queue, the same local-buffer
+			// strategy the diary uses for perform-command writes. Partitioned by
+			// destination — one outbox-<destination>.bin per outputTarget under the
+			// outbox/ directory — so rows for different outputTargets never share a
+			// file. The base DiaryStorage.RecordOutboxWithCheckpoint records into it.
+			this.outboxStorage = new PartitionedOutboxStorageFileSystem(outboxDir, atomicOp);
 		}
 
 		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
@@ -434,6 +443,13 @@ namespace Puppeteer.EventSourcing.DB
 				return true;
 			}
 		}
+
+		// Journal-outbox emit uses the backend-agnostic default in the base
+		// DiaryStorage (monotonic detected-cursor guard + row insert + advance of
+		// BOTH cursors, over the abstract checkpoint primitives and the pluggable
+		// OutboxStorage). FileSystem wires OutboxStorageFileSystem as the outbox
+		// storage in its constructor, so the base default records durably here with
+		// no FileSystem-specific override. See DiaryStorage.RecordOutboxWithCheckpoint.
 
 		protected internal override MemoryStream Archive(DateTime startDate, DateTime endDate)
 		{

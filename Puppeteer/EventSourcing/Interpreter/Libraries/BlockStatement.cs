@@ -138,6 +138,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		internal override void PropagateProgram(Program program)
+		{
+			base.PropagateProgram(program);
+			foreach (Statement source in statements)
+			{
+				source.PropagateProgram(program);
+			}
+		}
+
 	}
 
 }

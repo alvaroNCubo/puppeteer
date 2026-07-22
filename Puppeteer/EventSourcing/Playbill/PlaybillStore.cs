@@ -36,6 +36,43 @@ namespace Puppeteer.EventSourcing.Playbill
 			this.Logger = logger;
 		}
 
+		// === Dense on-disk representation ===
+		//
+		// A record's persisted payload is the value-only argument string; the
+		// column names+types (declarations) are NOT repeated per record — they are
+		// resolved once from the schema registry (schema name is the key). To keep
+		// forward compatibility with records written before densification (which
+		// stored the full "declarations|arguments" blob), a dense record is tagged
+		// with a leading marker char. Read paths normalize back to the logical
+		// value-only form regardless of which representation is on disk; the marker
+		// never escapes the store (its public outputs and the replication wire
+		// always carry the logical value-only string).
+		//
+		// Disambiguation is unambiguous at position 0: a legacy record begins with
+		// its declarations (a parameter modifier such as "In"), never the marker.
+		internal const char DenseMarker = '\u0001';
+
+		// Wraps a logical value-only argument string into its dense on-disk form.
+		internal static string ToStoredArguments(string logicalArguments)
+		{
+			ArgumentNullException.ThrowIfNull(logicalArguments);
+			return DenseMarker + logicalArguments;
+		}
+
+		// Normalizes an on-disk payload (dense-marked OR legacy declarations|arguments)
+		// back to the logical value-only argument string.
+		internal static string ToLogicalArguments(string storedPayload)
+		{
+			ArgumentNullException.ThrowIfNull(storedPayload);
+			if (storedPayload.Length > 0 && storedPayload[0] == DenseMarker)
+			{
+				return storedPayload.Substring(1);
+			}
+			// Legacy blob: drop the declarations prefix (declarations never contain '|').
+			int separatorIndex = storedPayload.IndexOf('|');
+			return separatorIndex < 0 ? storedPayload : storedPayload.Substring(separatorIndex + 1);
+		}
+
 		// === Replication hooks (Phase 5) ===
 
 		// Fires after a successful RegisterSchema (new or idempotent). The

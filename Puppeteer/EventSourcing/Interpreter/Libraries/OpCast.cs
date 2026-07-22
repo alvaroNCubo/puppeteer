@@ -42,6 +42,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				result = typeof(int);
 			}
+			else if (string.Equals(name, "long", StringComparison.OrdinalIgnoreCase))
+			{
+				result = typeof(long);
+			}
 			else if (string.Equals(name, "decimal", StringComparison.OrdinalIgnoreCase) ||
 					 string.Equals(name, "double", StringComparison.OrdinalIgnoreCase))
 			{
@@ -67,6 +71,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					Type elementType;
 					if (string.Equals(strSubtype, "int", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(int);
+					else if (string.Equals(strSubtype, "long", StringComparison.OrdinalIgnoreCase))
+						elementType = typeof(long);
 					else if (string.Equals(strSubtype, "string", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(string);
 					else if (string.Equals(strSubtype, "datetime", StringComparison.OrdinalIgnoreCase))
@@ -108,6 +114,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else if (string.Equals(name, "int", StringComparison.OrdinalIgnoreCase))
 			{
 				result = typeof(int);
+			}
+			else if (string.Equals(name, "long", StringComparison.OrdinalIgnoreCase))
+			{
+				result = typeof(long);
 			}
 			else if (string.Equals(name, "decimal", StringComparison.OrdinalIgnoreCase) ||
 					 string.Equals(name, "double", StringComparison.OrdinalIgnoreCase))
@@ -167,8 +177,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type nonNullableSource = Nullable.GetUnderlyingType(source) ?? source;
 			Type nonNullableTarget = Nullable.GetUnderlyingType(target) ?? target;
 
-			if ((nonNullableSource == typeof(int) || nonNullableSource == typeof(double) || nonNullableSource == typeof(decimal)) &&
-			(nonNullableTarget == typeof(int) || nonNullableTarget == typeof(double) || nonNullableTarget == typeof(decimal)))
+			if (AstExpression.IsPromotableNumeric(nonNullableSource) && AstExpression.IsPromotableNumeric(nonNullableTarget))
 				return true;
 
 			if (nonNullableSource == typeof(DateTime) || nonNullableTarget == typeof(DateTime))
@@ -236,6 +245,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                     return value;
                 else if (valueType == typeof(int))
                     return "" + (int)value;
+                else if (valueType == typeof(long))
+                    return "" + (long)value;
                 else if (valueType == typeof(double))
                     return "" + (double)value;
                 else if (valueType == typeof(bool))
@@ -258,6 +269,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
 				if (valueType == typeof(int))
 					return value;
+				else if (valueType == typeof(long))
+					return (int)(long)value;
 				else if (valueType == typeof(double))
 					return (int)(double)value;
 				else if (valueType == typeof(string))
@@ -275,12 +288,39 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				else
 					throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
+            else if (cast == typeof(long))
+            {
+				if (valueType == typeof(long))
+					return value;
+				else if (valueType == typeof(int))
+					return (long)(int)value;
+				else if (valueType == typeof(double))
+					return (long)(double)value;
+				else if (valueType == typeof(decimal))
+					return (long)(decimal)value;
+				else if (valueType == typeof(string))
+				{
+					long longValue;
+					if (long.TryParse((string)value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out longValue))
+						return longValue;
+					else
+						throw new LanguageException($"Invalid cast from {valueType} to {cast}");
+				}
+				else if (valueType == typeof(bool))
+					return Convert.ToInt64((bool)value);
+				else if (valueType == typeof(object) && value != null)
+					return Convert.ToInt64(value);
+				else
+					throw new LanguageException($"Invalid cast from {valueType} to {cast}");
+            }
             else if (cast == typeof(double))
             {
 				if (valueType == typeof(double))
 					return value;
 				else if (valueType == typeof(int))
 					return (double)(int)value;
+				else if (valueType == typeof(long))
+					return (double)(long)value;
 				else if (valueType == typeof(string))
 				{
 					double decimalValue;
@@ -302,6 +342,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                     return value;
                 else if (valueType == typeof(int))
                     return (double)(int)value;
+                else if (valueType == typeof(long))
+                    return Convert.ToDecimal((long)value);
                 else if (valueType == typeof(string))
                 {
                     double decimalValue;
@@ -338,6 +380,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 }
                 else if (valueType == typeof(int))
                     return (int)value != 0;
+                else if (valueType == typeof(long))
+                    return (long)value != 0;
                 else if (valueType == typeof(double))
                     return (double)value != 0;
                 else
@@ -450,7 +494,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					return expr;
 				}
-				else if (sourceType == typeof(int) || sourceType == typeof(double) || sourceType == typeof(bool))
+				else if (sourceType == typeof(int) || sourceType == typeof(long) || sourceType == typeof(double) || sourceType == typeof(bool))
 				{
 					var toStringMethod = sourceType.GetMethod(nameof(String.ToString), Type.EmptyTypes);
 					return Expression.Call(expr, toStringMethod);
@@ -480,6 +524,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					return expr;
 				}
+				else if (sourceType == typeof(long))
+				{
+					return Expression.Convert(expr, typeof(int));
+				}
 				else if (sourceType == typeof(double))
 				{
 					return Expression.Convert(expr, typeof(int));
@@ -503,6 +551,39 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					throw new LanguageException($"Invalid cast from {sourceType} to {targetType} in Expression.");
 				}
 			}
+			else if (targetType == typeof(long))
+			{
+				if (sourceType == typeof(long))
+				{
+					return expr;
+				}
+				else if (sourceType == typeof(int))
+				{
+					return Expression.Convert(expr, typeof(long));
+				}
+				else if (sourceType == typeof(double) || sourceType == typeof(decimal))
+				{
+					return Expression.Convert(expr, typeof(long));
+				}
+				else if (sourceType == typeof(string))
+				{
+					var parseMethod = typeof(long).GetMethod(nameof(Int64.Parse), new[] { typeof(string) });
+					return Expression.Call(parseMethod, expr);
+				}
+				else if (sourceType == typeof(bool))
+				{
+					return Expression.Condition(expr, Expression.Constant(1L, typeof(long)), Expression.Constant(0L, typeof(long)));
+				}
+				else if (sourceType == typeof(object))
+				{
+					var toLongMethod = typeof(Convert).GetMethod(nameof(Convert.ToInt64), new[] { typeof(object) });
+					return Expression.Call(toLongMethod, expr);
+				}
+				else
+				{
+					throw new LanguageException($"Invalid cast from {sourceType} to {targetType} in Expression.");
+				}
+			}
 			else if (targetType == typeof(double))
 			{
 				if (sourceType == typeof(double))
@@ -510,6 +591,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					return expr;
 				}
 				else if (sourceType == typeof(int))
+				{
+					return Expression.Convert(expr, typeof(double));
+				}
+				else if (sourceType == typeof(long))
 				{
 					return Expression.Convert(expr, typeof(double));
 				}
@@ -540,6 +625,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					return expr;
 				}
 				else if (sourceType == typeof(int))
+				{
+					return Expression.Convert(expr, typeof(decimal));
+				}
+				else if (sourceType == typeof(long))
 				{
 					return Expression.Convert(expr, typeof(decimal));
 				}
@@ -605,6 +694,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				else if (sourceType == typeof(int))
 				{
 					return Expression.NotEqual(expr, Expression.Constant(0, typeof(int)));
+				}
+				else if (sourceType == typeof(long))
+				{
+					return Expression.NotEqual(expr, Expression.Constant(0L, typeof(long)));
 				}
 				else if (sourceType == typeof(double))
 				{

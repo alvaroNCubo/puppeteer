@@ -100,6 +100,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		internal override void PropagateProgram(Program program)
+		{
+			base.PropagateProgram(program);
+			foreach (Statement source in body)
+			{
+				source.PropagateProgram(program);
+			}
+		}
+
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
 			if (WasFiltered) return;

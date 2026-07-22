@@ -27,7 +27,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			// Supported primitive types
 			bool isPrimitive(Type t) =>
-				t == typeof(int) || t == typeof(double) || t == typeof(decimal) ||
+				t == typeof(int) || t == typeof(long) || t == typeof(double) || t == typeof(decimal) ||
 				t == typeof(DateTime) || t == typeof(bool);
 
 			// Comparison between a primitive and object (in any order)
@@ -53,8 +53,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				((col2.IsArray || col2.IsGenericType) && type1 == typeof(object));
 
 			// Allow comparison between compatible numeric types
-			bool ambosNumericos = (type1 == typeof(int) || type1 == typeof(double) || type1 == typeof(decimal))
-			&& (type2 == typeof(int) || type2 == typeof(double) || type2 == typeof(decimal));
+			bool ambosNumericos = IsPromotableNumeric(type1) && IsPromotableNumeric(type2);
 
 			// Allow comparison between strings
 			bool ambosString = type1 == typeof(string) && type2 == typeof(string);
@@ -111,32 +110,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type type1 = object1 == null ? null : object1.GetType();
 			Type type2 = object2 == null ? null : object2.GetType();
 
-			if (type1 == typeof(int) && type2 == typeof(int))
-				return (int)object1 == (int)object2;
-
-			if (type1 == typeof(int) && type2 == typeof(double))
-				return Convert.ToDouble(object1) == (double)object2;
-
-			if (type1 == typeof(int) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) == (decimal)object2;
-
-			if (type1 == typeof(double) && type2 == typeof(int))
-				return (double)object1 == Convert.ToDouble(object2);
-
-			if (type1 == typeof(double) && type2 == typeof(double))
-				return (double)object1 == (double)object2;
-
-			if (type1 == typeof(double) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) == (decimal)object2;
-
-			if (type1 == typeof(decimal) && type2 == typeof(int))
-				return (decimal)object1 == Convert.ToDecimal(object2);
-
-			if (type1 == typeof(decimal) && type2 == typeof(double))
-				return (decimal)object1 == Convert.ToDecimal(object2);
-
-			if (type1 == typeof(decimal) && type2 == typeof(decimal))
-				return (decimal)object1 == (decimal)object2;
+			if (type1 != null && type2 != null && IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
+			{
+				Type promoted = PromotesTo(type1, type2);
+				object a = CoerceNumericValue(object1, promoted);
+				object b = CoerceNumericValue(object2, promoted);
+				if (promoted == typeof(int)) return (int)a == (int)b;
+				if (promoted == typeof(long)) return (long)a == (long)b;
+				if (promoted == typeof(double)) return (double)a == (double)b;
+				return (decimal)a == (decimal)b;
+			}
 
 			if (type1 == typeof(string) && type2 == typeof(string))
 				return (string)object1 == (string)object2;
@@ -412,7 +395,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		// Expression helpers
 		private static bool IsNumericType(Type type)
 		{
-			return type == typeof(int) || type == typeof(double) || type == typeof(decimal);
+			return type == typeof(int) || type == typeof(long) || type == typeof(double) || type == typeof(decimal);
 		}
 
 		private static Type GetWidestNumericType(Type t1, Type t2)
@@ -421,6 +404,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return typeof(decimal);
 			if (t1 == typeof(double) || t2 == typeof(double))
 				return typeof(double);
+			if (t1 == typeof(long) || t2 == typeof(long))
+				return typeof(long);
 			return typeof(int);
 		}
 
@@ -490,26 +475,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type ta = a.GetType();
 			Type tb = b.GetType();
 
-			if (ta == typeof(int) && tb == typeof(int))
-				return (int)a == (int)b;
-			if (ta == typeof(int) && tb == typeof(double))
-				return Convert.ToDouble(a) == (double)b;
-			if (ta == typeof(int) && tb == typeof(decimal))
-				return Convert.ToDecimal(a) == (decimal)b;
-			if (ta == typeof(double) && tb == typeof(int))
-				return (double)a == Convert.ToDouble(b);
-			if (ta == typeof(double) || tb == typeof(double))
-				return Convert.ToDouble(a) == Convert.ToDouble(b);
-			if (ta == typeof(double) && tb == typeof(decimal))
-				return Convert.ToDecimal(a) == (decimal)b;
-			if (ta == typeof(decimal) && tb == typeof(int))
-				return (decimal)a == Convert.ToDecimal(b);
-			if (ta == typeof(decimal) && tb == typeof(double))
-				return (decimal)a == Convert.ToDecimal(b);
-			if (ta == typeof(decimal) || tb == typeof(decimal))
-				return Convert.ToDecimal(a) == Convert.ToDecimal(b);
-			// If they are not compatible numeric types, they are not equal
-			return false;
+			if (!IsNumericType(ta) || !IsNumericType(tb))
+			{
+				// If they are not compatible numeric types, they are not equal
+				return false;
+			}
+
+			// Compare at the widest common numeric type (long now included, between int and double).
+			Type widest = GetWidestNumericType(ta, tb);
+			if (widest == typeof(int)) return Convert.ToInt32(a) == Convert.ToInt32(b);
+			if (widest == typeof(long)) return Convert.ToInt64(a) == Convert.ToInt64(b);
+			if (widest == typeof(double)) return Convert.ToDouble(a) == Convert.ToDouble(b);
+			return Convert.ToDecimal(a) == Convert.ToDecimal(b);
 		}
 
 		private static bool SequenceCompare<T>(IEnumerable<T> source1, IEnumerable<T> source2)

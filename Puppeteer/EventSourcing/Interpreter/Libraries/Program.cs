@@ -183,11 +183,22 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         private bool ComputeContainsTell()
         {
             if (statements == null) return false;
+            // The framework-emitted tell sentences (ack / unacknowledged) are always
+            // a single top-level statement, so a direct scan detects them.
             for (int i = 0; i < statements.Count; i++)
             {
                 if (statements[i] is TellStatement) return true;
             }
-            return false;
+            // A user-authored `tell` (AssertiveTellStatement) can be nested inside an
+            // if/foreach block, exactly as an expose can. A nested tell has no
+            // compiled-mode lowering either, so it must force the WHOLE program
+            // interpreted — a nested tell that slipped through would compile and trip
+            // the compiled-execution invariant in TellStatement.ExecuteExpression.
+            // Walk the AST to find it at any depth. (Collect matches by exact type;
+            // the abstract TellStatement is never a node's concrete type, so the
+            // concrete AssertiveTellStatement — the only user-authorable, nestable
+            // tell — is the node to seek.)
+            return Collect<AssertiveTellStatement>().Any();
         }
 
         // An `expose` has no compiled-mode lowering: the compiled path
@@ -201,7 +212,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         // AdjustCompilationMode uses this to force the WHOLE program interpreted,
         // exactly as ContainsTell does — the interpreter routes the expose to its
         // separate buffer and sets LastExposeData, making capture policy-invariant.
-        // Unlike a tell, an expose can be nested inside a foreach/if body, so the
+        // Like a tell, an expose can be nested inside a foreach/if body, so the
         // detection walks the AST (memoized: statements are immutable after parse).
         internal bool ContainsExpose
         {
@@ -821,7 +832,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
         {
 			foreach (var source in this.statements)
 			{
-				source.Program = this;
+				source.PropagateProgram(this);
 			}
 		}
 

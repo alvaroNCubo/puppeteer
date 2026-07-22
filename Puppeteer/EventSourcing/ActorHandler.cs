@@ -261,6 +261,26 @@ namespace Puppeteer.EventSourcing
 			SkipPreviewEnabled = true;
 		}
 
+		// Trajectory-index event routing. When on, Reaction.ReplayEvent routes each event
+		// only to the Seek levels its ActionId can structurally satisfy (and that have a
+		// live predecessor cursor), instead of attempting every level. A pure performance
+		// path — it prunes only provably-failing attempts, so results are identical to the
+		// naive full-level scan (parity is green across the whole suite in both modes).
+		// Default ON. It can be disabled process-wide via PUPPETEER_REACTION_ROUTING=0
+		// (a kill-switch that restores the full-level scan); per-actor code (and tests) may
+		// still override per instance.
+		private static readonly bool ReactionEventRoutingDefault = ReadRoutingDefaultFromEnvironment();
+		internal bool ReactionEventRoutingEnabled { get; set; } = ReactionEventRoutingDefault;
+
+		private static bool ReadRoutingDefaultFromEnvironment()
+		{
+			string v = Environment.GetEnvironmentVariable("PUPPETEER_REACTION_ROUTING");
+			// Explicit opt-out only; absent or any other value keeps the ON default.
+			bool optOut = string.Equals(v, "0", StringComparison.Ordinal)
+				|| string.Equals(v, "false", StringComparison.OrdinalIgnoreCase);
+			return !optOut;
+		}
+
 		// Shadow replay source: the primary actor's journal in read-only
 		// mode. Set only on the shadow handler (via CreateShadow). The
 		// shadow reads raw records from the primary through SyncUntil and re-applies them against
@@ -3490,23 +3510,30 @@ namespace Puppeteer.EventSourcing
 			if (currentTransition == ActorTransitions.Recovering) return $"Invalid transition from {currentTransition} to {ActorTransitions.Recovering}";
 			if (currentTransition == ActorTransitions.Lock) return $"Invalid transition from {currentTransition} to {ActorTransitions.Recovering}";
 
-			// The write lock is thread-affine (ReaderWriterLockSlim): it must be
-			// acquired and released on the same thread, and the catch-up loop below runs
-			// until the operator calls UnlockAndRunAlive (possibly indefinitely). So the
-			// loop owns a background thread while this method returns promptly — but only
-			// AFTER the lock is engaged, so the caller observes a genuinely locked actor.
-			// The handoff is a blocking wait on this signal (no busy-spin, proper memory
-			// barrier); a failure to acquire propagates to the caller instead of hanging.
+			// The catch-up replays an already-journaled tail exactly like the initial
+			// rehydration, so it WRITES the actor's in-memory state and must serialize under
+			// the write lock (thread-affine ReaderWriterLockSlim: acquired and released on the
+			// same thread — the loop below stays on one background thread). The lock is taken
+			// PER BATCH, not once for the whole window: an earlier version held a single write
+			// lock from here until UnlockAndRunAlive let the loop exit (possibly indefinitely),
+			// which starved every read — a fenced replica keeps reporting readiness through a
+			// lock-free flag, yet any PerformQry (read lock) blocked for the entire catch-up,
+			// including the idle wait after the head was reached. A fenced follower is the SOLE
+			// writer of its own state (1-writer: the primary owns the shared journal), so the
+			// lock only has to serialize each replayed batch; releasing it between batches lets
+			// reads interleave and complete in bounded time while the follower catches up. This
+			// mirrors the Cast's per-entry apply.
+			//
+			// The caller is unblocked as soon as the write lock is first engaged (so the method
+			// returns promptly, before the first replay), via a blocking wait on this signal (no
+			// busy-spin, proper memory barrier); a failure to acquire propagates to the caller
+			// instead of hanging.
 			var enteredLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
 			RecoveringStatusIsRunning = true;
 			_ = Task.Run(() =>
 			{
-				try { rwLock.EnterWriteLock(); }
-				catch (Exception ex) { enteredLock.SetException(ex); return; }
-
-				enteredLock.SetResult();
-
+				bool signaledEntered = false;
 				try
 				{
 					long lastIdAfterRecoveredState = 0;
@@ -3518,7 +3545,27 @@ namespace Puppeteer.EventSourcing
 					while (!shouldExit)
 					{
 						previousLastIdAfterRecoveredState = lastIdAfterRecoveredState;
-						lastIdAfterRecoveredState = ReplayPendingEventsForRedBlack();
+
+						// Brief per-batch write lock: held only while applying the replayed
+						// tail, released before the inter-batch sleep so reads flow in the gap.
+						try { rwLock.EnterWriteLock(); }
+						catch (Exception ex)
+						{
+							if (!signaledEntered) { enteredLock.SetException(ex); signaledEntered = true; }
+							return;
+						}
+						// Signal on the FIRST acquisition (before the replay): the caller observes
+						// a catch-up that is genuinely running, and LockWhileNotSyncronized returns
+						// promptly even when the first batch replays a large tail.
+						if (!signaledEntered) { enteredLock.SetResult(); signaledEntered = true; }
+						try
+						{
+							lastIdAfterRecoveredState = ReplayPendingEventsForRedBlack();
+						}
+						finally
+						{
+							rwLock.ExitWriteLock();
+						}
 
 						Debug.WriteLine("New Actor Version is trying to reach last Entry Id: " + lastIdAfterRecoveredState);
 						Thread.Sleep(TimeSpan.FromSeconds(0.5));
@@ -3553,7 +3600,9 @@ namespace Puppeteer.EventSourcing
 				}
 				finally
 				{
-					rwLock.ExitWriteLock();
+					// Never leave the caller blocked: if the loop threw before the first batch
+					// engaged the lock and signaled, release the handoff signal here.
+					if (!signaledEntered) enteredLock.SetResult();
 				}
 			});
 

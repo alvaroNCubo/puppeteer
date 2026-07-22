@@ -19,8 +19,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			var typeE1 = e1.ComputeType();
 			var typeE2 = e2.ComputeType();
-			bool validTypes = (typeE1 == typeof(int) || typeE1 == typeof(double) || typeE1 == typeof(decimal) || typeE1 == typeof(DateTime)) &&
-				(typeE2 == typeof(int) || typeE2 == typeof(double) || typeE2 == typeof(decimal) || typeE2 == typeof(DateTime));
+			bool validTypes = (IsPromotableNumeric(typeE1) || typeE1 == typeof(DateTime)) &&
+				(IsPromotableNumeric(typeE2) || typeE2 == typeof(DateTime));
 			bool ambosTimeSpan = typeE1 == typeof(TimeSpan) && typeE2 == typeof(TimeSpan);
 			if (!validTypes && !ambosTimeSpan)
 			{
@@ -37,32 +37,16 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type type1 = object1.GetType();
 			Type type2 = object2.GetType();
 
-			if (type1 == typeof(int) && type2 == typeof(int))
-				return (int)object1 <= (int)object2;
-
-			if (type1 == typeof(int) && type2 == typeof(double))
-				return Convert.ToDouble(object1) <= (double)object2;
-
-			if (type1 == typeof(int) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) <= (decimal)object2;
-
-			if (type1 == typeof(double) && type2 == typeof(int))
-				return (double)object1 <= Convert.ToDouble(object2);
-
-			if (type1 == typeof(double) && type2 == typeof(double))
-				return (double)object1 <= (double)object2;
-
-			if (type1 == typeof(double) && type2 == typeof(decimal))
-				return Convert.ToDecimal(object1) <= (decimal)object2;
-
-			if (type1 == typeof(decimal) && type2 == typeof(int))
-				return (decimal)object1 <= Convert.ToDecimal(object2);
-
-			if (type1 == typeof(decimal) && type2 == typeof(double))
-				return (decimal)object1 <= Convert.ToDecimal(object2);
-
-			if (type1 == typeof(decimal) && type2 == typeof(decimal))
-				return (decimal)object1 <= (decimal)object2;
+			if (IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
+			{
+				Type promoted = PromotesTo(type1, type2);
+				object a = CoerceNumericValue(object1, promoted);
+				object b = CoerceNumericValue(object2, promoted);
+				if (promoted == typeof(int)) return (int)a <= (int)b;
+				if (promoted == typeof(long)) return (long)a <= (long)b;
+				if (promoted == typeof(double)) return (double)a <= (double)b;
+				return (decimal)a <= (decimal)b;
+			}
 
 			if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
 				return (DateTime)object1 <= (DateTime)object2;
@@ -87,32 +71,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			Type type1 = left.Type;
 			Type type2 = right.Type;
 
-			if (type1 == typeof(int) && type2 == typeof(int))
-				return Expression.LessThanOrEqual(left, right);
-
-			if (type1 == typeof(int) && type2 == typeof(double))
-				return Expression.LessThanOrEqual(Expression.Convert(left, typeof(double)), right);
-
-			if (type1 == typeof(int) && type2 == typeof(decimal))
-				return Expression.LessThanOrEqual(Expression.Convert(left, typeof(decimal)), right);
-
-			if (type1 == typeof(double) && type2 == typeof(int))
-				return Expression.LessThanOrEqual(left, Expression.Convert(right, typeof(double)));
-
-			if (type1 == typeof(double) && type2 == typeof(double))
-				return Expression.LessThanOrEqual(left, right);
-
-			if (type1 == typeof(double) && type2 == typeof(decimal))
-				return Expression.LessThanOrEqual(Expression.Convert(left, typeof(decimal)), right);
-
-			if (type1 == typeof(decimal) && type2 == typeof(int))
-				return Expression.LessThanOrEqual(left, Expression.Convert(right, typeof(decimal)));
-
-			if (type1 == typeof(decimal) && type2 == typeof(double))
-				return Expression.LessThanOrEqual(left, Expression.Convert(right, typeof(decimal)));
-
-			if (type1 == typeof(decimal) && type2 == typeof(decimal))
-				return Expression.LessThanOrEqual(left, right);
+			if (IsPromotableNumeric(type1) && IsPromotableNumeric(type2))
+			{
+				Type promoted = PromotesTo(type1, type2);
+				return Expression.LessThanOrEqual(CoerceNumericExpression(left, promoted), CoerceNumericExpression(right, promoted));
+			}
 
 			if (type1 == typeof(DateTime) && type2 == typeof(DateTime))
 				return Expression.LessThanOrEqual(left, right);

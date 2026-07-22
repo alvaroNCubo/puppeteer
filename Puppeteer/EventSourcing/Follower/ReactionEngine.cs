@@ -59,6 +59,22 @@ namespace Puppeteer.EventSourcing.Follower
 
 		internal Patterns Patterns => patterns;
 
+		// Router support (Tier-1). This Seek can only match an event whose Action body
+		// structurally admits ALL of its OnMatch patterns (the multi-OnMatch contract:
+		// every OnMatch must match the same script). AND over the patterns; a Seek with no
+		// pattern admits nothing. The verdict is invariant per ActionId, so the router
+		// memoizes it (see Pattern.StructurallyAdmits).
+		internal bool StructurallyAdmits(string actionBodyText)
+		{
+			ArgumentNullException.ThrowIfNull(actionBodyText);
+			if (patterns.Count == 0) return false;
+			for (int i = 0; i < patterns.Count; i++)
+			{
+				if (!patterns[i].StructurallyAdmits(actionBodyText)) return false;
+			}
+			return true;
+		}
+
 		internal Reaction Reaction => reaction;
 
 		internal bool IsFinalSeek => isFinalSeek;
@@ -76,7 +92,9 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException("Where cannot be chained more than once on the same Seek. Combine conditions with && inside the same expression.");
 
 			// PHASE 7: build-time validation of always-false comparisons.
-			// @Now and @EntryId are non-nullable types; comparing them against null is never true.
+			// @OccurredAt is a non-nullable DateTime; comparing it against null is never true.
+			// The DSL compiler does not reject this (it lifts to a nullable comparison that is
+			// simply always-false), so this build-time lint is not redundant with it.
 			ValidateNonNullableNotComparedAgainstNull(expression);
 
 			this.whereExpression = expression;
@@ -85,7 +103,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 		private static void ValidateNonNullableNotComparedAgainstNull(string expression)
 		{
-			string[] nonNullableSymbols = { "@Now", "@EntryId" };
+			string[] nonNullableSymbols = { "@OccurredAt" };
 			foreach (var symbol in nonNullableSymbols)
 			{
 				if (System.Text.RegularExpressions.Regex.IsMatch(expression, $@"{System.Text.RegularExpressions.Regex.Escape(symbol)}\s*(==|!=)\s*null", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
@@ -324,6 +342,20 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			Interlocked.Exchange(ref seekEntered, 0);
 			Interlocked.Exchange(ref seekMatched, 0);
+		}
+
+		// Collects the value-capture names bound by this Seek's OnMatch patterns (each
+		// '$name' stripped of its '$'). Every OnMatch of a Seek must match the same script,
+		// so their capture sets coincide; the union is taken defensively. Used at
+		// definition time to prove a ForEach source collection was captured by a prior Seek.
+		internal void CollectCaptureNames(ISet<string> names)
+		{
+			ArgumentNullException.ThrowIfNull(names);
+
+			for (int i = 0; i < patterns.Count; i++)
+			{
+				patterns[i].CollectCaptureNames(names);
+			}
 		}
 	}
 }

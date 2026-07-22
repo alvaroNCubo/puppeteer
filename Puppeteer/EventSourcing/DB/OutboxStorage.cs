@@ -29,9 +29,32 @@ namespace Puppeteer.EventSourcing.DB
 		// OutboxId (recording order), to result.
 		internal abstract void ReadUndelivered(List<OutboxRecord> result);
 
+		// Relay discovery, scoped to one destination. Default filters the aggregate;
+		// a partitioned store (one file per destination) overrides it to read only
+		// that destination's partition. Lets the relay drain each outputTarget's own
+		// queue to its own sink.
+		internal virtual void ReadUndelivered(string destination, List<OutboxRecord> result)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+			ArgumentNullException.ThrowIfNull(result);
+
+			ReadUndelivered(result);
+			result.RemoveAll(r => !string.Equals(r.Destination, destination, StringComparison.Ordinal));
+		}
+
 		// Relay ack: flip the row to delivered. Idempotent and monotonic — marking
 		// an already-delivered row, or an unknown id, returns false.
 		internal abstract bool MarkDelivered(long outboxId, DateTime deliveredAt);
+
+		// Relay ack by row. Default delegates to MarkDelivered(OutboxId). A
+		// partitioned store overrides it to route by Destination, because OutboxId is
+		// only unique within a partition (each per-destination file numbers its own
+		// rows). The relay always has the full row, so it uses this overload.
+		internal virtual bool MarkDelivered(OutboxRecord record, DateTime deliveredAt)
+		{
+			ArgumentNullException.ThrowIfNull(record);
+			return MarkDelivered(record.OutboxId, deliveredAt);
+		}
 
 		internal abstract bool IsRecorded(string idempotencyKey);
 

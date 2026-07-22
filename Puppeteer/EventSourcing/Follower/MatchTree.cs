@@ -224,6 +224,14 @@ namespace Puppeteer.EventSourcing.Follower
 		private long totalNodesPruned = 0;
 		private long totalNodesCreated = 0;
 
+		// Router support: live count of open MatchNodes per trajectory depth. Maintained
+		// incrementally (++ at each node creation via CountNodeCreated, -- in PruneNode),
+		// so the forward router can skip a Seek level k>0 when no cursor sits at depth
+		// k-1 (there is no predecessor to expand). Indexed by MatchNode.CurrentDepth;
+		// sized to the hard depth cap. Not consumed until routing is wired in; kept exact
+		// regardless so the router can trust it.
+		private readonly long[] openNodesAtDepth;
+
 		// Reusable buffers to avoid allocations in hot paths
 		private readonly Dictionary<int, long> _checkpointBuffer = new Dictionary<int, long>();
 		private readonly List<MatchNode> _nodesAtDepthBuffer = new List<MatchNode>();
@@ -251,10 +259,29 @@ namespace Puppeteer.EventSourcing.Follower
 			this.forEachSpec = forEachSpec;
 			this.roots = new List<MatchNode>();
 			this.nodePool = new MatchNodePool(poolSize);
+			this.openNodesAtDepth = new long[maxDepth];
 		}
 
 		internal long TotalNodesPruned => totalNodesPruned;
 		internal long TotalNodesCreated => totalNodesCreated;
+
+		// Router support: number of open cursors currently sitting at `depth`. Out-of-range
+		// depths report 0 (nothing to expand there). See openNodesAtDepth.
+		internal long OpenNodesAtDepth(int depth)
+		{
+			if (depth < 0 || depth >= openNodesAtDepth.Length) return 0;
+			return openNodesAtDepth[depth];
+		}
+
+		// Single choke point for node creation accounting: bumps the lifetime counter and
+		// the per-depth open count. Every site that adds a MatchNode to the tree calls this
+		// (with CurrentDepth already set); PruneNode is the sole decrementer.
+		private void CountNodeCreated(MatchNode node)
+		{
+			totalNodesCreated++;
+			int d = node.CurrentDepth;
+			if (d >= 0 && d < openNodesAtDepth.Length) openNodesAtDepth[d]++;
+		}
 		internal void TryMatchAtLevel(int level, EventData eventData, List<ReactionEngine> engines, string script, SymbolTable symbolTable, Program cachedProgram = null, bool cachedProgramIsCanonical = false)
 		{
 			ArgumentNullException.ThrowIfNull(eventData);
@@ -271,19 +298,11 @@ namespace Puppeteer.EventSourcing.Follower
 				return;
 			}
 
-			// K.2 + I.time: tick before processing the event. Closes expired
-			// windows (pending Exact-nodes whose window is now behind vs
-			// currentEntryId or currentOccurredAt). Only at level=0 because
-			// ReplayEvent iterates levels sequentially for a single event —
-			// one tick per event is enough. The tick may trigger fires (Exact
-			// at FinalSeek) or prunes (count != expected).
-			if (level == 0)
-			{
-				TickPendingExactNodes(eventData.EntryId, eventData.OccurredAt);
-				// F3 .Aged: the incoming event advances the front; fires the coverage
-				// matches that are complete and whose closing confirm has aged 'span'.
-				TickPendingCoverageSettle(eventData.OccurredAt);
-			}
+			// Per-event window/settle housekeeping has been lifted to TickHousekeeping,
+			// invoked once per event by ReplayEvent BEFORE the per-level dispatch — so it
+			// runs regardless of which Seek levels are attempted. This is the prerequisite
+			// for event routing (skipping levels an event's ActionId cannot satisfy) to
+			// preserve window/settle firing timing.
 
 			// Decide which mode applies at this level.
 			HydrationMode effectiveMode = GetEffectiveModeForLevel(level);
@@ -300,6 +319,20 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				ProcessDepthFirst(level, eventData, engines, script, symbolTable, cachedProgram, cachedProgramIsCanonical);
 			}
+		}
+
+		// Per-event housekeeping, lifted out of TryMatchAtLevel's former `level == 0`
+		// special case so it runs EXACTLY ONCE per event, before the per-level match
+		// dispatch and independent of which Seek levels are attempted. It advances the
+		// journal front for the pending-window machinery: TickPendingExactNodes closes
+		// expired Exact/None/Within windows (may fire at a FinalSeek or prune on a count
+		// mismatch); TickPendingCoverageSettle ages .Aged coverage settles. Kept separate
+		// from the match attempts so that, once event routing skips levels, window/settle
+		// firing timing stays identical to the naive full-level scan.
+		internal void TickHousekeeping(long currentEntryId, DateTime currentOccurredAt)
+		{
+			TickPendingExactNodes(currentEntryId, currentOccurredAt);
+			TickPendingCoverageSettle(currentOccurredAt);
 		}
 
 		private HydrationMode GetEffectiveModeForLevel(int level)
@@ -504,7 +537,7 @@ namespace Puppeteer.EventSourcing.Follower
 						child.LastExpansionAttemptEntryId = eventData.EntryId;
 
 						node.Children.Add(child);
-						totalNodesCreated++;
+						CountNodeCreated(child);
 
 						// K.2: if the next engine is Exact, pre-create its placeholder.
 						MaybeCreateEagerExactChild(child, level, engines);
@@ -610,7 +643,7 @@ namespace Puppeteer.EventSourcing.Follower
 					node.LastExpansionAttemptEntryId = eventData.EntryId;
 
 					roots.Add(node);
-					totalNodesCreated++;
+					CountNodeCreated(node);
 
 					// ForEach (F1b): the root Seek is the captor; materializes the set of
 					// obligations (cartesian product of the captured source collections).
@@ -799,7 +832,7 @@ namespace Puppeteer.EventSourcing.Follower
 				{
 					parent.Children.Add(node);
 				}
-				totalNodesCreated++;
+				CountNodeCreated(node);
 
 				// K.2: if the next engine is Exact, pre-create its placeholder.
 				MaybeCreateEagerExactChild(node, level, engines);
@@ -945,6 +978,20 @@ namespace Puppeteer.EventSourcing.Follower
 				engine.IncrementSeekMatched();
 
 				bool exactHasWindow = engine.HasWithinWindow;
+				int expected = engine.ExactCount.Value;
+
+				// None/Exactly(0) with NO window: the boundary is the SUBSEQUENT seek, not a window.
+				// The child was born satisfied (count 0) and advanceable, so the next seek advances
+				// while the forbidden event is absent. A single matching (forbidden) event VIOLATES
+				// the "zero" — prune the child, which removes the only node the next seek could
+				// advance from, so the trajectory cannot complete. (A FINAL None has no next seek to
+				// bound it; it requires .Within, enforced at definition — so this branch is only
+				// reached by a non-final None.)
+				if (!exactHasWindow && expected == 0)
+				{
+					PruneNode(exactNode);
+					return;
+				}
 
 				// No-window n>=1: once the count reached n (node satisfied/advanceable) the cycle is
 				// closed — ignore any further match into it. We are NOT verifying "no (n+1)-th"; that
@@ -965,8 +1012,6 @@ namespace Puppeteer.EventSourcing.Follower
 					exactNode.OccurredAt = eventData.OccurredAt;
 				}
 
-				int expected = engine.ExactCount.Value;
-
 				if (exactHasWindow)
 				{
 					// Strict windowed mode: eager-fail on overflow; the satisfaction fire happens in
@@ -983,7 +1028,10 @@ namespace Puppeteer.EventSourcing.Follower
 					// NOW — no boundary needed (None/Exactly(0) is the only case that needs one, and
 					// it is rejected at definition without .Within).
 					exactNode.IsAdvanceable = true;
-					if (engine.IsFinalSeek)
+					// Complete when this is the LAST seek (nothing after it), same as the regular path
+					// (level == engines.Count - 1). NOT engine.IsFinalSeek: the last ThenSeek is also
+					// terminal even without the explicit ThenFinalSeek marker.
+					if (level == engines.Count - 1)
 					{
 						// Fire the elide, then prune the now-closed cycle so its anchor leaves the open
 						// set — this keeps the pass O(N) instead of re-visiting a settled anchor on
@@ -1124,10 +1172,12 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 		// K.2: eager-creation of the Exact-child when a parent is created. If engines[parentLevel+1]
-		// is Exact, immediately creates the placeholder node with AccumulatedCount=0,
-		// IsAdvanceable=false. The window is evaluated at the tick when an event arrives
-		// with EntryId > parent.anchor + within. If a match of the Exact pattern arrives first,
-		// AccumulatedCount rises; eager-fail if it exceeds expected.
+		// is Exact, immediately creates the placeholder node with AccumulatedCount=0.
+		// IsAdvanceable starts false (the node must first satisfy its count) EXCEPT for a no-window
+		// None/Exactly(0): "zero" is satisfied from the start, so it is born ADVANCEABLE — the next
+		// seek can advance through it while the forbidden event is absent, and a matching forbidden
+		// event prunes it (see TryMatchOrAccumulateExact). Windowed exacts and n>=1 stay false until
+		// their count/window resolves.
 		private void MaybeCreateEagerExactChild(MatchNode parent, int parentLevel, List<ReactionEngine> engines)
 		{
 			ArgumentNullException.ThrowIfNull(parent);
@@ -1142,6 +1192,8 @@ namespace Puppeteer.EventSourcing.Follower
 			// If it already exists (defensive), do not recreate.
 			if (FindExactNode(parent, childEngine) != null) return;
 
+			bool noneNoWindow = childEngine.ExactCount.Value == 0 && !childEngine.HasWithinWindow;
+
 			var exactNode = nodePool.Rent();
 			exactNode.EntryId = 0;
 			exactNode.OccurredAt = parent.OccurredAt;
@@ -1151,10 +1203,21 @@ namespace Puppeteer.EventSourcing.Follower
 			exactNode.CurrentDepth = childLevel;
 			exactNode.Parent = parent;
 			exactNode.LastExpansionAttemptEntryId = parent.LastExpansionAttemptEntryId;
-			exactNode.IsAdvanceable = false;
+			exactNode.IsAdvanceable = noneNoWindow;
 
 			parent.Children.Add(exactNode);
-			totalNodesCreated++;
+			CountNodeCreated(exactNode);
+
+			// A no-window None is a pass-through (advanceable from birth), so the seek AFTER it is
+			// reachable immediately. If that next seek is itself exact, cascade its eager creation
+			// now — otherwise there would be no exact-child for it to accumulate into and the
+			// trajectory could never advance past the None. (Only cascade through the pass-through
+			// None; a counting exact stays a barrier until it satisfies, so its child is created
+			// later.)
+			if (noneNoWindow)
+			{
+				MaybeCreateEagerExactChild(exactNode, childLevel, engines);
+			}
 		}
 
 		private void ExpandExistingMatches(int level, EventData eventData, List<ReactionEngine> engines, string script, SymbolTable symbolTable, Program cachedProgram, bool cachedProgramIsCanonical)
@@ -1289,7 +1352,7 @@ namespace Puppeteer.EventSourcing.Follower
 						child.LastExpansionAttemptEntryId = eventData.EntryId;
 
 						node.Children.Add(child);
-						totalNodesCreated++;
+						CountNodeCreated(child);
 
 						// K.2: if the next engine is Exact, pre-create its placeholder.
 						MaybeCreateEagerExactChild(child, level, engines);
@@ -1897,7 +1960,14 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					else if (current.Engine != null && current.Engine.IsExact)
 					{
-						// Exact with zero accumulated — contributes nothing.
+						// Exact with zero accumulated: a never-matched placeholder (vacuous None, or an
+						// unfired eager child) has EntryId 0 and contributes nothing; a DIRECTLY-matched
+						// exact node (e.g. a One opening seek, created as a match node without going
+						// through accumulate) carries a real EntryId and is part of the trajectory.
+						if (current.EntryId != 0)
+						{
+							eventIds.Add(current.EntryId);
+						}
 					}
 					else
 					{
@@ -1953,6 +2023,13 @@ namespace Puppeteer.EventSourcing.Follower
 				// Root node: remove from the roots list.
 				roots.Remove(node);
 			}
+
+			// Router support: drop this node from the per-depth open count BEFORE the
+			// pool Return (which Clears CurrentDepth). CountNodeCreated is the sole
+			// incrementer, PruneNode the sole decrementer, so the array stays exact.
+			int depth = node.CurrentDepth;
+			if (depth >= 0 && depth < openNodesAtDepth.Length && openNodesAtDepth[depth] > 0)
+				openNodesAtDepth[depth]--;
 
 			// Return the node to the pool.
 			nodePool.Return(node);
@@ -2033,9 +2110,11 @@ namespace Puppeteer.EventSourcing.Follower
 			return null;
 		}
 
-		// PHASE 2 / Phase 4.5 Playbill refactor: injects the value of an ancestor's symbol
-		// under the placeholder name. Ip/User are no longer valid scoped symbols (they no
-		// longer travel in the journal and therefore never exist in a matched ancestor).
+		// PHASE 2: injects the value of an ancestor's symbol under the placeholder name.
+		// The only cross-seek symbol is OccurredAt (the ancestor event's occurrence time);
+		// it is the sole system value the matcher carries per matched event. Ip/User live in
+		// the Playbill side-store and never travel in a matched ancestor; EntryId is a
+		// Program-level property, not a Where parameter — neither is a valid scoped symbol.
 		private static void InjectScopedSymbol(Parameters target, string placeholder, string symbolName, MatchNode ancestor)
 		{
 			ArgumentNullException.ThrowIfNull(target);
@@ -2045,23 +2124,22 @@ namespace Puppeteer.EventSourcing.Follower
 
 			switch (symbolName)
 			{
-				case "Now":
+				case "OccurredAt":
 					target[placeholder, typeof(DateTime)] = ancestor.OccurredAt;
 					break;
-				case "EntryId":
-					target[placeholder, typeof(int)] = checked((int)ancestor.EntryId);
-					break;
 				default:
-					throw new LanguageException($"Unknown scoped symbol: '{symbolName}'. Valid: Now, EntryId.");
+					throw new LanguageException($"Unknown scoped symbol: '{symbolName}'. Valid: OccurredAt.");
 			}
 		}
 
 		// Evaluates the engine's Where clause against the current event.
 		// Returns true if the filter passes, false if the match must be discarded.
-		// Phase 4.5 Playbill refactor: the valid symbols in Where are @Now and @EntryId
-		// (Ip/User are no longer injected — they do not travel in the journal). The lexer treats '@'
-		// as whitespace and discards it, so '@Now' parses to 'Now' and matches
-		// the Now parameter pre-populated by the pool.
+		// The only system symbol injected into a Where is @OccurredAt (= the event's OccurredAt),
+		// mirroring how rehydration injects the event time (ApplyActionInvocationArguments), but
+		// named for what it is — a past occurrence time, not wall-clock "now". Ip/User live in the
+		// Playbill side-store and never travel to the matcher; EntryId is a Program-level property,
+		// not a Where parameter. The lexer treats '@' as whitespace and discards it, so '@OccurredAt'
+		// parses to 'OccurredAt' and matches the injected parameter.
 		// PHASE 2: 'SeekName.@Symbol' is pre-processed in Reaction into placeholders '_seek_SeekName_Symbol'
 		// that are resolved here by walking parentNode.Parent until finding the MatchNode whose engine
 		// has the corresponding name.
@@ -2102,10 +2180,7 @@ namespace Puppeteer.EventSourcing.Follower
 					{
 						dedicated[param.Name, param.ParameterType] = param.GetValue();
 					}
-					dedicated["Now", typeof(DateTime)] = eventData.OccurredAt;
-					// The interpreter operators only support int (not long). For EntryId we use int,
-					// assuming a real journal does not exceed 2.1B events within the expected horizon.
-					dedicated["EntryId", typeof(int)] = checked((int)eventData.EntryId);
+					dedicated["OccurredAt", typeof(DateTime)] = eventData.OccurredAt;
 					if (engine.SeekScopedRefs != null)
 					{
 						foreach (var kvp in engine.SeekScopedRefs)
@@ -2137,10 +2212,7 @@ namespace Puppeteer.EventSourcing.Follower
 					whereParameters[param.Name, param.ParameterType] = param.GetValue();
 				}
 
-				whereParameters["Now", typeof(DateTime)] = eventData.OccurredAt;
-				// The interpreter operators only support int (not long). For EntryId we use int,
-				// assuming a real journal does not exceed 2.1B events within the expected horizon.
-				whereParameters[ "EntryId", typeof(int) ] = checked((int)eventData.EntryId);
+				whereParameters["OccurredAt", typeof(DateTime)] = eventData.OccurredAt;
 
 				// PHASE 2: resolve scoped references SeekName.@Symbol by walking parentNode.Parent.
 				if (engine.SeekScopedRefs != null)
@@ -2280,7 +2352,7 @@ namespace Puppeteer.EventSourcing.Follower
 				root.LastExpansionAttemptEntryId = snap.AnchorEntryId;
 				root.RemainingObligations = new HashSet<string>(snap.RemainingObligations ?? new List<string>());
 				roots.Add(root);
-				totalNodesCreated++;
+				CountNodeCreated(root);
 
 				if (snap.PendingSettle)
 				{
@@ -2300,7 +2372,7 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					child.LastAccumulatedOccurredAt = snap.LastConfirmOccurredAt;
 					root.Children.Add(child);
-					totalNodesCreated++;
+					CountNodeCreated(child);
 				}
 			}
 		}

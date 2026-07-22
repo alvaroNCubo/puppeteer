@@ -455,11 +455,32 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 throw new LanguageException($"Ambiguous reference: class '{className}' with the given constructor signature exists in multiple namespaces: {namespaces}. Use the 'in' clause to specify the namespace (e.g. ClassName(...) in MyNamespace).");
             }
 
-            // Non-params path: the historical selection "first compatible in CLR order" is kept
-            // so as not to alter the numeric disambiguation already established between collection
-            // overloads (e.g. List<double> binds to both List<double> and List<decimal>).
+            // Non-params path: prefer a constructor whose parameter types EXACTLY match the
+            // argument types over one reached by numeric widening, so an int argument binds
+            // C(int) rather than C(long)/C(double) when both exist (otherwise selection would
+            // depend on CLR order). If none is an exact-type match, keep the historical "first
+            // compatible in CLR order" so the established collection disambiguation is unchanged
+            // (e.g. List<double> binds to both List<double> and List<decimal>).
             // Params path: deterministic pick (does not depend on CLR order).
-            return usingExact ? compatibleConstructors[0] : PickDeterministicConstructor(compatibleConstructors);
+            if (usingExact)
+            {
+                return exactConstructors.FirstOrDefault(IsConstructorExactTypeMatch) ?? compatibleConstructors[0];
+            }
+            return PickDeterministicConstructor(compatibleConstructors);
+        }
+
+        // True when every argument's static type EXACTLY equals the constructor parameter type
+        // (no widening, no enum-binding). Used to prefer the exact-type overload.
+        private bool IsConstructorExactTypeMatch(ConstructorInfo constructorInfo)
+        {
+            ParameterInfo[] parameters = constructorInfo.GetParameters();
+            if (parameters.Length != arguments.Length) return false;
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                Type argType = arguments[i].ComputeType();
+                if (argType == null || argType != parameters[i].ParameterType) return false;
+            }
+            return true;
         }
 
         private static ConstructorInfo PickDeterministicConstructor(List<ConstructorInfo> candidates)

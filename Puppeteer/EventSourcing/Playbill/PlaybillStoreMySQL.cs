@@ -215,7 +215,7 @@ namespace Puppeteer.EventSourcing.Playbill
 					{
 						command.Parameters.AddWithValue("@EntryId", entryId);
 						command.Parameters.AddWithValue("@SchemaName", schemaName);
-						command.Parameters.AddWithValue("@SerializedParameters", serializedParameters);
+						command.Parameters.AddWithValue("@SerializedParameters", ToStoredArguments(serializedParameters));
 						command.ExecuteNonQuery();
 					}
 				}
@@ -257,7 +257,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						{
 							if (reader.Read())
 							{
-								return (reader.GetString(0), reader.GetString(1));
+								return (reader.GetString(0), ToLogicalArguments(reader.GetString(1)));
 							}
 						}
 					}
@@ -290,7 +290,7 @@ namespace Puppeteer.EventSourcing.Playbill
 						{
 							while (reader.Read())
 							{
-								result.Add((reader.GetInt64(0), reader.GetString(1)));
+								result.Add((reader.GetInt64(0), ToLogicalArguments(reader.GetString(1))));
 							}
 						}
 					}
@@ -326,7 +326,7 @@ namespace Puppeteer.EventSourcing.Playbill
 							{
 								long entryId = reader.GetInt64(0);
 								string schemaName = reader.GetString(1);
-								string serialized = reader.GetString(2);
+								string serialized = ToLogicalArguments(reader.GetString(2));
 								result.Add(new PlaybillRecord(entryId, schemaName, serialized));
 							}
 						}

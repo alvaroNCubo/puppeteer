@@ -1474,6 +1474,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			isExtensionMethod = false;
 			MethodInfo foundMethod = null;
+			MethodInfo exactMatch = null;
 
 			BindingFlags memberFlags = staticReceiver
 				? BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static
@@ -1489,6 +1490,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					{
 						bool match = true;
 						bool usesEnumBinding = false;
+						bool allExact = true;
 						for (int i = 0; i < parameters.Length; i++)
 						{
 							var paramType = parameters[i].ParameterType;
@@ -1502,11 +1504,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 									break;
 								}
 								usesEnumBinding = true;
+								allExact = false;
 							}
 							else if (!AreCompatible(argType, paramType))
 							{
 								match = false;
 								break;
+							}
+							else if (argType != paramType)
+							{
+								// Compatible via widening (e.g. int -> long, int -> double). Not exact.
+								allExact = false;
 							}
 						}
 						if (match)
@@ -1519,6 +1527,13 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 								foundMethod = method;
 								return foundMethod;
 							}
+							// Prefer an exact-type overload over one reached by numeric widening, so
+							// an int argument binds foo(int) rather than foo(long)/foo(double) when both
+							// exist (otherwise selection would depend on reflection order).
+							if (allExact && exactMatch == null)
+							{
+								exactMatch = method;
+							}
 							if (foundMethod == null)
 							{
 								foundMethod = method;
@@ -1528,9 +1543,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 			}
 
-			// If the strict pass found a match (enum or string fallback), return it before the
-			// permissive pass — this preserves the original "first match wins" semantics, but with
-			// enum priority already applied above.
+			// Exact-type overload wins over a widening one; otherwise fall back to the first
+			// compatible overload (enum priority already applied above).
+			if (exactMatch != null) return exactMatch;
 			if (foundMethod != null) return foundMethod;
 
 			// 1a-bis. Params pass: only evaluated when NO exact-arity overload matched above. This

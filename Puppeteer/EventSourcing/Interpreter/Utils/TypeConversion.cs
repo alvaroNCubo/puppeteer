@@ -23,6 +23,19 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 			{
 				result = Convert.ToDecimal((int)value);
 			}
+			// int widens to long (safe). long never narrows to int implicitly.
+			else if (actual == typeof(int) && target == typeof(long))
+			{
+				result = Convert.ToInt64((int)value);
+			}
+			else if (actual == typeof(long) && target == typeof(double))
+			{
+				result = Convert.ToDouble((long)value);
+			}
+			else if (actual == typeof(long) && target == typeof(decimal))
+			{
+				result = Convert.ToDecimal((long)value);
+			}
 			else if (actual == typeof(double) && target == typeof(decimal))
 			{
 				result = Convert.ToDecimal((double)value);

@@ -59,15 +59,33 @@ namespace Puppeteer
 
 			var pending = new List<OutboxRecord>();
 			Storage.ReadUndelivered(pending);
+			return DeliverAll(pending, sink);
+		}
 
+		// Deliver only the backlog of one destination (outputTarget) to its sink.
+		// With the partitioned store this reads just that destination's file, so two
+		// outputTargets drain their own queues independently.
+		public int Dispatch(string destination, IOutboxSink sink)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+			ArgumentNullException.ThrowIfNull(sink);
+
+			var pending = new List<OutboxRecord>();
+			Storage.ReadUndelivered(destination, pending);
+			return DeliverAll(pending, sink);
+		}
+
+		private int DeliverAll(List<OutboxRecord> pending, IOutboxSink sink)
+		{
 			int delivered = 0;
 			foreach (var row in pending)
 			{
 				sink.Send(row.ToMessage());
 				// Reached only if Send did not throw. A crash between these two
 				// lines is the at-least-once window: the row stays undelivered and
-				// is redelivered next time.
-				Storage.MarkDelivered(row.OutboxId, DateTime.Now);
+				// is redelivered next time. Mark by row so a partitioned store routes
+				// to the right destination file (OutboxId is unique only per partition).
+				Storage.MarkDelivered(row, DateTime.Now);
 				delivered++;
 			}
 			return delivered;
@@ -79,8 +97,23 @@ namespace Puppeteer
 		{
 			var pending = new List<OutboxRecord>();
 			Storage.ReadUndelivered(pending);
-			var result = new List<OutboxMessage>(pending.Count);
-			foreach (var row in pending)
+			return ToMessages(pending);
+		}
+
+		// Recorded-but-undelivered backlog of one destination.
+		public IReadOnlyList<OutboxMessage> Pending(string destination)
+		{
+			ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+
+			var pending = new List<OutboxRecord>();
+			Storage.ReadUndelivered(destination, pending);
+			return ToMessages(pending);
+		}
+
+		private static IReadOnlyList<OutboxMessage> ToMessages(List<OutboxRecord> rows)
+		{
+			var result = new List<OutboxMessage>(rows.Count);
+			foreach (var row in rows)
 				result.Add(row.ToMessage());
 			return result;
 		}

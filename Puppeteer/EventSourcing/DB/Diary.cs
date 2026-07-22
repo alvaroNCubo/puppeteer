@@ -133,6 +133,14 @@ namespace Puppeteer.EventSourcing.DB
 			// CueEvent. The legacy ActionDefinition message + EnqueueActionDefinition
 			// path is gone (signed: cross-stage atomicity is unnecessary).
 
+			// Outbox durability for backends that have no local row table of their
+			// own (SQL, plain-text): reuse the local-buffer's persistent FS queue as
+			// the default OutboxStorage — the same local-buffer strategy used for
+			// perform-command writes. The FileSystem / in-memory backends self-wire
+			// their own outbox in their constructor, so leave those untouched.
+			if (!(diaryStorage is DiaryStorageFileSystem) && buffer.OutboxStorage != null)
+				diaryStorage.SetOutboxStorage(buffer.OutboxStorage);
+
 			this.localBuffer = buffer;
 			this.replicationProgress = progress;
 			this.replicationAgent = agent;

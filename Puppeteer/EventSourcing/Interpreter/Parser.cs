@@ -189,6 +189,13 @@ namespace Puppeteer.EventSourcing.Interpreter
                 case TokenType.FOREACH:
                     result = ParseForEachStatement(currLevel, ref blockNumber, isQuery, isQuery);
                     break;
+                case TokenType.IN:
+                    // 'in' has no statement-level construct, so at the head of a
+                    // statement it can only be a plain identifier used as an
+                    // assignment target or call head. Reinterpret it as such so
+                    // scripts authored before 'in' was reserved keep parsing.
+                    result = ParseKeywordAsIdentifierStatement(currLevel, isQuery, isCheck);
+                    break;
                 case TokenType.upgrade:
                     result = ParseUpgradeStatement(currLevel, isQuery, isCheck);
                     break;
@@ -384,9 +391,21 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private Statement ParseForEachStatement(int[] currLevel, ref int blockNumber, bool isQuery, bool isCheck)
         {
+            // 'foreach'/'for' is the loop construct only when followed by '('. In any
+            // other position the word is a plain identifier used as a statement head
+            // (a script authored before the keyword existed); reinterpret it as an
+            // ordinary create/call statement so replay of historical entries survives.
+            string keywordLexeme = lexer.CurrentLexeme().ToString();
+            lexer.Accept(TokenType.FOREACH);
+            if (lexer.CurrentToken.Type != TokenType.lParen)
+            {
+                Id head = new Id(symbolTable, keywordLexeme, currLevel);
+                AstExpression dotChain = ContinueDotChain(head, currLevel);
+                return FinishCreateOrCallStatement(dotChain, currLevel, isQuery, isCheck);
+            }
+
             currLevel = IncLevel(currLevel, ++blockNumber);
             Statement result;
-            lexer.Accept(TokenType.FOREACH);
             lexer.Accept(TokenType.lParen);
             Id id = (Id) ParseId(currLevel);
 
@@ -899,8 +918,17 @@ namespace Puppeteer.EventSourcing.Interpreter
 			// assigning to a pre-declared @Out parameter (allowed). The rule is enforced
 			// in Program.SolveReferences, where each LValue's scope (Global vs Parameter)
 			// is resolved against the actual parameter set. See RejectGlobalDeclarationInQuery.
-			Statement result;
 			AstExpression dot = ParseDotChain(currLevel);
+			return FinishCreateOrCallStatement(dot, currLevel, isQuery, isCheck);
+		}
+
+		// Completes a create/call statement from an already-parsed head chain: decides
+		// assignment vs call and consumes the terminating ';'. Shared so a statement whose
+		// head had to be recognized before the chain (a contextual keyword used as an
+		// identifier) still flows through exactly the same grammar.
+		private Statement FinishCreateOrCallStatement(AstExpression dot, int[] currLevel, bool isQuery, bool isCheck)
+		{
+			Statement result;
 			bool isCreateCommand = lexer.CurrentToken.Type == TokenType.assign;
 			if (isCreateCommand)
 			{
@@ -912,6 +940,17 @@ namespace Puppeteer.EventSourcing.Interpreter
 			}
 			lexer.Accept(TokenType.semicolon);
 			return result;
+		}
+
+		// A contextual keyword (foreach/for/in) sits at a statement head but is not part of
+		// its construct, so it names an identifier. Consume it as the head of the dot-chain
+		// and continue as an ordinary create/call statement.
+		private Statement ParseKeywordAsIdentifierStatement(int[] currLevel, bool isQuery, bool isCheck)
+		{
+			Id head = new Id(symbolTable, lexer.CurrentLexeme().ToString(), currLevel);
+			lexer.Accept();
+			AstExpression dot = ContinueDotChain(head, currLevel);
+			return FinishCreateOrCallStatement(dot, currLevel, isQuery, isCheck);
 		}
 
 		private Statement ParseBlock(int[] currLevel, bool isQuery, bool isCheck)
@@ -1131,6 +1170,14 @@ namespace Puppeteer.EventSourcing.Interpreter
         private AstExpression ParseDotChain(int[] currLevel)
 		{
 			AstExpression result = ParseId(currLevel);
+			return ContinueDotChain(result, currLevel);
+		}
+
+		// Continues a dot/subscript/call chain from an already-parsed head expression.
+		// Split out from ParseDotChain so a head recognized before the chain (a contextual
+		// keyword used as an identifier) can still flow through the same postfix grammar.
+		private AstExpression ContinueDotChain(AstExpression result, int[] currLevel)
+		{
 			TokenType type = lexer.CurrentToken.Type;
 			while (true)
 			{
@@ -1139,7 +1186,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 					case TokenType.dot:
 						lexer.Accept();
 						string method = lexer.CurrentLexeme().ToString();
-						lexer.Accept(TokenType.id);
+						AcceptAsIdentifier();
 
 						if (lexer.CurrentToken.Type != TokenType.lParen)
 						{
@@ -1325,8 +1372,31 @@ namespace Puppeteer.EventSourcing.Interpreter
         private AstExpression ParseId(int[] currLevel)
         {
             string id = lexer.CurrentLexeme().ToString();
-            lexer.Accept(TokenType.id);
+            AcceptAsIdentifier();
             return new Id(symbolTable, id, currLevel);
+        }
+
+        // A keyword introduced after journaled scripts were written (foreach/for/in) must
+        // stay usable as a plain identifier wherever the grammar cannot host the keyword
+        // itself: a member name after '.', an assignment target, or an atom. The event
+        // journal is immutable, so those historical entries would otherwise fail to replay.
+        // The token still carries its original lexeme, so the word round-trips unchanged.
+        private static bool IsUsableAsIdentifier(TokenType type)
+        {
+            return type == TokenType.id || type == TokenType.FOREACH || type == TokenType.IN;
+        }
+
+        private void AcceptAsIdentifier()
+        {
+            if (IsUsableAsIdentifier(lexer.CurrentToken.Type))
+            {
+                lexer.Accept();
+            }
+            else
+            {
+                // Not identifier-like: reuse the standard "expected id" diagnostic.
+                lexer.Accept(TokenType.id);
+            }
         }
 
 		private AstExpression ParseExpression(int[] currLevel)
@@ -1530,6 +1600,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				case TokenType.stringLit:
 				case TokenType.@decimal:
 				case TokenType.@double:
+				case TokenType.@long:
 				case TokenType.nullToken:
 				case TokenType.date:
 				case TokenType.boolFalse:
@@ -1556,6 +1627,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 case TokenType.stringLit:
                 case TokenType.@decimal:
                 case TokenType.@double:
+                case TokenType.@long:
 				case TokenType.nullToken:
                 case TokenType.date:
                 case TokenType.boolFalse:
@@ -1573,6 +1645,11 @@ namespace Puppeteer.EventSourcing.Interpreter
             switch (type)
             {
                 case TokenType.id:
+                case TokenType.FOREACH:
+                case TokenType.IN:
+                    // FOREACH/IN reach here only as the leading atom of an operand, where
+                    // the keyword construct cannot appear: treat the word as an identifier
+                    // so historical scripts that read such a variable keep evaluating.
                     result = ParseDotChain(currLevel);
                     break;
                 case TokenType.lParen:
@@ -1674,6 +1751,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 					result = ParseDouble();
 					break;
 
+				case TokenType.@long:
+					result = ParseLong();
+					break;
+
 				case TokenType.nullToken:
 					result = ParseNull();
 					break;
@@ -1772,6 +1853,14 @@ namespace Puppeteer.EventSourcing.Interpreter
 			AstExpression result = new LiteralNumber(int.Parse(lexer.CurrentLexeme()));
 			lexer.Accept();
 			return result;
+		}
+
+		private AstExpression ParseLong()
+		{
+			long value = long.Parse(lexer.CurrentLexeme(), CultureInfo.InvariantCulture);
+			AstExpression longLiteral = new LiteralLong(value);
+			lexer.Accept();
+			return longLiteral;
 		}
 
         internal string CurrentStatementText()
