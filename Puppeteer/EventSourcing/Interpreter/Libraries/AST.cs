@@ -43,26 +43,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return collector.GetAll().Cast<T>();
 		}
 
-		// B.3.1: structural hash that ignores literal *values* but preserves
-		// structure and literal *types*. Two scripts that differ only in their
-		// literal arguments (e.g. `obj.Get(123)` vs `obj.Get(456)`)
-		// produce the same PromotionCandidateHash; they are equivalent except
-		// for their parameters and thus are candidates for automatic promotion
-		// from V1 Script to V2 Action. Used as the counter key for detecting
-		// recurrent endpoints.
-		//
-		// Default contribution is just the concrete type name; subclasses
-		// override to walk their structural children. Literal subclasses
-		// (LiteralNumber, LiteralString, LiteralBoolean, ...) keep the default,
-		// which means they contribute their *type* but not their *value* —
-		// exactly the value-blindness required. Collisions on the int hash
-		// are possible but bounded; B.3.4 will use a PromotionCandidate→
-		// ActionId index that reverifies structural equivalence at
-		// promotion time.
-		internal virtual void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(this.GetType().Name);
-		}
 
 		private class Collector : ASTVisitor
 		{

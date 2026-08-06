@@ -866,10 +866,7 @@ namespace Puppeteer.EventSourcing.Follower
 
 			Type literalType = literal.LiteralType;
 
-			// Check compatibility using the same criterion as AstExpression.AreCompatible:
-			// - literalType is the argument type (value we have).
-			// - explicitType is the parameter type (type we want).
-			if (AstExpression.AreCompatible(literalType, explicitType))
+			if (LiteralCanBeReadAs(literalType, explicitType))
 			{
 				return;
 			}
@@ -877,6 +874,50 @@ namespace Puppeteer.EventSourcing.Follower
 			// Throw if they are not compatible.
 			throw new LanguageException($"Literal of type '{literalType.Name}' is not compatible with the specified type '{explicitType.Name}'. " +
 				$"For example, {(literalType == typeof(int) ? "10" : (literalType == typeof(decimal) ? "10m" : "3.14"))} cannot be a '{explicitType.Name}'.");
+		}
+
+		// Can this literal be READ as the annotated type? A pattern ANNOTATION and an argument
+		// BINDING are different questions, and the difference is why they must not share a predicate.
+		//
+		// A binding CHOOSES an overload and executes it, so a non-exact one is the determinism hazard
+		// this codebase now guards: an overload added later can take it away from an entry already
+		// journaled. A pattern chooses nothing and executes nothing — it ASKS whether something
+		// happened. `Pagar(200.75)` asks about a payment of 200.75 and should find the entry that
+		// recorded it whichever numeric rung it was stored at; the `:decimal` annotation is there to
+		// NARROW a match when the author wants that, not to pin a binding.
+		//
+		// So the numeric family is owned here rather than borrowed from AstExpression.AreCompatible,
+		// which answers the binding question. Sharing it made a pattern's legality depend on a rule
+		// written for a different plane: narrowing the binding rule refused `200.75:decimal` at PARSE
+		// time, before any matching, so a Reaction over a library with a single `Pagar(decimal)` — no
+		// ambiguity anywhere — stopped being definable at all.
+		//
+		// The rules reproduce what the binding predicate admitted when this was split out, so nothing
+		// a pattern could express before it stops expressing now. Anything outside the numeric family
+		// still defers to the binding predicate, which is where those cases are defined.
+		private static bool LiteralCanBeReadAs(Type literalType, Type explicitType)
+		{
+			if (literalType == null || explicitType == null) return false;
+			if (literalType == explicitType) return true;
+
+			bool literalIsNumeric = AstExpression.IsPromotableNumeric(literalType);
+			bool annotatedIsNumeric = AstExpression.IsPromotableNumeric(explicitType);
+			if (literalIsNumeric && annotatedIsNumeric)
+			{
+				// An int reads as any wider rung, and double and decimal read as each other: the two
+				// spell the same written number, and which of them a signature happens to declare is
+				// not something the author of a pattern should have to know.
+				if (literalType == typeof(int)) return true;
+				if (literalType == typeof(double) || literalType == typeof(decimal))
+				{
+					return explicitType == typeof(double) || explicitType == typeof(decimal);
+				}
+				// A long is not read as a narrower or fractional rung, matching what the binding
+				// predicate admitted.
+				return false;
+			}
+
+			return AstExpression.AreCompatible(literalType, explicitType);
 		}
 
 		// <literal> ::= <string-literal> | <number-literal> | <bool-literal> | <datetime-literal> | <null-literal>
@@ -1056,23 +1097,42 @@ namespace Puppeteer.EventSourcing.Follower
 				throw new LanguageException($"Expected an identifier, but found '{lexer.CurrentLexeme()}'.");
 			}
 		}
-	// <expose> ::= 'expose' <parameter> <identifier> ';'
+	// <expose> ::= 'expose' <expose-pair> (',' <expose-pair>)* ';'
+	// <expose-pair> ::= <parameter> <identifier>
+	// The statement grammar (Parser.ParseExposeStatement) accepts a comma list of pairs in a
+	// single 'expose', so the pattern grammar accepts the same list: both describe the one
+	// statement. Every pair is a conjunct, matched by the ExposeNode as a whole.
 	// Examples:
 	//   expose _:int total;      → match alias "total" with type int.
 	//   expose 100 total;        → match alias "total" with literal value 100.
 	//   expose _ total;          → match any value at alias "total".
 	//   expose $x total;         → capture the alias "total" value into $x (Step 13).
+	//   expose $x total, $y tax; → capture both aliases, both required.
 	private ExposeNode ParseExpose()
 	{
 		lexer.Accept(TokenType.expose);
 
+		List<ExposePairNode> pairs = new List<ExposePairNode>();
+		pairs.Add(ParseExposePair());
+
+		while (lexer.CurrentToken.Type == TokenType.comma)
+		{
+			lexer.Accept(TokenType.comma);
+			pairs.Add(ParseExposePair());
+		}
+
+		lexer.Accept(TokenType.semicolon);
+
+		return new ExposeNode(pairs);
+	}
+
+	private ExposePairNode ParseExposePair()
+	{
 		ParameterNode expression = ParseParameter();
 
 		string alias = ParseIdentifier();
 
-		lexer.Accept(TokenType.semicolon);
-
-		return new ExposeNode(expression, alias);
+		return new ExposePairNode(expression, alias);
 	}
 }
 }

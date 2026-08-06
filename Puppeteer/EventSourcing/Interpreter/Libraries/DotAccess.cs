@@ -60,18 +60,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			private readonly string methodName;
 			private readonly Type[] argTypes;
 			private readonly string[] idArgNames; // null if no argument is an Id; idArgNames[i]!=null marks an Id
+			// Same signature, two admissible answers: while new text is being admitted an ambiguous
+			// enum binding is refused, and under replay the same call resolves to its exact overload.
+			// Sharing one entry between the two would let whichever ran first decide for the other,
+			// so the scope belongs in the key rather than merely around the lookup.
+			private readonly bool underReplay;
 
-			internal MethodResolutionKey(Type objectClass, string methodName, Type[] argTypes, string[] idArgNames)
+			internal MethodResolutionKey(Type objectClass, string methodName, Type[] argTypes, string[] idArgNames, bool underReplay)
 			{
 				this.objectClass = objectClass;
 				this.methodName = methodName;
 				this.argTypes = argTypes;
 				this.idArgNames = idArgNames;
+				this.underReplay = underReplay;
 			}
 
 			public bool Equals(MethodResolutionKey other)
 			{
 				if (objectClass != other.objectClass) return false;
+				if (underReplay != other.underReplay) return false;
 				if (!string.Equals(methodName, other.methodName, StringComparison.OrdinalIgnoreCase)) return false;
 				if (argTypes.Length != other.argTypes.Length) return false;
 				for (int i = 0; i < argTypes.Length; i++)
@@ -97,6 +104,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				HashCode hc = new HashCode();
 				hc.Add(objectClass);
+				hc.Add(underReplay);
 				hc.Add(methodName, StringComparer.OrdinalIgnoreCase);
 				for (int i = 0; i < argTypes.Length; i++) hc.Add(argTypes[i]);
 				if (idArgNames != null)
@@ -202,7 +210,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 			}
 
-			MethodResolutionKey key = new MethodResolutionKey(objectClass, methodName, parameterTypes, idArgNames);
+			MethodResolutionKey key = new MethodResolutionKey(objectClass, methodName, parameterTypes, idArgNames, ReplayResolutionScope.Active);
 			if (methodResolutionCache.TryGetValue(key, out ResolvedMethod cached))
 			{
 				if (Puppeteer.LabInstrumentation.StageTimingEnabled) Puppeteer.LabInstrumentation.IncrementMethodCacheHit();
@@ -219,28 +227,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return resolved;
 		}
 
-		// B.3.1: include the method/property name + arg shape. The arguments'
-		// AccumulatePromotionCandidateHash recurses into literal nodes (whose default
-		// contribution is just their type name), so two calls with the same
-		// shape but different literal arg values hash identically.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(this.GetType().Name);
-			hc.Add(methodName ?? string.Empty);
-			hc.Add(propertyName ?? string.Empty);
-			if (arguments != null)
-			{
-				hc.Add(arguments.Length);
-				foreach (AstExpression e in arguments)
-				{
-					e.AccumulatePromotionCandidateHash(ref hc);
-				}
-			}
-			else
-			{
-				hc.Add(-1);
-			}
-		}
 
 		internal override void Visit(ASTVisitor v)
 		{
@@ -1475,6 +1461,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			isExtensionMethod = false;
 			MethodInfo foundMethod = null;
 			MethodInfo exactMatch = null;
+			// The enum reading of an argument is collected alongside the others instead of ending
+			// the sweep, so the candidate set is fully known before anything is chosen. Knowing it
+			// is what lets an ambiguity be recognized as such (see EnumOverloadAmbiguity) rather
+			// than silently settled by whichever reading the reflection order happened to reach.
+			MethodInfo enumBoundMatch = null;
+			int enumBoundCandidates = 0;
+			// The surviving candidates, kept so the numeric-rung collision can be seen after the sweep:
+			// it is a property of the SET, not of the winner alone.
+			List<MethodInfo> compatibleCandidates = new List<MethodInfo>();
 
 			BindingFlags memberFlags = staticReceiver
 				? BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static
@@ -1519,33 +1514,68 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 						}
 						if (match)
 						{
-							// Prefer-enum: an overload that binds an argument as enum wins immediately;
-							// those that do not use enum-binding are remembered as a fallback. This
-							// way 'Febrero'/@mes deterministically chooses foo(Enum) over foo(string).
 							if (usesEnumBinding)
 							{
-								foundMethod = method;
-								return foundMethod;
+								// Counted, not returned. An enum-bound candidate used to win here
+								// immediately, which put it ahead of the exactness check below and gave
+								// it the power to outrank an EXACT overload — including one that an
+								// already-journaled entry had bound before this enum overload existed.
+								enumBoundCandidates++;
+								if (enumBoundMatch == null) enumBoundMatch = method;
 							}
-							// Prefer an exact-type overload over one reached by numeric widening, so
-							// an int argument binds foo(int) rather than foo(long)/foo(double) when both
-							// exist (otherwise selection would depend on reflection order).
-							if (allExact && exactMatch == null)
+							else
 							{
-								exactMatch = method;
-							}
-							if (foundMethod == null)
-							{
-								foundMethod = method;
+								compatibleCandidates.Add(method);
+								// Prefer an exact-type overload over one reached by numeric widening, so
+								// an int argument binds foo(int) rather than foo(long)/foo(double) when both
+								// exist (otherwise selection would depend on reflection order).
+								if (allExact && exactMatch == null)
+								{
+									exactMatch = method;
+								}
+								if (foundMethod == null)
+								{
+									foundMethod = method;
+								}
 							}
 						}
 					}
 				}
 			}
 
-			// Exact-type overload wins over a widening one; otherwise fall back to the first
-			// compatible overload (enum priority already applied above).
+			// An argument that reads BOTH as an enum member and as a value of its own type is
+			// ambiguous, and while new text is being admitted the author is present to say which
+			// they meant, so it is refused. Under replay nothing is being admitted: the entry keeps
+			// the binding its text describes, which is what the exactness rule below gives it.
+			if (!ReplayResolutionScope.Active
+				&& EnumOverloadAmbiguity.IsAmbiguous(enumBoundCandidates, foundMethod != null))
+			{
+				throw EnumOverloadAmbiguity.Refuse(objectClass, this.methodName, enumBoundMatch, foundMethod);
+			}
+
+			// A verb that declares two numeric rungs at one position rewrites what its already-journaled
+			// calls mean: the exact overload wins from now on, while the entries written before it
+			// existed bound the wider one. Refused while ADMITTING new text so the author records that
+			// they have seen it — the cast is a signature, not a mechanism; see NumericRungCollision.
+			if (!ReplayResolutionScope.Active && arguments != null)
+			{
+				for (int position = 0; position < parameterTypes.Length && position < arguments.Length; position++)
+				{
+					if (NumericRungCollision.Collides(compatibleCandidates, position, parameterTypes[position], arguments[position], out MethodBase boundNow, out MethodBase boundBefore))
+					{
+						throw NumericRungCollision.Refuse(objectClass, this.methodName, position, boundNow, boundBefore);
+					}
+				}
+			}
+
+			// Exactness first, in both directions: over an overload reached by widening AND over one
+			// reached by binding a value as an enum member. This is the rule the constructor path
+			// already applies (NewInstance.IsConstructorExactTypeMatch). An enum-bound candidate is
+			// still chosen when it is the ONLY reading available — a method that declares only the
+			// enum overload keeps receiving a symbolic value that arrived as a string, which is how
+			// a stringly-typed request reaches a typed signature.
 			if (exactMatch != null) return exactMatch;
+			if (enumBoundMatch != null) return enumBoundMatch;
 			if (foundMethod != null) return foundMethod;
 
 			// 1a-bis. Params pass: only evaluated when NO exact-arity overload matched above. This

@@ -668,16 +668,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// B.3.1: include the identifier name. Two scripts that differ only in
-		// the name of a local (e.g. `orden` vs `pedido`) hash to distinct
-		// promotion candidates; the walker (B.3.2) can later normalize names
-		// if needed, but for B.3.1 the conservative choice is to treat
-		// distinct names as distinct candidates.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(Id));
-			hc.Add(name ?? string.Empty);
-		}
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{

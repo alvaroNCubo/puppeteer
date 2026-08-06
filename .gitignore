@@ -38,3 +38,14 @@ puppeteer-papers/
 # OS junk
 Thumbs.db
 .DS_Store
+
+# The training lab is WORK IN PROGRESS and is deliberately not published. It is
+# where bugs get worked out and where the guides are still being written, so a
+# guide here can describe engine behaviour that master has since reverted - as
+# perform-enact.md does for the automatic Script->Action promotion removed in
+# Pacifico 6ab46a5. Publishing it would ship teaching material ahead of the
+# runtime it teaches.
+training-lab/
+
+# Claude Code's local configuration and worktrees. Local tooling, never published.
+.claude/

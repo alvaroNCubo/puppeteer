@@ -1,4 +1,5 @@
 using Puppeteer.EventSourcing.DB;
+using Puppeteer.EventSourcing.Interpreter.Formatters;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -255,7 +256,30 @@ namespace Puppeteer.EventSourcing.Follower
 			return new ReactionModeBuilder(this, name);
 		}
 
+		// Scoped declaration (Choreography's PerformanceV2.Reactions facade): the same
+		// declaration, plus the push destination of the wrapper that is declaring it. The
+		// sink travels down the fluent chain and is installed on the Reaction by
+		// CreateReaction, so a projection declared through a wrapper pushes to THAT
+		// wrapper's sink instead of the actor's single default.
+		internal ReactionModeBuilder DefineReaction(string name, IOutputSink scopeSink, IOutputFormatter scopeFormat)
+		{
+			ArgumentNullException.ThrowIfNullOrWhiteSpace(name);
+
+			foreach (var reaction in reactions)
+			{
+				if (string.Equals(reaction.Name, name, StringComparison.OrdinalIgnoreCase))
+					throw new LanguageException($"Reaction with name '{name}' is already defined.");
+			}
+
+			return new ReactionModeBuilder(this, name, scopeSink, scopeFormat);
+		}
+
 		internal Reaction CreateReaction(string name, ReactionMode mode, ReactionActivation activation)
+		{
+			return CreateReaction(name, mode, activation, null, null);
+		}
+
+		internal Reaction CreateReaction(string name, ReactionMode mode, ReactionActivation activation, IOutputSink scopeSink, IOutputFormatter scopeFormat)
 		{
 			// Reject .CastOnly() on a director-role host (a Theater PerformanceV2)
 			// LOUDLY at declaration time. Such a reaction would never fire — CastOnly
@@ -273,6 +297,9 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 
 			var newReaction = new Reaction(this, name, mode, activation);
+			// Install the declaring scope's push destination, if any. Null leaves the
+			// reaction on the actor's default sink — the pre-existing behavior.
+			if (scopeSink != null) newReaction.SetOutputTarget(scopeSink, scopeFormat);
 			reactions.Add(newReaction);
 			return newReaction;
 		}

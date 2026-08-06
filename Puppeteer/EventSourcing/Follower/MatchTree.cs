@@ -134,11 +134,30 @@ namespace Puppeteer.EventSourcing.Follower
 		// Reaction has no ForEach or this node is not the captor.
 		internal HashSet<string> RemainingObligations { get; set; }
 
-		// F3 .Aged: the coverage node is complete (obligations empty) but its closing
-		// event has not yet aged 'span' relative to the front. It stays pending; the
-		// per-event tick fires it when the front advances far enough. LastAccumulatedOccurredAt
-		// of the coverage Many node = OccurredAt of the closing confirm.
-		internal bool CoveragePendingSettle { get; set; }
+		// F3 .Aged: the match at this node is COMPLETE but its closing event has not yet
+		// aged 'span' relative to the front, so it does not fire. It stays parked; the
+		// per-event tick fires it when the front advances far enough. Not a coverage
+		// notion: any closing leg (coverage discharge, Many threshold, Exact count or a
+		// plain regular leg) parks the same way, because the settling gate is declared on
+		// the closing Seek and says nothing about how that Seek closes.
+		internal bool PendingSettle { get; set; }
+
+		// F3 .Aged: the state frozen when the match parked. The settle delays the EFFECT
+		// of a complete match, never its CONTENT — so what fires later is what the match
+		// held at completion, not what its chain grew into during the window.
+		//   * SettleAnchorOccurredAt: OccurredAt of the event that CLOSED the match. It is
+		//     the age reference; taking it live would let a Many leg that keeps folding
+		//     matching events push its own anchor forward and never settle (starvation).
+		//   * SettleEventIds / SettleCheckpoint: the elide/skip batch and the per-level
+		//     resume cursor as collected at completion. A non-coverage Many leg (and any
+		//     Many ancestor) keeps accumulating after it closes; re-collecting them at
+		//     firing time would widen the batch beyond the match and could reach the
+		//     journal tail — breaking the very "do not elide the last record" invariant
+		//     this gate exists to uphold. Coverage stops accumulating on its own (the
+		//     obligation set is exhausted), which is why it never needed the freeze.
+		internal DateTime SettleAnchorOccurredAt { get; set; }
+		internal List<long> SettleEventIds { get; set; }
+		internal Dictionary<int, long> SettleCheckpoint { get; set; }
 
 		internal MatchNode()
 		{
@@ -161,7 +180,10 @@ namespace Puppeteer.EventSourcing.Follower
 			LastAccumulatedOccurredAt = default;
 			IsAdvanceable = true;
 			RemainingObligations = null;
-			CoveragePendingSettle = false;
+			PendingSettle = false;
+			SettleAnchorOccurredAt = default;
+			SettleEventIds = null;
+			SettleCheckpoint = null;
 		}
 
 		internal void AccumulateEventId(long entryId, DateTime occurredAt)
@@ -326,13 +348,18 @@ namespace Puppeteer.EventSourcing.Follower
 		// dispatch and independent of which Seek levels are attempted. It advances the
 		// journal front for the pending-window machinery: TickPendingExactNodes closes
 		// expired Exact/None/Within windows (may fire at a FinalSeek or prune on a count
-		// mismatch); TickPendingCoverageSettle ages .Aged coverage settles. Kept separate
+		// mismatch); TickPendingSettle ages the .Aged settling gates. Kept separate
 		// from the match attempts so that, once event routing skips levels, window/settle
 		// firing timing stays identical to the naive full-level scan.
+		//
+		// Order matters: the Exact tick can CLOSE a window and thereby complete (and park) a
+		// match at this same event, so the settle tick runs after it — a closure whose
+		// closing event is already 'span' behind the front settles on arrival rather than
+		// waiting for one more event.
 		internal void TickHousekeeping(long currentEntryId, DateTime currentOccurredAt)
 		{
 			TickPendingExactNodes(currentEntryId, currentOccurredAt);
-			TickPendingCoverageSettle(currentOccurredAt);
+			TickPendingSettle(currentOccurredAt);
 		}
 
 		private HydrationMode GetEffectiveModeForLevel(int level)
@@ -549,7 +576,7 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 							System.Diagnostics.Debug.WriteLine($"[MatchTree.DFS] COMPLETE MATCH at level={level}, EntryId={eventData.EntryId}, IsFinalSeek={isFinalSeek}");
 #endif
-							ExecuteCompleteMatch(child);
+							FireOrParkCompleteMatch(child, eventData.OccurredAt);
 						}
 					}
 					else
@@ -793,13 +820,7 @@ namespace Puppeteer.EventSourcing.Follower
 						coverageAnchor.RemainingObligations.Remove(coverageKey);
 						if (coverageAnchor.RemainingObligations.Count == 0)
 						{
-							// F3 .Aged: if the closing seek has a settle span, do not fire yet
-							// (the front = the just-accumulated confirm, age 0); mark pending and
-							// let the per-event tick fire it once 'span' has aged.
-							if (engine.AgedSpan.HasValue)
-								existing.CoveragePendingSettle = true;
-							else
-								ExecuteCompleteMatch(existing);
+							FireOrParkCompleteMatch(existing, existing.LastAccumulatedOccurredAt);
 						}
 					}
 					// Fire once when the threshold is crossed at the final level.
@@ -807,7 +828,7 @@ namespace Puppeteer.EventSourcing.Follower
 					// handles AtLeast(n>=2) reaching threshold via accumulation.
 					else if (isLastLevel && prevCount < threshold && existing.AccumulatedCount >= threshold)
 					{
-						ExecuteCompleteMatch(existing);
+						FireOrParkCompleteMatch(existing, existing.LastAccumulatedOccurredAt);
 					}
 					return;
 				}
@@ -842,16 +863,12 @@ namespace Puppeteer.EventSourcing.Follower
 					coverageAnchor.RemainingObligations.Remove(coverageKey);
 					if (coverageAnchor.RemainingObligations.Count == 0)
 					{
-						// F3 .Aged: see note in the 'existing' branch.
-						if (engine.AgedSpan.HasValue)
-							node.CoveragePendingSettle = true;
-						else
-							ExecuteCompleteMatch(node);
+						FireOrParkCompleteMatch(node, node.LastAccumulatedOccurredAt);
 					}
 				}
 				else if (isLastLevel && node.AccumulatedCount >= threshold)
 				{
-					ExecuteCompleteMatch(node);
+					FireOrParkCompleteMatch(node, node.LastAccumulatedOccurredAt);
 				}
 			}
 			catch
@@ -1033,18 +1050,28 @@ namespace Puppeteer.EventSourcing.Follower
 					// terminal even without the explicit ThenFinalSeek marker.
 					if (level == engines.Count - 1)
 					{
-						// Fire the elide, then prune the now-closed cycle so its anchor leaves the open
-						// set — this keeps the pass O(N) instead of re-visiting a settled anchor on
-						// every later event. ExecuteCompleteMatch prunes the exact leaf and removes it
-						// from its parent's Children; walking up, prune ancestors that are now childless
-						// (a shared ancestor with other live trajectories is left intact).
-						MatchNode ancestor = exactNode.Parent;
-						ExecuteCompleteMatch(exactNode);
-						while (ancestor != null && ancestor.Children.Count == 0)
+						// F3 .Aged: a closing Exact leg with a settling gate parks instead of firing,
+						// so the cycle must stay in the tree until it settles — the collapse below is
+						// deferred to TickPendingSettle, which repeats it after the delayed firing.
+						if (exactNode.Engine != null && exactNode.Engine.AgedSpan.HasValue)
 						{
-							MatchNode up = ancestor.Parent;
-							PruneNode(ancestor);
-							ancestor = up;
+							FireOrParkCompleteMatch(exactNode, exactNode.LastAccumulatedOccurredAt);
+						}
+						else
+						{
+							// Fire the elide, then prune the now-closed cycle so its anchor leaves the open
+							// set — this keeps the pass O(N) instead of re-visiting a settled anchor on
+							// every later event. ExecuteCompleteMatch prunes the exact leaf and removes it
+							// from its parent's Children; walking up, prune ancestors that are now childless
+							// (a shared ancestor with other live trajectories is left intact).
+							MatchNode ancestor = exactNode.Parent;
+							ExecuteCompleteMatch(exactNode);
+							while (ancestor != null && ancestor.Children.Count == 0)
+							{
+								MatchNode up = ancestor.Parent;
+								PruneNode(ancestor);
+								ancestor = up;
+							}
 						}
 					}
 				}
@@ -1076,41 +1103,49 @@ namespace Puppeteer.EventSourcing.Follower
 		// prune. Without this tick the Exact nodes that never matched (vacuous None, etc)
 		// would stay pending forever.
 		private readonly List<MatchNode> _tickBuffer = new List<MatchNode>();
-		private readonly List<MatchNode> _coverageSettleBuffer = new List<MatchNode>();
+		private readonly List<MatchNode> _settleBuffer = new List<MatchNode>();
 
-		// F3 .Aged: fires the complete coverage nodes (CoveragePendingSettle) whose
-		// closing event (LastAccumulatedOccurredAt) has aged 'span' relative to the front
-		// (currentOccurredAt = the incoming event, the Journal's logical clock). Coverage
-		// nodes are Many -> ExecuteCompleteMatch does NOT prune them, so clearing the
-		// flag avoids re-firing.
-		private void TickPendingCoverageSettle(DateTime currentOccurredAt)
+		// F3 .Aged: fires the parked complete matches whose closing event
+		// (SettleAnchorOccurredAt, frozen at park time) has aged 'span' relative to the
+		// front (currentOccurredAt = the incoming event, the Journal's logical clock).
+		// Clearing the flag avoids re-firing a Many leaf, which ExecuteCompleteMatch does
+		// NOT prune. A non-Many leaf IS pruned when it fires, so its now-childless
+		// ancestors are collapsed afterwards — the same O(N) housekeeping the immediate
+		// (unparked) Exact firing path does.
+		private void TickPendingSettle(DateTime currentOccurredAt)
 		{
-			_coverageSettleBuffer.Clear();
+			_settleBuffer.Clear();
 			foreach (var root in roots)
 			{
-				CollectPendingCoverageNodes(root, _coverageSettleBuffer);
+				CollectPendingSettleNodes(root, _settleBuffer);
 			}
 
-			foreach (var node in _coverageSettleBuffer)
+			foreach (var node in _settleBuffer)
 			{
-				if (!node.CoveragePendingSettle) continue;
+				if (!node.PendingSettle) continue;
 				if (node.Engine == null || !node.Engine.AgedSpan.HasValue) continue;
 
-				if (currentOccurredAt - node.LastAccumulatedOccurredAt >= node.Engine.AgedSpan.Value)
+				if (currentOccurredAt - node.SettleAnchorOccurredAt < node.Engine.AgedSpan.Value) continue;
+
+				node.PendingSettle = false;
+				MatchNode ancestor = node.Engine.IsMany ? null : node.Parent;
+				ExecuteCompleteMatch(node);
+				while (ancestor != null && ancestor.Children.Count == 0)
 				{
-					node.CoveragePendingSettle = false;
-					ExecuteCompleteMatch(node);
+					MatchNode up = ancestor.Parent;
+					PruneNode(ancestor);
+					ancestor = up;
 				}
 			}
 		}
 
-		private void CollectPendingCoverageNodes(MatchNode node, List<MatchNode> buffer)
+		private void CollectPendingSettleNodes(MatchNode node, List<MatchNode> buffer)
 		{
 			if (node == null) return;
-			if (node.CoveragePendingSettle) buffer.Add(node);
+			if (node.PendingSettle) buffer.Add(node);
 			foreach (var child in node.Children)
 			{
-				CollectPendingCoverageNodes(child, buffer);
+				CollectPendingSettleNodes(child, buffer);
 			}
 		}
 
@@ -1148,7 +1183,10 @@ namespace Puppeteer.EventSourcing.Follower
 					exactNode.IsAdvanceable = true;
 					if (exactNode.Engine.IsFinalSeek)
 					{
-						ExecuteCompleteMatch(exactNode);
+						// F3 .Aged: the window closing COMPLETES the match; the settling gate then
+						// decides whether it fires now or parks. The age reference is the counted
+						// closing event, not the out-of-window event that closed the window.
+						FireOrParkCompleteMatch(exactNode, exactNode.LastAccumulatedOccurredAt);
 					}
 				}
 				else
@@ -1364,7 +1402,7 @@ namespace Puppeteer.EventSourcing.Follower
 #if DEBUG
 							System.Diagnostics.Debug.WriteLine($"[MatchTree] COMPLETE MATCH at level={level}, EntryId={eventData.EntryId}, IsFinalSeek={isFinalSeek}");
 #endif
-							ExecuteCompleteMatch(child);
+							FireOrParkCompleteMatch(child, eventData.OccurredAt);
 						}
 					}
 					else
@@ -1422,14 +1460,67 @@ namespace Puppeteer.EventSourcing.Follower
 				CollectNodesAtDepth(child, targetDepth, currentDepth + 1, result);
 			}
 		}
+		// F3 .Aged: the single decision point between "this complete match fires now" and
+		// "it parks until its closing event has aged". Every closing-leg completion routes
+		// through here, so the gate is a property of the CLOSING SEEK and nothing else —
+		// it does not matter whether that leg closes a ForEach coverage, crosses a Many
+		// threshold, completes an Exact count or is a plain regular leg. Before this the
+		// span was consulted only on the coverage discharge path, so declaring it on any
+		// other closing leg was accepted by the builder, persisted, and then silently
+		// ignored: the match fired on its first closing event with no settling at all.
+		//
+		// closingOccurredAt is the OccurredAt of the event that CLOSED the match — the age
+		// reference frozen into the parked node (see MatchNode.SettleAnchorOccurredAt).
+		private void FireOrParkCompleteMatch(MatchNode leafNode, DateTime closingOccurredAt)
+		{
+			ArgumentNullException.ThrowIfNull(leafNode);
+
+			// A parked match is already complete; a second completion of the same node must
+			// not re-park it (that would move the age reference forward and starve it).
+			if (leafNode.PendingSettle) return;
+
+			if (leafNode.Engine != null && leafNode.Engine.AgedSpan.HasValue)
+			{
+				ParkPendingSettle(leafNode, closingOccurredAt);
+				return;
+			}
+
+			ExecuteCompleteMatch(leafNode);
+		}
+
+		// F3 .Aged: freeze the complete match and hand it to the settle tick. What is frozen
+		// and why is documented on MatchNode.SettleAnchorOccurredAt / SettleEventIds.
+		private void ParkPendingSettle(MatchNode leafNode, DateTime closingOccurredAt)
+		{
+			var frozenIds = new List<long>();
+			CollectEventIdsFromChain(leafNode, frozenIds);
+
+			var frozenCheckpoint = new Dictionary<int, long>();
+			CollectCheckpointLevelIds(leafNode, frozenCheckpoint);
+
+			leafNode.SettleEventIds = frozenIds;
+			leafNode.SettleCheckpoint = frozenCheckpoint;
+			leafNode.SettleAnchorOccurredAt = closingOccurredAt;
+			leafNode.PendingSettle = true;
+
+#if DEBUG
+			System.Diagnostics.Debug.WriteLine($"[MatchTree] F3 .Aged: parked complete match at EntryId={leafNode.EntryId}, closing OccurredAt={closingOccurredAt:O}, frozen batch={frozenIds.Count}");
+#endif
+		}
+
 		private void ExecuteCompleteMatch(MatchNode leafNode)
 		{
 #if DEBUG
 			System.Diagnostics.Debug.WriteLine($"[MatchTree] ExecuteCompleteMatch for leafNode EntryId={leafNode.EntryId}");
 #endif
-			// Collect EventIds once, reuse for checkpoint and MarkAsSkip
+			// Collect EventIds once, reuse for checkpoint and MarkAsSkip. A match that was
+			// parked by .Aged replays its FROZEN batch instead of re-walking the chain: the
+			// settle delayed the effect, not the content.
 			reactionAction.EventIdsToSkip.Clear();
-			CollectEventIdsFromChain(leafNode, reactionAction.EventIdsToSkip);
+			if (leafNode.SettleEventIds != null)
+				reactionAction.EventIdsToSkip.AddRange(leafNode.SettleEventIds);
+			else
+				CollectEventIdsFromChain(leafNode, reactionAction.EventIdsToSkip);
 
 			if (reactionAction.EventIdsToSkip.Count == 0)
 				return;
@@ -1441,7 +1532,15 @@ namespace Puppeteer.EventSourcing.Follower
 			// EventIdsToSkip position would push seekLevel beyond the Reaction's
 			// declared level count and trip ValidateSeekLevel.
 			_checkpointBuffer.Clear();
-			CollectCheckpointLevelIds(leafNode, _checkpointBuffer);
+			if (leafNode.SettleCheckpoint != null)
+			{
+				foreach (var entry in leafNode.SettleCheckpoint)
+					_checkpointBuffer[entry.Key] = entry.Value;
+			}
+			else
+			{
+				CollectCheckpointLevelIds(leafNode, _checkpointBuffer);
+			}
 
 			// Journal-outbox emit: record the outgoing message atomically with the
 			// cursor advance, then return. Distinct from the Program/Metadata path
@@ -2062,12 +2161,13 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			if (node == null) return;
 
-			// Resume/coverage: NEVER prune an OPEN coverage match as stale. Its anchor
-			// must survive so the closed-frontier does not advance past it (if it were
-			// pruned, resume from the frontier would lose it). The whole subtree is skipped.
-			// Only applies to coverage captor roots (RemainingObligations != null); for
-			// reactions without ForEach it is a no-op and pruning behavior stays intact.
-			if (node.Parent == null && IsOpenCoverageRoot(node)) return;
+			// Resume: NEVER prune an OPEN match as stale — one with coverage obligations left,
+			// or one parked by .Aged. Its anchor must survive so the frontier does not advance
+			// past it (if it were pruned, the resume would lose it), and the parked leaf itself
+			// must survive to reach TickPendingSettle. The whole subtree is skipped. A parked
+			// closing leg is a CHILDLESS leaf, so without this it would be the first thing the
+			// staleness sweep collects — losing the settling match outright.
+			if (node.Parent == null && IsOpenRoot(node)) return;
 
 			// Bottom-up: recurse into children first so the leaves get pruned
 			for (int i = node.Children.Count - 1; i >= 0; i--)
@@ -2163,11 +2263,12 @@ namespace Puppeteer.EventSourcing.Follower
 			{
 				// Where compilation fast path. The Program is parsed once at startup
 				// (Reaction.CompileWhereExpressions) and stored on the engine. Its
-				// compiled lambda captures Parameter.instance VariableSymbol objects
-				// as Expression.Constant (Parameter.ParameterInitializationExpression),
-				// so the Program is bound to one specific Parameters instance for its
-				// lifetime. We keep that instance on the engine and only mutate
-				// values per event via the indexer, which reuses existing Parameter
+				// compiled lambda resolves each parameter slot by name from the
+				// Parameters instance it receives per invocation
+				// (Parameter.RuntimeSymbolLookupExpression). We keep a dedicated
+				// instance on the engine — the set SolveReferences resolved against,
+				// reused to avoid a per-event allocation — and only mutate values
+				// per event via the indexer, which reuses existing Parameter
 				// objects (Parameters.SetParameter looks up by name and updates
 				// parameter.Value, which writes instance.value — the exact field
 				// the lambda reads). The lock serializes population + invocation
@@ -2260,14 +2361,14 @@ namespace Puppeteer.EventSourcing.Follower
 
 		// Closed-frontier = (oldest open anchor) - 1; if there are no open anchors, everything
 		// scanned has closed -> the frontier is the read-front. Step 3: .Aged parks this
-		// frontier because a complete-but-pending-settle coverage node counts as OPEN
-		// (see IsOpenCoverageRoot), so the frontier does not advance past an unsettled closure.
+		// frontier because a complete-but-parked node counts as OPEN (see IsOpenRoot), so the
+		// frontier does not advance past an unsettled closure.
 		internal long ComputeClosedFrontier(long highWater)
 		{
 			long minOpenAnchor = long.MaxValue;
 			foreach (var root in roots)
 			{
-				if (IsOpenCoverageRoot(root) && root.EntryId < minOpenAnchor)
+				if (IsOpenRoot(root) && root.EntryId < minOpenAnchor)
 					minOpenAnchor = root.EntryId;
 			}
 
@@ -2276,18 +2377,38 @@ namespace Puppeteer.EventSourcing.Follower
 			return cf < 0 ? 0 : cf;
 		}
 
-		// A coverage captor root is OPEN if it still has obligations left to cover, or
-		// if its coverage is already complete but parked by .Aged (CoveragePendingSettle in its
-		// coverage child). Closed = obligations empty and no child pending settle
-		// (it already fired ExecuteCompleteMatch and elided). For reactions without ForEach the
-		// root has no RemainingObligations -> returns false (does not participate in the frontier).
-		private static bool IsOpenCoverageRoot(MatchNode root)
+		// A root is OPEN if it still has coverage obligations left to cover, or if its match is
+		// already complete but parked by .Aged (PendingSettle anywhere in its subtree). Closed =
+		// no obligations left and nothing parked (it already fired ExecuteCompleteMatch).
+		//
+		// The parked clause is NOT coverage-specific: any closing leg can park, so any root can
+		// be held open by an unsettled closure. What stays coverage-specific is the obligation
+		// clause — a root without a ForEach has no RemainingObligations, so an ORDINARY
+		// incomplete trajectory is not "open" here and keeps taking part in stale pruning. That
+		// distinction is deliberate: treating every unfired root as open would pin the frontier
+		// on the whole tree and disable the pruning that keeps a pass O(N).
+		//
+		// The pending-settle scan must recurse into ALL descendants, not just direct children:
+		// with an intermediate ThenSeek leg between the captor and the closing leg (>= 3 seeks)
+		// the closing node is a GRANDCHILD of the anchor, not a direct child. Scanning only
+		// direct children would miss it, report the anchor "closed" and let the frontier advance
+		// past an unsettled closure; the next resume would start past the anchor and lose the
+		// parked match. This mirrors CollectPendingSettleNodes (the settle tick), which already
+		// recurses — both routes must agree on what "parked" means.
+		private static bool IsOpenRoot(MatchNode root)
 		{
-			if (root == null || root.RemainingObligations == null) return false;
-			if (root.RemainingObligations.Count > 0) return true;
-			foreach (var child in root.Children)
+			if (root == null) return false;
+			if (root.RemainingObligations != null && root.RemainingObligations.Count > 0) return true;
+			if (root.PendingSettle) return true;
+			return AnyDescendantPendingSettle(root);
+		}
+
+		private static bool AnyDescendantPendingSettle(MatchNode node)
+		{
+			foreach (var child in node.Children)
 			{
-				if (child.CoveragePendingSettle) return true;
+				if (child.PendingSettle) return true;
+				if (AnyDescendantPendingSettle(child)) return true;
 			}
 			return false;
 		}
@@ -2299,7 +2420,7 @@ namespace Puppeteer.EventSourcing.Follower
 			var result = new List<CoverageMatchSnapshot>();
 			foreach (var root in roots)
 			{
-				if (!IsOpenCoverageRoot(root)) continue;
+				if (!IsOpenRoot(root)) continue;
 
 				var snap = new CoverageMatchSnapshot
 				{
@@ -2312,10 +2433,10 @@ namespace Puppeteer.EventSourcing.Follower
 
 				foreach (var child in root.Children)
 				{
-					if (child.CoveragePendingSettle)
+					if (child.PendingSettle)
 					{
 						snap.PendingSettle = true;
-						snap.LastConfirmOccurredAt = child.LastAccumulatedOccurredAt;
+						snap.LastConfirmOccurredAt = child.SettleAnchorOccurredAt;
 						if (child.AccumulatedEventIds != null)
 							snap.AccumulatedConfirmIds.AddRange(child.AccumulatedEventIds);
 					}
@@ -2364,13 +2485,17 @@ namespace Puppeteer.EventSourcing.Follower
 					child.CurrentDepth = engines.Count - 1;
 					child.Parent = root;
 					child.LastExpansionAttemptEntryId = snap.AnchorEntryId;
-					child.CoveragePendingSettle = true;
+					child.PendingSettle = true;
 					if (snap.AccumulatedConfirmIds != null)
 					{
 						foreach (long id in snap.AccumulatedConfirmIds)
 							child.AccumulateEventId(id, snap.LastConfirmOccurredAt);
 					}
 					child.LastAccumulatedOccurredAt = snap.LastConfirmOccurredAt;
+					// The restored node carries no frozen batch: the snapshot persists the anchor
+					// and the confirm ids, and the batch is rebuilt by the chain walk (which is
+					// what applies the Elide(seek:) targeting). Only the age reference is restored.
+					child.SettleAnchorOccurredAt = snap.LastConfirmOccurredAt;
 					root.Children.Add(child);
 					CountNodeCreated(child);
 				}

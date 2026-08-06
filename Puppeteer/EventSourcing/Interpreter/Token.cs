@@ -25,6 +25,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 		@double,
 		@decimal,
 		@long,
+		@char,
 		number,
 		assign,
 		equality,

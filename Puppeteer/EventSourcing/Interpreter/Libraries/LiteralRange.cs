@@ -12,9 +12,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	// slots into every place a collection is expected — foreach and collection
 	// parameters — while letting the journal serialize it by comprehension. The
 	// sequence is empty when end < start. See docs/rfc/foreach-range-literal.md.
-	//
-	// PromotionCandidateHash keeps the AST default (value-blind), so {1..5} and
-	// {1..9} hash alike and are recognized as promotable to {@a..@b}.
 	sealed class LiteralRange : AstExpression
 	{
 		private readonly AstExpression start;

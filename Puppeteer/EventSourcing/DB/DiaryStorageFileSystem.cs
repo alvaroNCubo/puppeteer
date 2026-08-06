@@ -36,16 +36,32 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal long LastWrittenEntryId => metadata.LastWrittenEntryId;
 
+		protected internal override long LastJournaledEntryId() => metadata.LastWrittenEntryId;
+
+		protected internal override FileSystem.PayloadCompression WireCompression =>
+			(FileSystem.PayloadCompression)metadata.CompressionFlag;
+
+		protected internal override FileSystem.EncryptionMode WireEncryption =>
+			(FileSystem.EncryptionMode)metadata.EncryptionFlag;
+
+		protected internal override byte[] WireEncryptionKey => encryptionKey;
+
 		// Test seam: exposes the JournalWriter so the Distill tests can install
 		// TestHookBetweenPhase1Files. Production does not need this access.
 		internal FileSystem.JournalWriter JournalWriter => journalWriter;
 
+		// The key that reads and writes this journal's payloads, null when the journal
+		// is not encrypted. Held here rather than re-parsed per record: the connection
+		// string the base retains is redacted, so this is the only copy.
+		private readonly byte[] encryptionKey;
+
 		internal DiaryStorageFileSystem(IActorEventJournalClient eventJournalClient, string connectionString)
-			: base(eventJournalClient, connectionString)
+			: base(eventJournalClient, FileSystemConnectionString.Redact(connectionString))
 		{
 			StorageActorName.ValidateFileSystemName(Name);
 
 			var parsedConnection = new FileSystemConnectionString(connectionString);
+			this.encryptionKey = parsedConnection.EncryptionKey;
 			this.basePath = Path.Combine(parsedConnection.Path, Name);
 			this.journalDir = Path.Combine(basePath, "journal");
 			// Phase 6 of the Action refactor: dropped the actions/ directory and the
@@ -97,8 +113,24 @@ namespace Puppeteer.EventSourcing.DB
 				EventJournalClient.IsNew = false;
 			}
 
+			// The payload encoding of a journal is fixed when it is created: meta.bin is
+			// the authority for one that already exists, the connection string only for a
+			// new one. Settled here, before a single record is read or written, because
+			// both failures below are unrecoverable by construction and the caller can
+			// only be told, never healed — the same stance MetadataStore.Load takes on an
+			// unreadable meta.bin, and for the same reason: the alternative is to treat a
+			// journal that exists as absent.
+			VerifyPayloadEncodingIsReadable(metaLoaded, parsedConnection);
+
 			this.journalWriter = new JournalWriter(journalDir, metadata, sparseIndex, atomicOp);
-			journalWriter.Initialize();
+
+			// index.bin is a hint, not an authority: it is persisted every
+			// PERSIST_METADATA_INTERVAL writes while every record is flushed durably, so
+			// the index that just loaded can lag the journal files. Initialize reconciles
+			// it against them and reports whether it had to heal it; persist the corrected
+			// index right away so the next open starts from a consistent hint.
+			if (journalWriter.Initialize())
+				sparseIndex.Save();
 
 			// Verify and correct potentially stale TotalEventCount and TotalNonSkippedCount.
 			// meta.bin is persisted every PERSIST_METADATA_INTERVAL writes; after a crash it can
@@ -154,18 +186,66 @@ namespace Puppeteer.EventSourcing.DB
 			this.outboxStorage = new PartitionedOutboxStorageFileSystem(outboxDir, atomicOp);
 		}
 
+		// Two distinct failures, both refusals rather than repairs.
+		//
+		// (1) An encrypted journal opened without its key. Every payload is ciphertext,
+		//     so rehydration cannot reconstitute the actor and a write would append a
+		//     record nothing can read back. There is no partial mode worth offering: an
+		//     actor that cannot replay its own journal is not an actor.
+		//
+		// (2) A request to open an existing journal under a payload encoding other than
+		//     the one it was written with. The encoding is a property of records already
+		//     on disk; it cannot be changed by asking. Previously such a request was
+		//     accepted and discarded in silence — InitializeDefaults only runs for a new
+		//     journal — so a caller who added encryption to a live actor's configuration
+		//     got neither encryption nor any indication that the setting did nothing.
+		private void VerifyPayloadEncodingIsReadable(bool metaLoaded, FileSystemConnectionString parsedConnection)
+		{
+			var journalEncryption = (EncryptionMode)metadata.EncryptionFlag;
+
+			if (metaLoaded)
+			{
+				var journalCompression = (PayloadCompression)metadata.CompressionFlag;
+
+				if (parsedConnection.Encryption != journalEncryption)
+					throw new LanguageException(
+						$"Actor '{Name}' has an existing journal written with encryption '{journalEncryption}', "
+						+ $"but the connection string requests '{parsedConnection.Encryption}'. The payload encoding "
+						+ "is fixed when the journal is created and cannot be changed by reconfiguring; records already "
+						+ "written would become unreadable. Open it with the encoding it was created with, or start a "
+						+ "new actor directory.");
+
+				if (parsedConnection.Compression != journalCompression)
+					throw new LanguageException(
+						$"Actor '{Name}' has an existing journal written with compression '{journalCompression}', "
+						+ $"but the connection string requests '{parsedConnection.Compression}'. The payload encoding "
+						+ "is fixed when the journal is created and cannot be changed by reconfiguring. Open it with the "
+						+ "encoding it was created with, or start a new actor directory.");
+			}
+
+			if (journalEncryption != EncryptionMode.None && encryptionKey == null)
+				throw new LanguageException(
+					$"Actor '{Name}' has a journal encrypted with '{journalEncryption}', but no "
+					+ $"'{FileSystemConnectionString.ENCRYPTION_KEY_SETTING}' was supplied in the connection string. "
+					+ "Its records cannot be read without the key and no reconstitution is attempted. Add "
+					+ $"'{FileSystemConnectionString.ENCRYPTION_KEY_SETTING}=<base64 32-byte key>' to the connection string.");
+		}
+
 		protected internal override Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false)
 		{
 			return Task.Run(() => RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
+		protected internal override long RehydrateFromEvent(IActorEventJournalClient client, long afterEntryId, bool includeExposeData = false)
 		{
+			ArgumentNullException.ThrowIfNull(client);
+
 			var skipSet = skipStore.Load();
 
 			var reader = new JournalReader(journalDir, sparseIndex, skipSet,
 				(PayloadCompression)metadata.CompressionFlag,
-				(EncryptionMode)metadata.EncryptionFlag);
+				(EncryptionMode)metadata.EncryptionFlag,
+				encryptionKey);
 
 			// For a full forward rehydration (afterEntryId == 0), TotalNonSkippedCount in meta.bin
 			// is already verified/corrected in the constructor, so use it directly — no scan needed.
@@ -173,7 +253,7 @@ namespace Puppeteer.EventSourcing.DB
 			long totalNonSkipped = afterEntryId == 0
 				? metadata.TotalNonSkippedCount
 				: reader.CountNonSkippedEvents(afterEntryId);
-			EventJournalClient.BeginJournalReplay(totalNonSkipped);
+			client.BeginJournalReplay(totalNonSkipped);
 
 			// Phase 5 of the Action refactor: legacy actionStore.LoadAll dropped.
 			// Define entries in the journal populate the cache via
@@ -183,13 +263,13 @@ namespace Puppeteer.EventSourcing.DB
 			// WriteNewActionEntry that populated it.)
 
 			long lastEntryId = afterEntryId;
-			if (EventJournalClient.CanContinueReplay(lastEntryId))
+			if (client.CanContinueReplay(lastEntryId))
 			{
-				lastEntryId = reader.ReadAll(afterEntryId, EventDataPool, EventJournalClient,
-					() => EventJournalClient.CanContinueReplay(lastEntryId), includeExposeData);
+				lastEntryId = reader.ReadAll(afterEntryId, EventDataPool, client,
+					() => client.CanContinueReplay(lastEntryId), includeExposeData);
 			}
 
-			EventJournalClient.EndJournalReplay(forcedToEnd: !EventJournalClient.CanContinueReplay(lastEntryId));
+			client.EndJournalReplay(forcedToEnd: !client.CanContinueReplay(lastEntryId));
 
 			return lastEntryId;
 		}
@@ -204,6 +284,7 @@ namespace Puppeteer.EventSourcing.DB
 				record = BinaryEventCodec.EncodeScriptEvent(entryId, now, script,
 					(PayloadCompression)metadata.CompressionFlag,
 					(EncryptionMode)metadata.EncryptionFlag,
+					encryptionKey,
 					exposeData: exposeData);
 
 				journalWriter.AppendRecord(record, entryId);
@@ -267,6 +348,7 @@ namespace Puppeteer.EventSourcing.DB
 				record = FileSystem.BinaryEventCodec.EncodeDefineEvent(entryId, now, actionId, defineStatementText,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
+					encryptionKey,
 					exposeData: exposeData);
 
 				journalWriter.AppendRecord(record, entryId);
@@ -296,6 +378,7 @@ namespace Puppeteer.EventSourcing.DB
 				record = FileSystem.BinaryEventCodec.EncodeActionEvent(entryId, now, actionId, arguments,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
+					encryptionKey,
 					exposeData: exposeData);
 
 				journalWriter.AppendRecord(record, entryId);
@@ -328,11 +411,13 @@ namespace Puppeteer.EventSourcing.DB
 				defineRecord = FileSystem.BinaryEventCodec.EncodeDefineEvent(defineEntryId, now, actionId, defineStatementText,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
+					encryptionKey,
 					exposeData: null);
 
 				invocationRecord = FileSystem.BinaryEventCodec.EncodeActionEvent(invocationEntryId, now, actionId, arguments,
 					(FileSystem.PayloadCompression)metadata.CompressionFlag,
 					(FileSystem.EncryptionMode)metadata.EncryptionFlag,
+					encryptionKey,
 					exposeData: exposeData);
 
 				journalWriter.AppendRecord(defineRecord, defineEntryId);
@@ -636,7 +721,7 @@ namespace Puppeteer.EventSourcing.DB
 					if (BinaryEventCodec.TryDecodeDefine(body, bodyLength,
 						out _, out var occurredAt,
 						out var actionId, out var defineText, out var expose,
-						compression, encryption))
+						compression, encryption, encryptionKey))
 					{
 						result.Add(new MaterializationRecord(
 							entryId: entryId,
@@ -654,7 +739,7 @@ namespace Puppeteer.EventSourcing.DB
 				if (BinaryEventCodec.TryDecode(body, bodyLength,
 					out EventRecordType eventType, out _, out var fh,
 					out var scriptOrArgs, out var actId, out var exposeData,
-					compression, encryption))
+					compression, encryption, encryptionKey))
 				{
 					if (eventType == EventRecordType.Script)
 					{
@@ -712,6 +797,12 @@ namespace Puppeteer.EventSourcing.DB
 
 			foreach (var indexEntry in allEntries)
 			{
+				// Discarding a whole file on its LastEntryId is only sound while every
+				// entry covers at least the range its file really holds -- otherwise this
+				// hides committed records, and silently, since the bytes are intact. Two
+				// mechanisms keep that invariant: JournalWriter reconciles the periodically
+				// persisted index against the journal files at open, and AppendRecord
+				// extends the entry with each record it flushes.
 				if (indexEntry.LastEntryId <= afterEntryId) continue;
 
 				string filePath = Path.Combine(journalDir, $"journal_{indexEntry.FileNumber:D6}.bin");

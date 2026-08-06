@@ -91,6 +91,61 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			entries.Add(new IndexEntry(firstEntryId, fileNumber, lastEntryId));
 		}
 
+		// Reconciliation primitive for recovery, when the journal files themselves are
+		// the authority and this index is the hint being corrected (JournalWriter at
+		// open). It only ever WIDENS the stored range -- FirstEntryId keeps the minimum
+		// and LastEntryId the maximum -- so an entry can never end up covering less
+		// than the range it already claimed. That direction is what readers depend on:
+		// they use LastEntryId to decide that a file cannot hold the records they are
+		// after, so an entry that fell short of its file's real tail would hide
+		// committed records instead of merely costing an extra file read.
+		// Returns true when the index changed, so the caller can persist it.
+		internal bool WidenOrAddEntry(long firstEntryId, int fileNumber, long lastEntryId)
+		{
+			if (firstEntryId <= 0) throw new LanguageException($"FirstEntryId {firstEntryId} must be greater than zero.");
+			if (lastEntryId < firstEntryId) throw new LanguageException($"LastEntryId {lastEntryId} cannot be lower than FirstEntryId {firstEntryId}.");
+			if (fileNumber <= 0) throw new LanguageException($"FileNumber {fileNumber} must be greater than zero.");
+
+			for (int i = 0; i < entries.Count; i++)
+			{
+				if (entries[i].FileNumber != fileNumber) continue;
+
+				var current = entries[i];
+				long widenedFirst = Math.Min(current.FirstEntryId, firstEntryId);
+				long widenedLast = Math.Max(current.LastEntryId, lastEntryId);
+
+				if (widenedFirst == current.FirstEntryId && widenedLast == current.LastEntryId)
+					return false;
+
+				entries[i] = new IndexEntry(widenedFirst, fileNumber, widenedLast);
+				return true;
+			}
+
+			InsertOrdered(new IndexEntry(firstEntryId, fileNumber, lastEntryId));
+			return true;
+		}
+
+		// Entries are kept ascending by (FirstEntryId, FileNumber): the lookups here and
+		// in JournalReader binary-search over them, and the writer appends to the entry
+		// of the highest file number, which this ordering keeps last.
+		private void InsertOrdered(IndexEntry entry)
+		{
+			int position = entries.Count;
+			for (int i = 0; i < entries.Count; i++)
+			{
+				bool comesBefore = entries[i].FirstEntryId > entry.FirstEntryId
+					|| (entries[i].FirstEntryId == entry.FirstEntryId && entries[i].FileNumber > entry.FileNumber);
+
+				if (comesBefore)
+				{
+					position = i;
+					break;
+				}
+			}
+
+			entries.Insert(position, entry);
+		}
+
 		internal void UpdateLastEntry(long lastEntryId)
 		{
 			if (entries.Count == 0) throw new InvalidOperationException("No entries in index to update.");

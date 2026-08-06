@@ -1018,13 +1018,29 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 		// Coerce a captured literal value to the TYPE the matched method declares for its
 		// position, mirroring what the interpreter's call boundary does when it actually
-		// invokes the method (numeric widening + string/int -> enum). Returns the coerced
-		// value ONLY when the conversion yields the target type EXACTLY; otherwise the raw
-		// value is returned unchanged. Two consequences of the exact-type gate:
+		// invokes the method (numeric widening). Returns the coerced value ONLY when the
+		// conversion yields the target type EXACTLY; otherwise the raw value is returned
+		// unchanged. Two consequences of the exact-type gate:
 		//   - a subclass value keeps its concrete runtime type (no lossy up-cast), and
 		//   - the already-correctly-typed @parameter path (value type == target) is a no-op,
 		//     so this never perturbs a parametrized command's captures.
 		// Best-effort: any conversion failure falls back to the raw value.
+		//
+		// The widening is PRIMITIVE TO PRIMITIVE only, and deliberately does not reach a domain
+		// enum declared at that position. A capture is written into a Parameters slot typed by
+		// the coerced value, and that slot is what a downstream `tell` carries in its envelope —
+		// so coercing here would mint a DOMAIN type inside the parameter plane and ship it to
+		// another actor, which may not even load that domain. The journal holds the member NAME
+		// (the argument was authored as a primitive), the capture keeps it as that primitive, an
+		// Emit re-injects the same primitive into the next command or check, and the string->enum
+		// conversion happens where it always did: at the call site, against the signature the
+		// script actually invokes (AstExpression.ClassifyEnumArg / IsEnumArgCompatible). The type
+		// stays a fact of the domain's own method, never a fact of the transport.
+		//
+		// A pattern may still SPELL the domain type — `[_:Type].foo($day : Day)` — because a
+		// pattern is TEXT resolved against the registered libraries, which is how a Seek finds and
+		// validates the method (Pattern.ConstrainedPatternType). Naming a type there costs no
+		// assembly reference and lets it stay internal; putting it in a Parameters slot does not.
 		private static object CoerceCapturedValueToParameterType(object value, Type targetType)
 		{
 			if (value == null || targetType == null || targetType == typeof(object)) return value;
@@ -1034,21 +1050,6 @@ namespace Puppeteer.EventSourcing.Follower
 
 			try
 			{
-				if (targetType.IsEnum)
-				{
-					// The DSL admits an enum argument as its string name ('Store') or as its
-					// underlying numeric value; both resolve to the enum constant here.
-					if (value is string enumName)
-					{
-						return Enum.Parse(targetType, enumName, ignoreCase: true);
-					}
-					if (actual.IsPrimitive)
-					{
-						return Enum.ToObject(targetType, value);
-					}
-					return value;
-				}
-
 				// Numeric widening only (int -> decimal/double, double -> decimal, ...).
 				// Restricted to numeric<->numeric so we never silently turn, say, an int
 				// into a string. Convert.ChangeType handles boxed numerics correctly (unlike
@@ -1644,36 +1645,50 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 		// Match for Expose patterns.
-		// Examples:
+		// A single 'expose' statement can publish a comma list of pairs, so the node carries
+		// that list and every pair must match for the node to match: the statement asserts all
+		// of them, so a pattern naming an alias the entry never exposed describes another
+		// statement. Examples:
 		//   expose _:int total;      → match alias "total" with type int.
 		//   expose 100 total;        → match alias "total" with literal value 100.
 		//   expose _ total;          → match any value at alias "total".
 		//   expose $x total;          → capture the alias "total" value into $x (Step 13, pending).
+		//   expose $x total, $y tax;  → capture both aliases, both required.
 		private bool MatchExposeNode(ExposeNode exposeNode, PatternListNode patternAst, MatchParameters capturedVariables, ref int lastMatchedPosition)
 		{
 			if (exposeNode == null) return false;
 			if (string.IsNullOrEmpty(exposeDataJson)) return false;
 
+			foreach (var pair in exposeNode.Pairs)
+			{
+				if (!MatchExposePair(pair, capturedVariables)) return false;
+			}
+
+			return true;
+		}
+
+		private bool MatchExposePair(ExposePairNode pair, MatchParameters capturedVariables)
+		{
 #if DEBUG
-			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Matching ExposeNode for alias: {exposeNode.Alias}");
+			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Matching ExposeNode for alias: {pair.Alias}");
 #endif
 
 			// Look up the alias in the expose JSON.
-			var aliasValue = FindAliasInExposeJson(exposeDataJson, exposeNode.Alias);
+			var aliasValue = FindAliasInExposeJson(exposeDataJson, pair.Alias);
 			if (aliasValue == null)
 			{
 #if DEBUG
-				System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Alias '{exposeNode.Alias}' not found in ExposeData");
+				System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Alias '{pair.Alias}' not found in ExposeData");
 #endif
 				return false;
 			}
 
 #if DEBUG
-			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Found alias '{exposeNode.Alias}' with value: {aliasValue}");
+			System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Found alias '{pair.Alias}' with value: {aliasValue}");
 #endif
 
 			// Evaluate the pattern expression against the located value.
-			switch (exposeNode.Expression)
+			switch (pair.Expression)
 			{
 				case WildcardParameterNode:
 					// expose _ total; → match any value.
@@ -1687,7 +1702,7 @@ namespace Puppeteer.EventSourcing.Follower
 					if (typedParam.ParameterName != null && typedParam.ParameterName.StartsWith("$"))
 					{
 						// Typed capture.
-						return CaptureExposeValue(exposeNode.Alias, typedParam.ParameterName, typedParam.ParameterType, capturedVariables);
+						return CaptureExposeValue(pair.Alias, typedParam.ParameterName, typedParam.ParameterType, capturedVariables);
 					}
 					else
 					{
@@ -1713,11 +1728,11 @@ namespace Puppeteer.EventSourcing.Follower
 
 				case VariableParameterNode variableParam:
 					// expose $x total; → capture without type validation (Step 13).
-					return CaptureExposeValue(exposeNode.Alias, variableParam.VariableName, null, capturedVariables);
+					return CaptureExposeValue(pair.Alias, variableParam.VariableName, null, capturedVariables);
 
 				default:
 #if DEBUG
-					System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Unknown parameter type: {exposeNode.Expression.GetType().Name}");
+					System.Diagnostics.Debug.WriteLine($"[PatternMatcher] Unknown parameter type: {pair.Expression.GetType().Name}");
 #endif
 					return false;
 			}

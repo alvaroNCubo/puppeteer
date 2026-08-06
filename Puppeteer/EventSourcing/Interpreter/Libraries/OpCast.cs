@@ -46,10 +46,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				result = typeof(long);
 			}
-			else if (string.Equals(name, "decimal", StringComparison.OrdinalIgnoreCase) ||
-					 string.Equals(name, "double", StringComparison.OrdinalIgnoreCase))
+			// One branch used to answer for BOTH keywords and return decimal, so `(double)x` was not a
+			// cast to double — it was the same expression as `(decimal)x`. A cast names a type; two type
+			// names collapsed into one is the cast unable to say what it means. Splitting them also wakes
+			// the `typeof(double)` execution branches in both engines, which had never run.
+			else if (string.Equals(name, "decimal", StringComparison.OrdinalIgnoreCase))
 			{
 				result = typeof(decimal);
+			}
+			else if (string.Equals(name, "double", StringComparison.OrdinalIgnoreCase))
+			{
+				result = typeof(double);
 			}
 			else if (string.Equals(name, "datetime", StringComparison.OrdinalIgnoreCase))
 			{
@@ -81,6 +88,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 						elementType = typeof(bool);
 					else if (string.Equals(strSubtype, "double", StringComparison.OrdinalIgnoreCase))
 						elementType = typeof(double);
+					// decimal was absent here, so `(list<decimal>)x` looked for a DOMAIN class named
+					// 'decimal' and reported it missing from the libraries.
+					else if (string.Equals(strSubtype, "decimal", StringComparison.OrdinalIgnoreCase))
+						elementType = typeof(decimal);
 					else
 						elementType = libraries.GetTypeOrThrow(strSubtype);
 					if (elementType == null) elementType = typeof(object);
@@ -102,51 +113,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return result;
         }
 
-        private Type computeSubType()
-        {
-            if (subType == null) throw new LanguageException("The subType is only used for list element types and cannot be null.");
-			string name = subType.Name;
-			Type result;
-			if (string.Equals(name, "string", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(String);
-			}
-			else if (string.Equals(name, "int", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(int);
-			}
-			else if (string.Equals(name, "long", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(long);
-			}
-			else if (string.Equals(name, "decimal", StringComparison.OrdinalIgnoreCase) ||
-					 string.Equals(name, "double", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(double);
-			}
-			else if (string.Equals(name, "datetime", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(DateTime);
-			}
-			else if (string.Equals(name, "boolean", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(bool);
-			}
-			else if (string.Equals(name, "list", StringComparison.OrdinalIgnoreCase))
-			{
-				result = typeof(List<>);
-			}
-			else if (string.Equals(name, "null", StringComparison.OrdinalIgnoreCase))
-			{
-				throw new NotImplementedException();
-			}
-			else
-			{
-				result = libraries.GetTypeOrThrow(name);
-			}
-            return result;
-        }
-
         internal override void ValidateStatically()
         {
 			var destinationType = ComputeType();
@@ -163,6 +129,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (!ExplicitCast(sourceType, destinationType))
 			{
+				// This is the refusal an author actually reaches, since compatibility is checked before
+				// anything executes. A cast to string is the one case with a specific remedy, so it
+				// carries it here rather than in the execution branches, which validation now makes
+				// unreachable for it.
+				if (destinationType == typeof(string))
+				{
+					throw new LanguageException($"There is no cast from '{sourceType.Name}' to string: rendering a value as text depends on a format, and the format is a choice. Call ToString() on the value — ToString(format) where the type accepts one.");
+				}
+				if (sourceType == typeof(string) && destinationType == typeof(char))
+				{
+					throw new LanguageException("There is no cast from string to char: a string is a sequence and a char is one of its positions, so the position is named rather than converted. Write text[0].");
+				}
 				throw new LanguageException($"Cannot cast a value of type '{sourceType.Name}' to '{destinationType.Name}'.");
 			}
 
@@ -186,17 +164,31 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			if (nonNullableSource == typeof(bool) || nonNullableTarget == typeof(bool))
 				return nonNullableSource == nonNullableTarget;
 
-			// Enum: allows string<->enum (parse by name / ToString) and identical enum<->enum.
+			// Enum: a string parses INTO an enum by name. The reverse is not a cast — see below.
 			if (nonNullableTarget.IsEnum)
 				return nonNullableSource == typeof(string) || nonNullableSource == nonNullableTarget;
 
 			if (nonNullableSource.IsEnum)
-				return nonNullableTarget == typeof(string) || nonNullableSource == nonNullableTarget;
+				return nonNullableSource == nonNullableTarget;
 
-			// char: allow char<->char and string<->char (length-1 string; checked at execution).
-			if (nonNullableSource == typeof(char) || nonNullableTarget == typeof(char))
-				return nonNullableSource == nonNullableTarget || nonNullableSource == typeof(string) || nonNullableTarget == typeof(string);
+			// char casts to and from char, and to nothing else. NOT from string: that direction
+			// depends on the VALUE (a length-1 string bound, anything else failed), so the same script
+			// was legal or not according to what the string held — one position of a sequence is
+			// NAMED, not converted: text[0]. And NOT to string either, for the reason below.
+			if (nonNullableTarget == typeof(char))
+				return nonNullableSource == typeof(char);
+			if (nonNullableSource == typeof(char))
+				return nonNullableTarget == typeof(char);
 
+			// NO cast produces a string. Rendering a value as text is an OPERATION and not a
+			// conversion: it depends on a format, and the format is a choice — which is why C# has no
+			// cast to string either, and why `+` in this language refuses to render a type it does not
+			// know ("the textual form of such a value is a representation the author chooses",
+			// OpAdd.ConcatenationRefused). A cast that renders contradicts that principle while
+			// looking like it obeys it, so the author calls ToString(), naming the format where the
+			// type accepts one. The identity cast stays: (string)text asserts a type rather than
+			// converting anything, and that is how an argument opts out of being read as an enum
+			// member.
 			if (nonNullableSource == typeof(string) || nonNullableTarget == typeof(string))
 				return nonNullableSource == nonNullableTarget;
 
@@ -234,36 +226,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
                 if (valueType == typeof(char))
                     return value;
+                // No string -> char, at ANY length. A cast whose legality depends on the VALUE is not
+                // a cast: '(char)text' would be valid or not according to what text held at that
+                // moment. A string is a sequence and a char is one of its positions, so the author
+                // names the position — text[0] already yields a char.
                 else if (valueType == typeof(string))
-                    return Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion.StringToChar((string)value);
+                    throw new LanguageException($"There is no cast from string to char. Take one position of it instead: text[0] yields a char.");
                 else
                     throw new LanguageException($"Invalid cast from {valueType} to {cast}");
             }
             if (cast == typeof(String))
             {
+                // Only the IDENTITY. Every other source used to be rendered here — int, long, double,
+                // bool, DateTime, an enum, any object — while ExplicitCast REFUSED those same casts, so
+                // validation said no and execution said yes about one expression. Removing them settles
+                // the disagreement on the validation's side, which is also C#'s: text is produced by
+                // ToString (naming the format where the type accepts one), never by a cast.
                 if (valueType == typeof(string))
                     return value;
-                else if (valueType == typeof(int))
-                    return "" + (int)value;
-                else if (valueType == typeof(long))
-                    return "" + (long)value;
-                else if (valueType == typeof(double))
-                    return "" + (double)value;
-                else if (valueType == typeof(bool))
-                    return "" + (bool)value;
-                else if (valueType == typeof(DateTime))
-                {
-                    DateTime dateValue = (DateTime)value;
-                    if (dateValue.Hour == 0 && dateValue.Minute == 0 && dateValue.Second == 0)
-                    {
-                        return dateValue.ToString("MM/dd/yyyy");
-                    }
-                    return dateValue.ToString("MM/dd/yyyy HH:mm:ss");
-                }
-                else if (valueType.IsEnum)
-                    return value.ToString();
-                else
-                    throw new LanguageException($"Invalid cast from {valueType} to {cast}");
+
+                throw new LanguageException($"There is no cast from '{valueType.Name}' to string: rendering a value as text depends on a format, and the format is a choice. Call ToString() on the value — ToString(format) where the type accepts one.");
             }
             else if (cast == typeof(int))
             {
@@ -321,11 +303,18 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					return (double)(int)value;
 				else if (valueType == typeof(long))
 					return (double)(long)value;
+				// The mirror of what the decimal group was missing. Both groups agreed in leaving the
+				// other end of this pair out, so the two engines were equally incomplete and their
+				// agreement hid it: only asking whether every admitted source is covered finds this.
+				else if (valueType == typeof(decimal))
+					return (double)(decimal)value;
 				else if (valueType == typeof(string))
 				{
-					double decimalValue;
-					if (double.TryParse((string)value, out decimalValue))
-						return decimalValue;
+					// Named for what it holds. The local was called `decimalValue` here too — the same
+					// copy/paste fingerprint that left three defects in the decimal group.
+					double parsed;
+					if (double.TryParse((string)value, out parsed))
+						return parsed;
 					else
 						throw new LanguageException($"Invalid cast from {valueType} to {cast}");
 				}
@@ -338,17 +327,36 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             }
             else if (cast == typeof(decimal))
             {
+                // Aligned with the compiled branch below, which is the correct one. Three of these
+                // returned or omitted the wrong type, and the fingerprint of how says what happened:
+                // the local is named `decimalValue` in the int and double groups above too, so this
+                // block was written here, copied outward, and came back uncorrected in the two places
+                // where the type actually mattered.
+                //
+                // The interpreted engine is legacy, but it earns its keep as the OTHER implementation
+                // of the same semantics: a disagreement between the two is the alarm, and this session
+                // found three real defects that way. That makes a divergence here not benign — it is
+                // the instrument reading wrong, and no test could see it while both paths were free to
+                // answer differently.
                 if (valueType == typeof(decimal))
                     return value;
                 else if (valueType == typeof(int))
-                    return (double)(int)value;
+                    return (decimal)(int)value;
                 else if (valueType == typeof(long))
                     return Convert.ToDecimal((long)value);
+                // Was missing entirely, which is what made `(decimal)someDouble` throw while the
+                // compiled path converted it. It is also the signature the double <-> decimal axis of
+                // the ambiguity matrix was waiting on.
+                else if (valueType == typeof(double))
+                    return (decimal)(double)value;
                 else if (valueType == typeof(string))
                 {
-                    double decimalValue;
-                    if (double.TryParse((string)value, out decimalValue))
-                        return decimalValue;
+                    // Parsed AS a decimal, not as a double narrowed afterwards. Culture handling is
+                    // left exactly as it was, matching the compiled decimal.Parse: changing it here
+                    // would trade one divergence for another.
+                    decimal parsed;
+                    if (decimal.TryParse((string)value, out parsed))
+                        return parsed;
                     else
                         throw new LanguageException($"Invalid cast from {valueType} to {cast}");
                 }
@@ -477,11 +485,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				}
 				else if (sourceType == typeof(string))
 				{
-					var stringToCharMethod = typeof(Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion).GetMethod(
-						nameof(Puppeteer.EventSourcing.Interpreter.Utils.TypeConversion.StringToChar),
-						System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
-						null, new[] { typeof(string) }, null);
-					return Expression.Call(stringToCharMethod, expr);
+					// Refused in both engines alike, so the two never disagree about which scripts are
+					// legal — see the interpreted branch for why a value-dependent cast is not a cast.
+					throw new LanguageException($"There is no cast from string to char. Take one position of it instead: text[0] yields a char.");
 				}
 				else
 				{
@@ -490,33 +496,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (targetType == typeof(string))
 			{
+				// Mirrors the interpreted branch exactly: identity only. The two engines carried
+				// separate rules for this cast, the compiled one ending in Convert.ToString, which
+				// rendered anything at all.
 				if (sourceType == typeof(string))
 				{
 					return expr;
 				}
-				else if (sourceType == typeof(int) || sourceType == typeof(long) || sourceType == typeof(double) || sourceType == typeof(bool))
-				{
-					var toStringMethod = sourceType.GetMethod(nameof(String.ToString), Type.EmptyTypes);
-					return Expression.Call(expr, toStringMethod);
-				}
-				else if (sourceType == typeof(DateTime))
-				{
-					return FormatDateTime(expr);
-				}
-				else if (sourceType.IsEnum)
-				{
-					var toStringMethod = typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes);
-					return Expression.Call(Expression.Convert(expr, typeof(object)), toStringMethod);
-				}
-				else if (sourceType == typeof(object))
-				{
-					var toStringMethod = typeof(Convert).GetMethod(nameof(Convert.ToString), new[] { typeof(object) });
-					return Expression.Call(toStringMethod, expr);
-				}
-				else
-				{
-					throw new LanguageException($"Invalid cast from {sourceType} to {targetType} in Expression.");
-				}
+
+				throw new LanguageException($"There is no cast from '{sourceType.Name}' to string: rendering a value as text depends on a format, and the format is a choice. Call ToString() on the value — ToString(format) where the type accepts one.");
 			}
 			else if (targetType == typeof(int))
 			{
@@ -595,6 +583,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					return Expression.Convert(expr, typeof(double));
 				}
 				else if (sourceType == typeof(long))
+				{
+					return Expression.Convert(expr, typeof(double));
+				}
+				else if (sourceType == typeof(decimal))
 				{
 					return Expression.Convert(expr, typeof(double));
 				}

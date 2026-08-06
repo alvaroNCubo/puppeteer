@@ -6,12 +6,41 @@ using System.Threading.Tasks;
 
 namespace Puppeteer.EventSourcing.DB
 {
+	// A journal record paired with its wire-equivalent bytes, as produced by
+	// BinaryEventCodec.Encode* — the same encoding OnRecordWritten hands to a
+	// subscriber on the live write path. Public because the replication catch-up
+	// runs in the hosting assembly (Choreography), which has no visibility of the
+	// codec and must receive the bytes already encoded.
+	//
+	// Exists so a replication catch-up can source the gap it owes a peer from the
+	// JOURNAL. The alternative — a per-process buffer fed by the live write and
+	// live-cue paths — cannot answer for entries written in an earlier process
+	// life, so it under-serves precisely the late-join it exists to support.
+	public readonly struct JournalWireRecord
+	{
+		public long EntryId { get; }
+		public byte[] Record { get; }
+
+		internal JournalWireRecord(long entryId, byte[] record)
+		{
+			if (entryId <= 0) throw new LanguageException($"EntryId {entryId} must be greater than zero.");
+			ArgumentNullException.ThrowIfNull(record);
+			this.EntryId = entryId;
+			this.Record = record;
+		}
+	}
+
 	internal abstract class DiaryStorage
 	{
 		protected readonly string ConnectionString;
 		protected readonly string Name;
 
-		protected IActorEventJournalClient EventJournalClient;
+		// The store's OWN client — the actor it was built for. Readonly on purpose:
+		// a replay's destination is state of the call that opened it, never state of
+		// the store, so nothing may retarget the store even briefly. Readers that
+		// deliver somewhere else (a Reaction catching up through its ActorReactions
+		// wrapper) pass their client down the read path instead.
+		protected readonly IActorEventJournalClient EventJournalClient;
 		protected readonly EventDataPool EventDataPool;
 
 		// Per-actor shortcut for the error logging call sites in the backends
@@ -36,22 +65,28 @@ namespace Puppeteer.EventSourcing.DB
 		// Synthetic encoding for backends that store typed columns (not bytes).
 		// FS backend produces these bytes as part of its write path; SQL/InMemory
 		// synthesize them only when OnRecordWritten has subscribers (lazy).
+		//
+		// Encoded in the store's own wire encoding rather than unconditionally in the
+		// clear: these bytes are what leaves the store, so a store that protects its
+		// payloads must not hand out a plainer copy through this door than the one it
+		// keeps. For the typed-column backends the properties are the defaults and the
+		// result is byte-identical to what they produced before.
 		protected byte[] EncodeScriptRecord(long entryId, string script, DateTime now, string exposeData)
 		{
 			return FileSystem.BinaryEventCodec.EncodeScriptEvent(entryId, now, script,
-				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+				WireCompression, WireEncryption, WireEncryptionKey, exposeData);
 		}
 
 		protected byte[] EncodeInvocationRecord(int actionId, long entryId, DateTime now, string arguments, string exposeData)
 		{
 			return FileSystem.BinaryEventCodec.EncodeActionEvent(entryId, now, actionId, arguments,
-				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+				WireCompression, WireEncryption, WireEncryptionKey, exposeData);
 		}
 
 		protected byte[] EncodeDefineRecord(int actionId, string defineStatementText, long entryId, DateTime now, string exposeData)
 		{
 			return FileSystem.BinaryEventCodec.EncodeDefineEvent(entryId, now, actionId, defineStatementText,
-				FileSystem.PayloadCompression.None, FileSystem.EncryptionMode.None, null, exposeData);
+				WireCompression, WireEncryption, WireEncryptionKey, exposeData);
 		}
 
 
@@ -105,28 +140,48 @@ namespace Puppeteer.EventSourcing.DB
 				&& string.Equals(ConnectionString, other.ConnectionString, StringComparison.Ordinal);
 		}
 
-		protected internal abstract long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false);
+		// Forward-only read of the journal, delivering every record to `client`.
+		//
+		// The client is a PARAMETER rather than the store's field because a store is a
+		// journal reader, not a routing table: one actor owns one store, but N readers
+		// can walk that one append-only journal at the same time (the actor's own
+		// rehydration, plus a catch-up per Reaction). Each backend must dispatch every
+		// row to the client it was handed, so overlapping readers never observe each
+		// other's destination.
+		protected internal abstract long RehydrateFromEvent(IActorEventJournalClient client, long afterEntryId, bool includeExposeData = false);
 		protected internal abstract Task<long> RehydrateFromEventAsync(long afterEntryId, bool includeExposeData = false);
 
-		// Reactions replay against a temporary journal client (the ActorReactions
-		// wrapper) instead of the storage's own. Forward-only: the append-only
-		// journal has a single natural reading order.
-		internal long RehydrateFromEvent(IActorEventJournalClient temporaryClient, long afterEntryId, bool includeExposeData = false)
+		// Read on behalf of the actor that owns this store — the default destination.
+		protected internal long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
 		{
-			ArgumentNullException.ThrowIfNull(temporaryClient);
-
-			var originalClient = this.EventJournalClient;
-
-			try
-			{
-				this.EventJournalClient = temporaryClient;
-				return RehydrateFromEvent(afterEntryId, includeExposeData);
-			}
-			finally
-			{
-				this.EventJournalClient = originalClient;
-			}
+			return RehydrateFromEvent(EventJournalClient, afterEntryId, includeExposeData);
 		}
+
+		// The payload encoding this journal's records are written in, and the key that
+		// opens them. A record that leaves this store — a replication cue, a catch-up —
+		// is encoded exactly this way, so what travels matches what the actor's own
+		// replay expects and no path silently downgrades a payload the store chose to
+		// protect. Backends that keep typed columns rather than encoded payloads answer
+		// with the defaults, which is what they already synthesized.
+		protected internal virtual FileSystem.PayloadCompression WireCompression => FileSystem.PayloadCompression.None;
+		protected internal virtual FileSystem.EncryptionMode WireEncryption => FileSystem.EncryptionMode.None;
+		protected internal virtual byte[] WireEncryptionKey => null;
+
+		// Greatest entry id this journal holds, 0 when it holds nothing.
+		//
+		// The replication of a buffered journal needs it: the remote write commits BEFORE
+		// the replication watermark reaches disk, so the watermark is a hint that can
+		// legitimately lag behind what the journal already contains, while the journal's
+		// own head cannot. Abstract rather than defaulted on purpose — a backend that
+		// answered a conservative 0 would make the replay re-send committed records, which
+		// is fatal where the entry id is a primary key and silent divergence where it is not.
+		protected internal abstract long LastJournaledEntryId();
+
+		// Reactions replay against a journal client of their own (the ActorReactions
+		// wrapper) instead of the storage's. That client now travels as an argument of
+		// the read above; there is no store state to swap and therefore nothing to
+		// restore, which is what lets two Reactions catch up on one actor at once.
+		// Forward-only: the append-only journal has a single natural reading order.
 
 
 		// Phase 6 of the Action refactor: dropped WriteActionEntry +
@@ -423,6 +478,51 @@ namespace Puppeteer.EventSourcing.DB
 		protected internal virtual Task ReadRecordsAfterAsync(long afterEntryId, List<MaterializationRecord> result)
 		{
 			throw new NotImplementedException($"{GetType().Name} has not adopted ReadRecordsAfterAsync yet (Materialize v2 Fase 2).");
+		}
+
+		// Same range as ReadRecordsAfter (afterEntryId exclusive, ascending, no Skip /
+		// EventElision filtering), projected to the wire encoding a replication cue
+		// carries. Backend-agnostic by construction: it composes the per-backend
+		// ReadRecordsAfter with the same Encode* helpers the typed-column backends
+		// already use to synthesize OnRecordWritten's bytes, so every backend that can
+		// answer ReadRecordsAfter can serve a catch-up without its own override.
+		//
+		// Encoded in the store's own wire encoding, so a catch-up delivers a record in
+		// the same shape the live write callback does. The receiving side therefore
+		// needs whatever the sending store needed — for an encrypted journal, the same
+		// key — and no path here turns a protected payload into a plain one on its way
+		// out. A record physically removed by Distill is absent here, as it is from the
+		// journal itself; the caller decides what an absent entry in the range means.
+		internal void ReadWireRecordsAfter(long afterEntryId, List<JournalWireRecord> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			if (afterEntryId < 0) throw new LanguageException($"afterEntryId {afterEntryId} must be zero or greater.");
+
+			result.Clear();
+
+			var records = new List<MaterializationRecord>();
+			ReadRecordsAfter(afterEntryId, records);
+
+			foreach (MaterializationRecord record in records)
+			{
+				byte[] wire;
+				switch (record.Kind)
+				{
+					case MaterializationRecordKind.Script:
+						wire = EncodeScriptRecord(record.EntryId, record.Script, record.OccurredAt, record.ExposeData);
+						break;
+					case MaterializationRecordKind.Invocation:
+						wire = EncodeInvocationRecord(record.ActionId, record.EntryId, record.OccurredAt, record.Arguments, record.ExposeData);
+						break;
+					case MaterializationRecordKind.Define:
+						wire = EncodeDefineRecord(record.ActionId, record.DefineStatementText, record.EntryId, record.OccurredAt, record.ExposeData);
+						break;
+					default:
+						throw new LanguageException($"Journal record kind {record.Kind} has no wire encoding.");
+				}
+
+				result.Add(new JournalWireRecord(record.EntryId, wire));
+			}
 		}
 
 		// Paper 5 / Materialize v2 — Phase 3. Wire verb (c) DameCheckpointsHasta:

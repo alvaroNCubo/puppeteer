@@ -261,27 +261,6 @@ namespace Choreography.Ensemble
             return this;
         }
 
-        // B.3.4: configure automatic Script → Action promotion threshold for
-        // the V1 performers hosted by this ensemble. Stores the prototype so
-        // new performers created via GetOrCreate also receive the setting,
-        // AND propagates immediately to existing PerformanceV1 instances.
-        // V2 performers are silently ignored — they explicitly declare their
-        // Actions and have no Script-shaped path to promote.
-        // null = use the ActorHandler default (30).
-        private int? promotionThresholdPrototype;
-        public EnsemblePerformance<T> InternalAutomaticPromotion(int threshold)
-        {
-            this.promotionThresholdPrototype = threshold;
-            foreach (var perf in performers.Values)
-            {
-                if (perf is PerformanceV1 v1)
-                {
-                    v1.InternalAutomaticPromotion(threshold);
-                }
-            }
-            return this;
-        }
-
         public T GetOrCreate(string id)
         {
             if (string.IsNullOrWhiteSpace(id))
@@ -327,12 +306,6 @@ namespace Choreography.Ensemble
                 if (loggerPrototype != null)
                 {
                     perf.Logger(loggerPrototype);
-                }
-                // B.3.4: propagate the promotion threshold to newly created V1
-                // performers (V2 doesn't have a Script path to promote).
-                if (promotionThresholdPrototype.HasValue && perf is PerformanceV1 v1Promo)
-                {
-                    v1Promo.InternalAutomaticPromotion(promotionThresholdPrototype.Value);
                 }
                 return perf;
             });

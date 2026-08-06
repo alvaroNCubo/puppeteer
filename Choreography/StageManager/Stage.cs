@@ -50,7 +50,6 @@ namespace Choreography.StageManager
 
         private readonly List<CancellationTokenSource> backgroundTasks = new();
         protected readonly ConcurrentDictionary<Guid, TaskCompletionSource<CommandResult>> pendingCommands = new();
-        private readonly ConcurrentDictionary<long, BufferedEntry> entryBuffer = new();
 
         // Casting election protocol phase (a) — Heartbeat loop.
         // lastSeenDirector: timestamp of the last Heartbeat (or DirectorAnnounce)
@@ -797,28 +796,60 @@ namespace Choreography.StageManager
                 }
             }
 
-            for (long eid = peerLastEntryId + 1; eid <= myMax; eid++)
-            {
-                if (entryBuffer.TryGetValue(eid, out var entry) && entry.Record != null)
-                {
-                    // Phase 5 of the Action refactor: dropped the ActionDef
-                    // pre-broadcast in catch-up. Define records ride CueEvent like
-                    // any other journal record.
+            // Nothing owed: return before touching the journal. The re-handshake path
+            // calls this on every reconnect, usually with the peer already at this
+            // Stage's head, and a peer that is level must not cost a journal read.
+            if (myMax <= peerLastEntryId)
+                return;
 
-                    // Route via the same per-link queue used by OnRecordWritten so
-                    // catch-up records and live broadcasts cannot interleave out
-                    // of order on this link. WriteAsync awaits if the worker has
-                    // not yet drained — for an unbounded channel that is a no-op,
-                    // but it preserves cancellation semantics.
-                    var cue = new CueEvent(Id, eid, entry.Record);
-                    await link.EnqueueReplicationAsync(cue, ct);
-                    await Task.Delay(10, ct);
-                }
-                else
-                {
-                    hook.Logger.Debug($"[Stage {Id}] CatchUp: record {eid} not in buffer");
-                }
+            // The gap is served from the JOURNAL, which is what actually defines what
+            // this Stage owes the peer. The previous source was a per-process dictionary
+            // fed only by the live paths (OnRecordWritten on a local write, and an
+            // incoming CueEvent while attached to a Director), so it could not answer for
+            // entries written in an earlier process life. A Stage that had rehydrated
+            // therefore skipped every pre-restart entry and still reported success: the
+            // records were on disk, the gap was computed correctly, and each miss was a
+            // debug line. That silently defeats the late-join this method exists to
+            // perform — no peer can ever join a Director that outlived a restart. The
+            // Playbill leg above already reads from its durable store; this is the
+            // journal's counterpart.
+            //
+            // One read for the whole gap, as the Playbill leg does: reading per entry
+            // would rescan the journal once per entry. The gap is therefore held in
+            // memory for the duration of the send.
+            var pendingRecords = new List<Puppeteer.EventSourcing.DB.JournalWireRecord>();
+            hook.ReadJournalRecordsAfter(peerLastEntryId, pendingRecords);
+
+            long sent = 0;
+            foreach (var record in pendingRecords)
+            {
+                if (record.EntryId > myMax) break;
+
+                // Phase 5 of the Action refactor: dropped the ActionDef
+                // pre-broadcast in catch-up. Define records ride CueEvent like
+                // any other journal record.
+
+                // Route via the same per-link queue used by OnRecordWritten so
+                // catch-up records and live broadcasts cannot interleave out
+                // of order on this link. WriteAsync awaits if the worker has
+                // not yet drained — for an unbounded channel that is a no-op,
+                // but it preserves cancellation semantics.
+                var cue = new CueEvent(Id, record.EntryId, record.Record);
+                await link.EnqueueReplicationAsync(cue, ct);
+                sent++;
+                await Task.Delay(10, ct);
             }
+
+            // An entry the journal no longer holds cannot be shipped: Distill removes
+            // elided entries physically, so a range can be short at the tail or holed in
+            // the middle. Counting against the span reports either. Kept visible because
+            // the peer then stops at the hole (its apply path requires contiguity) and
+            // nothing downstream can infer why.
+            long owed = myMax - peerLastEntryId;
+            if (sent < owed)
+                hook.Logger.Debug(
+                    $"[Stage {Id}] CatchUp for {peerId}: journal served {sent} of {owed} entries "
+                    + $"in {peerLastEntryId + 1}..{myMax}");
         }
 
         // --- Channel listeners ---
@@ -1061,9 +1092,6 @@ namespace Choreography.StageManager
                                 hook.WriteRawRecord(cue.JournalRecord, cue.EntryId);
                                 hook.ApplyReplicatedEvent(cue.JournalRecord);
 
-                                var cueEntry = entryBuffer.GetOrAdd(cue.EntryId, _ => new BufferedEntry());
-                                cueEntry.Record = cue.JournalRecord;
-
                                 await channel.SendAsync(new CueAck(Id, cue.EntryId), ct);
                             }
                             else if (cue.EntryId > localMax + 1)
@@ -1220,11 +1248,12 @@ namespace Choreography.StageManager
         // Phase 5 of the Action refactor: dropped Stage.OnNewActionDefined.
         // Define records flow through OnRecordWritten like any other journal record.
 
+        // Live broadcast only. This used to also retain every record in a per-process
+        // dictionary, which was the catch-up's source; the catch-up now reads the
+        // journal, so the retention had no reader and only grew — one byte[] per entry
+        // for the lifetime of the process, never evicted.
         private void OnRecordWritten(long entryId, byte[] record)
         {
-            var entry = entryBuffer.GetOrAdd(entryId, _ => new BufferedEntry());
-            entry.Record = record;
-
             if (!IsDirector) return;
 
             foreach (var kvp in castLinks)
@@ -2120,15 +2149,6 @@ namespace Choreography.StageManager
                 }
                 workerCts?.Dispose();
             }
-        }
-
-        private class BufferedEntry
-        {
-            // Phase 5 of the Action refactor: dropped the ActionDef field.
-            // Replication of action definitions now flows through Record like any
-            // other journal entry (the byte[] is a Define record decoded on the
-            // follower side via hook.ApplyReplicatedEvent).
-            public byte[] Record;
         }
     }
 }

@@ -23,26 +23,50 @@ namespace Puppeteer.EventSourcing.Playbill
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(actorName);
 			ArgumentNullException.ThrowIfNull(logger);
 
+			// The storage configuration is a SINGLE field read by TWO consumers: the
+			// Diary and this Playbill. `localBufferPath` is an engine-level key of that
+			// configuration, not a backend key, so every consumer must run the same
+			// backend-orthogonal pre-parser before handing the string to a backend —
+			// exactly what Diary's constructor does. Skipping it here is not a mere
+			// diagnostic wart: a strict ADO.NET connection-string builder rejects an
+			// unknown option WHILE PARSING, before any I/O, so declaring a Playbill
+			// would abort at boot on any actor that also enables the local buffer,
+			// making the two features mutually exclusive on those backends. The buffer
+			// path is discarded here on purpose: the Playbill holds operational
+			// evidence, not transactional load, so it has no write path to buffer.
+			string backendConnectionString = SanitizeForBackend(connectionString);
+
 			if (dbType == DatabaseType.IN_MEMORY)
 			{
 				store = new PlaybillStoreInMemory(actorName, logger);
 			}
 			else if (dbType == DatabaseType.MySQL)
 			{
-				store = new PlaybillStoreMySQL(actorName, connectionString, logger);
+				store = new PlaybillStoreMySQL(actorName, backendConnectionString, logger);
 			}
 			else if (dbType == DatabaseType.SQLServer)
 			{
-				store = new PlaybillStoreSQLServer(actorName, connectionString, logger);
+				store = new PlaybillStoreSQLServer(actorName, backendConnectionString, logger);
 			}
 			else if (dbType == DatabaseType.FileSystem)
 			{
-				store = new PlaybillStoreFileSystem(actorName, connectionString, logger);
+				store = new PlaybillStoreFileSystem(actorName, backendConnectionString, logger);
 			}
 			else
 			{
 				throw new LanguageException($"DatabaseType '{dbType}' not supported by Playbill.");
 			}
+		}
+
+		// An empty/blank connection string carries nothing to extract; the pre-parser
+		// rejects it, and rejecting it here too would tighten this constructor's own
+		// contract (it only requires non-null). Leave that decision to the backend.
+		private static string SanitizeForBackend(string connectionString)
+		{
+			if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;
+
+			(string backendConnectionString, _) = StorageConnectionString.Extract(connectionString);
+			return backendConnectionString;
 		}
 
 		// === Replication hooks (Phase 5) — proxy of the store's callbacks ===

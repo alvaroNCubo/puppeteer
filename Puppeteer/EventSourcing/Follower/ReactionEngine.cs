@@ -19,14 +19,14 @@ namespace Puppeteer.EventSourcing.Follower
 		// Where compilation: lazy JIT pattern. The Program in CachedWhereProgram is
 		// parsed at startup (Reaction.CompileWhereExpressions). SolveReferences +
 		// Compile happen on the first per-event invocation, when the matched
-		// parameters provide concrete types. The compiled lambda captures the
-		// Parameter.instance VariableSymbol objects as Expression.Constant at
-		// compile time (see Parameter.ParameterInitializationExpression), so the
-		// Program is bound to ONE specific Parameters instance for its lifetime.
-		// We therefore own a dedicated Parameters per engine and reuse it across
-		// events — only the Values mutate per call. The lock serializes both the
-		// first-call compile and the population+invoke per event because the
-		// Parameters instance is engine-shared mutable state.
+		// parameters provide concrete types. The compiled lambda resolves each
+		// parameter slot by name from the Parameters instance it RECEIVES per
+		// invocation (see Parameter.RuntimeSymbolLookupExpression). We still own
+		// a dedicated Parameters per engine and reuse it across events — it is
+		// the set SolveReferences resolved against, and reusing it avoids a
+		// per-event allocation — only the Values mutate per call. The lock
+		// serializes both the first-call compile and the population+invoke per
+		// event because the Parameters instance is engine-shared mutable state.
 		private readonly object whereCompileLock = new object();
 		private Parameters cachedWhereParameters;
 

@@ -49,6 +49,10 @@ namespace Puppeteer
 			// comparing the type).
 			this.isNullableParameter = !type.IsValueType || Nullable.GetUnderlyingType(type) != null;
 			this.parameterType = NormalizeParameterType(type);
+			// See IsSupportedParameterType for the design reason: a domain is reachable only as a
+			// SETTING of the puppet, so no caller may need to name one of its types.
+			if (!IsSupportedParameterType(this.parameterType))
+				throw new LanguageException($"Parameter '{name}' is declared as '{this.parameterType.Name}', which is not a valid parameter type. A parameter carries a primitive value: {ParameterTypeCatalog}. A domain type — class, struct or enum — is never a parameter type: naming one here means it was widened to public and the calling project took a reference on the domain assembly, when a domain is meant to reach the framework only as a setting of the puppet, by reflection. Pass a primitive instead (for example the value's name as a string, or value.ToString() in a format of your choosing) and let the script's call site coerce it, so that interpretation happens inside the actor and is journaled with the act.");
 			this.parameterModifier = parameterModifier;
 			this.instance = SymbolTable.IsolatedStorage(name, null, this.parameterType);
 		}
@@ -64,6 +68,172 @@ namespace Puppeteer
 			var underlyingType = Nullable.GetUnderlyingType(type);
 			return underlyingType ?? type;
 		}
+
+		// The parameter plane admits PRIMITIVE values only: int, long, double, decimal, char,
+		// string, bool, datetime, plus a ONE-LEVEL collection of those (List<T>, IEnumerable<T>,
+		// T[], where T is one of those scalars — never another collection). The admitted set is
+		// closed and every type in it is owned by the LANGUAGE. Nothing owned by a domain is a
+		// parameter type — not a class, not a struct, not an enum.
+		//
+		// WHY the set is closed, which is the whole design and not a serialization detail. A
+		// domain enters Puppeteer exactly one way: as a SETTING of the puppet — the libraries are
+		// handed to the actor at composition and reached by REFLECTION. That indirection is the
+		// point: `internal` is the domain's fence against the host language, and reflection is how
+		// the framework steps over it without anyone else being able to. A caller therefore never
+		// needs to NAME a domain type, and must not be able to.
+		//
+		// Read the contrapositive, because it is the diagnostic. If a call site can write
+		// `typeof(SomeDomainType)` in a parameter declaration, then two things already happened
+		// upstream: that type was widened to `public`, and the calling project took a
+		// compile-time reference on the domain assembly. The fence is breached before this method
+		// ever runs, and the type is now a public identifier loose on the program's interface with
+		// no reason to be there — rename it or move it and the caller, the journal, and the wire
+		// all break at once. Admitting such a type here is what creates the pressure to breach the
+		// fence, so refusing it is what keeps the domain reachable only as a setting.
+		//
+		// A domain enum is refused for that reason and NOT for lack of a wire form: an enum could
+		// be journaled symbolically, which is precisely why it is the tempting case. What it
+		// cannot do is be named by a caller without the breach above. The supported route keeps
+		// the interpretation INSIDE the actor: pass the member name as a `string` parameter and let
+		// the call site coerce it to the enum (see AstExpression.ClassifyEnumArg /
+		// IsEnumArgCompatible). Then deciding that a given name denotes a given member is part of
+		// the journaled, replayed act, instead of a decision the caller made off the record.
+		//
+		// Same reasoning refuses a container or an arbitrary struct: the author converts at the
+		// boundary (value.ToString(), instant.ToString(format)) so the representation is CHOSEN
+		// and no DTO enters dressed as a legitimate domain type.
+		//
+		// The type is checked where the slot is DECLARED, not where the operation is prepared.
+		// Refusal used to come from freezing the canonical `define action` signature, which only a
+		// COMMAND does: the identical declaration bound and RAN in a query, quietly yielding
+		// whatever the value's ToString produced. An unsupported type was therefore half-legal,
+		// working until the day that query became a command. Which operation consumes a slot is
+		// not part of its type contract, so the refusal belongs at the declaration, where it reads
+		// the same everywhere and under either compilation policy (declaring is not evaluating).
+		//
+		// Expects the NORMALIZED type (see NormalizeParameterType): an array already arrives as
+		// IEnumerable<element> and a Nullable<T> as T, so only the element type is recursed on.
+		// A char slot takes a char. A one-character string used to be coerced into one here, which is
+		// how a DTO carrying a char as text got in — but that was decided when neither side could say
+		// "char" properly: the language had no char literal, so a char was written as a string
+		// everywhere. Both sides can say it now ('L' in the caller's C#, 'L'c in the DSL), so the
+		// coercion no longer buys expressiveness; it only lets the declared type and the supplied
+		// value disagree, and a slot whose stored value does not match what it promises is the shape
+		// every reader downstream then has to special-case.
+		//
+		// Refused at the slot, where the disagreement is, rather than converted silently. This is the
+		// rule the plane already applies to a container or an arbitrary struct — the author converts
+		// at the boundary so the representation is CHOSEN — applied to the case that had been carved
+		// out of it.
+		private void RefuseStringWhereCharIsDeclared(object value)
+		{
+			if (value == null) return;
+			if (DeclaredElementType() != typeof(char)) return;
+
+			if (value is string suppliedText)
+			{
+				throw new LanguageException($"Parameter '{name}' is declared char, so its value must be a char{DescribeSuppliedText(suppliedText)}. A string was supplied. To pass text, declare the parameter string instead; there is no conversion from string to char (in the DSL, take one position of it: text[0]).");
+			}
+
+			if (value is System.Collections.IEnumerable sequence)
+			{
+				foreach (object element in sequence)
+				{
+					if (element is string)
+					{
+						throw new LanguageException($"Parameter '{name}' is declared as a collection of char, so every element must be a char — write 'L' rather than \"L\". A string element was supplied. To pass text, declare the parameter as a collection of string.");
+					}
+					break;
+				}
+			}
+		}
+
+		// The declared type's element type for a collection, or the type itself for a scalar. A
+		// collection parameter may be stored either normalized (IEnumerable<T>) or as the array the
+		// caller wrote, so both shapes are read.
+		private Type DeclaredElementType()
+		{
+			if (parameterType == null) return null;
+			if (parameterType.IsArray) return parameterType.GetElementType();
+			if (parameterType.IsGenericType && parameterType.GenericTypeArguments.Length == 1)
+				return parameterType.GenericTypeArguments[0];
+			return parameterType;
+		}
+
+		private static string DescribeSuppliedText(string suppliedText)
+		{
+			// Echo the author's OWN value in the char form when it is one character long: that is the
+			// case the coercion used to absorb, so showing '<their value>' is the whole remedy. For a
+			// longer value there is no char form to suggest, so name the length instead — the value is
+			// text and the declaration is what has to change.
+			return suppliedText.Length == 1
+				? $" — write '{suppliedText}' rather than \"{suppliedText}\""
+				: $", but a string of length {suppliedText.Length} was supplied";
+		}
+
+		// The CLR type a slot of this declared type actually HOLDS. They coincide for every
+		// primitive; the symbol marker is the one place they part, because `typeof(Enum)` declares a
+		// READING (this string names an enum member) rather than a representation. Everything that
+		// touches the stored object — the compiled slot read, the value writer, the blob reader —
+		// must agree on this, or one of them casts to a type the value never had.
+		internal static Type StorageTypeOf(Type declaredType)
+		{
+			ArgumentNullException.ThrowIfNull(declaredType);
+			return declaredType == typeof(Enum) ? typeof(string) : declaredType;
+		}
+
+		internal static bool IsSupportedParameterType(Type normalizedType)
+		{
+			ArgumentNullException.ThrowIfNull(normalizedType);
+
+			if (IsPrimitiveScalarParameterType(normalizedType)) return true;
+
+			// A collection is EXACTLY ONE level deep over a primitive scalar, in the two shapes
+			// the parameter machinery reads and writes (an array arrives here already normalized
+			// to IEnumerable<element>). The element is deliberately NOT recursed on: a nested
+			// collection has no wire form, because the writer dispatches on the element type
+			// against the primitive scalars and the arguments blob has one nesting level of
+			// braces to read back. Admitting one would repeat the half-legal pattern this guard
+			// exists to end — a query would run and the journaled command would fail.
+			if (normalizedType.IsGenericType)
+			{
+				Type genericDefinition = normalizedType.GetGenericTypeDefinition();
+				if (genericDefinition != typeof(List<>) && genericDefinition != typeof(IEnumerable<>)) return false;
+				return IsPrimitiveScalarParameterType(normalizedType.GenericTypeArguments[0]);
+			}
+
+			return false;
+		}
+
+		private static bool IsPrimitiveScalarParameterType(Type normalizedType)
+		{
+			if (normalizedType == typeof(int)) return true;
+			if (normalizedType == typeof(long)) return true;
+			if (normalizedType == typeof(double)) return true;
+			if (normalizedType == typeof(decimal)) return true;
+			// A single-character string coerces to char at the boundary (TypeConversion).
+			if (normalizedType == typeof(char)) return true;
+			if (normalizedType == typeof(string)) return true;
+			if (normalizedType == typeof(bool)) return true;
+			if (normalizedType == typeof(DateTime)) return true;
+			// `typeof(Enum)` — the abstract base, never a domain's enum — declares that this
+			// string value is a SYMBOL: a member name to be resolved against whatever enum the
+			// invoked signature declares. It is admitted for the same reason a domain enum is
+			// refused. The refusal is about the assembly boundary, not about symbols: naming
+			// `typeof(SomeDomainEnum)` requires that type widened to public and the calling
+			// project referencing the domain assembly. `System.Enum` is owned by the LANGUAGE, so
+			// it names nothing of the domain and crosses no boundary, while still letting the
+			// caller state at the border what a bare string cannot say about itself. The value
+			// travels and is stored as a string; only its READING is fixed.
+			if (normalizedType == typeof(Enum)) return true;
+			return false;
+		}
+
+		// Spelled in the language's own type names, not the CLR's, because this is what the author
+		// writes. Listing the admitted set is the actionable half of the refusal: the author needs
+		// to know which shape to convert TO, not merely that the one they chose was wrong.
+		private const string ParameterTypeCatalog =
+			"int, long, double, decimal, char, string, bool, datetime, typeof(Enum) for a string that names an enum member, or a one-level collection of the primitives (List<T>, IEnumerable<T>, T[])";
 
 		internal static bool IsValidParameterName(string name)
 		{
@@ -108,6 +278,7 @@ namespace Puppeteer
 		{
 			set
 			{
+				RefuseStringWhereCharIsDeclared(value);
 
 				if (parameterModifier == In)
 				{
@@ -152,7 +323,13 @@ namespace Puppeteer
 						// ImplicitCast result), so the stored value matches the declared type. Compiled
 						// mode reads the slot as (char)value, which would fail to unbox a string; storing
 						// the char keeps `typeof(char)` with a 1-char string value working in both modes.
-						object toStore = (parameterType == typeof(char) && value is string) ? result : value;
+						// Same reasoning for the symbol marker: a caller may hand over the member NAME
+					// or the enum value itself, and both are stored as the NAME, so the stored
+					// value always matches what the declared type promises its readers (a string).
+					// Accepting the enum value is an ergonomic concession, not a second
+					// representation — it is normalized on the way in, once.
+					object toStore = ((parameterType == typeof(char) && value is string)
+						|| (parameterType == typeof(Enum) && value is Enum)) ? result : value;
 						instance.value = toStore;
 						previousInstanceValue = toStore;
 					}
@@ -315,31 +492,24 @@ namespace Puppeteer
 
 		internal Expression AllocateParameterStorageExpression(ParameterExpression parametersParam, bool isLValue)
 		{
-			if (parameterDeclaration == null) parameterDeclaration = Expression.Variable(typeof(VariableSymbol), $"_$_param_{name}_storage");
+			// Claim the storage for THIS lambda before building it; see storageOwner.
+			ParameterDeclarationExpression(parametersParam);
 			if (LValueStorageExpression != null) throw new LanguageException($"Local storage for parameter '{name}' has already been created.");
 			if (RValueReferenceExpression != null) throw new LanguageException($"Local storage for parameter '{name}' has already been created.");
 
-			var getItemMethod = typeof(Parameters).GetMethod(
-				"get_Item",
-				BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.FlattenHierarchy,
-				null,
-				new[] { typeof(string) },
-				null
-			);
-			var parameterNameExpr = Expression.Constant(this.Name, typeof(string));
-			var parameterExpr = Expression.Call(parametersParam, getItemMethod, parameterNameExpr);
-
-			var instanceField = typeof(Parameter).GetField(nameof(Parameter.instance), BindingFlags.NonPublic | BindingFlags.Instance);
-			var simboloVariableExpression = Expression.Field(parameterExpr, instanceField);
-
-			var assignExpr = Expression.Assign(parameterDeclaration, simboloVariableExpression);
+			var assignExpr = Expression.Assign(parameterDeclaration, RuntimeSymbolLookupExpression(parametersParam));
 
 			LValueStorageExpression = parameterDeclaration;
 
 			{
 				var objectField = typeof(VariableSymbol).GetField(nameof(VariableSymbol.value), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 				var valueExpr = Expression.Field(parameterDeclaration, objectField);
-				Expression convertedValueExpr = Expression.Convert(valueExpr, this.ParameterType);
+				// Read at the STORAGE type, not the declared one. For every primitive the two
+				// coincide; for the symbol marker they do not — `typeof(Enum)` declares how the
+				// value must be READ at a call site while the slot holds the member name as a
+				// string. Casting the slot to the declared abstract base would fail on the very
+				// value the boundary put there.
+				Expression convertedValueExpr = Expression.Convert(valueExpr, StorageTypeOf(this.ParameterType));
 
 				// A value-type parameter slot can legitimately hold null: an Out slot carries the
 				// `= null` empty '?' placeholder until (and unless) the body assigns it, and a
@@ -368,21 +538,69 @@ namespace Puppeteer
 		}
 
 		private ParameterExpression parameterDeclaration;
-		internal ParameterExpression ParameterDeclarationExpression()
+
+		// The lambda whose Parameters argument the cached storage above was built against. The
+		// storage local is per-LAMBDA: it is declared in that lambda's block and (on the first
+		// reference) assigned from the Parameters that lambda RECEIVES. Two Programs can
+		// reference the very same Parameter object — an Action's body and the sub-program of one
+		// of its own Eval parameters do, because the sub-program is resolved against the Action's
+		// parameter set — and each must bind from its own argument. Without this key the second
+		// Program to compile reused the first one's storage and therefore its
+		// ParameterInitializationExpression constant, reading and writing a VariableSymbol
+		// captured at the FIRST compilation instead of the set handed to it at run time.
+		private ParameterExpression storageOwner;
+
+		internal ParameterExpression ParameterDeclarationExpression(ParameterExpression parametersParam)
 		{
-			if (parameterDeclaration == null)
+			ArgumentNullException.ThrowIfNull(parametersParam);
+
+			if (!ReferenceEquals(storageOwner, parametersParam))
 			{
+				storageOwner = parametersParam;
 				parameterDeclaration = Expression.Variable(typeof(VariableSymbol), $"_$_param_{name}_storage");
+				LValueStorageExpression = null;
+				RValueReferenceExpression = null;
 			}
 			return parameterDeclaration;
 		}
 
+		// The `parameters[name].instance` lookup against the Parameters instance the compiled
+		// lambda RECEIVES. Every initialization of the per-lambda storage local must go through
+		// this runtime lookup: capturing the VariableSymbol current at COMPILE time as an
+		// Expression.Constant pins the lambda to one specific Parameters instance for its
+		// lifetime. For a rehydrated cached Action that instance is the Program's own set —
+		// left loaded by replay with the LAST journaled invocation's arguments — so any read
+		// that fell back to the constant executed those stale arguments while the journal
+		// recorded the fresh ones.
+		private Expression RuntimeSymbolLookupExpression(ParameterExpression parametersParam)
+		{
+			var getItemMethod = typeof(Parameters).GetMethod(
+				"get_Item",
+				BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.FlattenHierarchy,
+				null,
+				new[] { typeof(string) },
+				null
+			);
+			var parameterNameExpr = Expression.Constant(this.Name, typeof(string));
+			var parameterExpr = Expression.Call(parametersParam, getItemMethod, parameterNameExpr);
+
+			var instanceField = typeof(Parameter).GetField(nameof(Parameter.instance), BindingFlags.NonPublic | BindingFlags.Instance);
+			return Expression.Field(parameterExpr, instanceField);
+		}
+
+		// Top-of-lambda initialization of the storage local, emitted once per referenced
+		// parameter. The inline initialization at the parameter's first compiled reference
+		// (AllocateParameterStorageExpression) does NOT necessarily execute: when that first
+		// reference sits inside one branch of a conditional and execution takes another
+		// branch that also references the parameter, the read reaches the storage local with
+		// only THIS initialization applied. It must therefore perform the same per-invocation
+		// runtime binding, never a compile-time constant capture (see
+		// RuntimeSymbolLookupExpression for why the constant went stale).
 		internal Expression ParameterInitializationExpression()
 		{
 			if (parameterDeclaration == null) throw new LanguageException($"Parameter '{name}' has not been declared yet.");
 
-			Expression simboloVariableExpression = Expression.Constant(instance, typeof(VariableSymbol));
-			var result = Expression.Assign(parameterDeclaration, simboloVariableExpression);
+			var result = Expression.Assign(parameterDeclaration, RuntimeSymbolLookupExpression(storageOwner));
 
 			return result;
 		}

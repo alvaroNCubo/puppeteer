@@ -85,6 +85,9 @@ namespace Puppeteer.EventSourcing.DB
 				return s.Events.ToArray();
 			}
 		}
+
+		protected internal override long LastJournaledEntryId() => nextEntryId - 1;
+
 		internal void AddScriptEvent(string script, DateTime? occurredAt = null, string exposeData = null)
 		{
 			ArgumentNullException.ThrowIfNull(script);
@@ -518,9 +521,11 @@ namespace Puppeteer.EventSourcing.DB
 			throw new NotImplementedException("Primary key change not supported in InMemory storage.");
 		}
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
+		protected internal override long RehydrateFromEvent(IActorEventJournalClient client, long afterEntryId, bool includeExposeData = false)
 		{
-			EventJournalClient.IsNew = events.Count == 0;
+			ArgumentNullException.ThrowIfNull(client);
+
+			client.IsNew = events.Count == 0;
 
 			// Phase 6 of the Action refactor: the lateral `actions` dict is
 			// gone. Define entries in the events list populate the action cache
@@ -535,7 +540,7 @@ namespace Puppeteer.EventSourcing.DB
 			// Outer loop for CONTINUOUS mode (mirrors SQLServer/MySQL behaviour).
 			// In BATCH mode: terminate after processing every event once (firstPassCompleted).
 			// In CONTINUOUS mode: CanContinueReplay() returns true until a shutdown signal arrives.
-			while (!forcedToEnd && !firstPassCompleted && (canContinueReplay = EventJournalClient.CanContinueReplay(lastEntryId)))
+			while (!forcedToEnd && !firstPassCompleted && (canContinueReplay = client.CanContinueReplay(lastEntryId)))
 			{
 				// Forward replay: events in ascending EntryId order.
 				IEnumerable<EventData> orderedEvents = events.Where(evt => evt.EntryId > lastEntryId).OrderBy(evt => evt.EntryId);
@@ -543,12 +548,12 @@ namespace Puppeteer.EventSourcing.DB
 				// Compute how many events still need to be processed.
 				int eventCount = orderedEvents.Count();
 
-				EventJournalClient.BeginJournalReplay(eventCount);
+				client.BeginJournalReplay(eventCount);
 
 				// Replay events in the specified order.
 				foreach (var evt in orderedEvents)
 				{
-					if (!EventJournalClient.CanContinueReplay(lastEntryId))
+					if (!client.CanContinueReplay(lastEntryId))
 					{
 						forcedToEnd = true;
 						break;
@@ -570,13 +575,13 @@ namespace Puppeteer.EventSourcing.DB
 					// keeps it cohabiting and unread.)
 					if (evt is DefineEventData defineEvt)
 					{
-						EventJournalClient.AddKnownActionFromDefine(defineEvt.ActionId, defineEvt.DefineStatementText);
+						client.AddKnownActionFromDefine(defineEvt.ActionId, defineEvt.DefineStatementText);
 						lastEntryId = evt.EntryId;
 						continue;
 					}
 
 					// Deep copy of the event for rehydration.
-					// Required because EventJournalClient.ReplayEvent() returns the event to the pool after processing it.
+					// Required because client.ReplayEvent() returns the event to the pool after processing it.
 					// If we passed evt directly, our permanent storage would lose the data.
 					EventData tempEvent;
 					if (evt is ScriptEventData scriptEvt)
@@ -599,7 +604,7 @@ namespace Puppeteer.EventSourcing.DB
 					tempEvent.OccurredAt = evt.OccurredAt;
 					tempEvent.ExposeData = evt.ExposeData;
 
-					EventJournalClient.ReplayEvent(tempEvent);
+					client.ReplayEvent(tempEvent);
 					lastEntryId = evt.EntryId;
 				}
 
@@ -611,7 +616,7 @@ namespace Puppeteer.EventSourcing.DB
 
 					// In CONTINUOUS mode: sleep and continue.
 					// In BATCH mode the while (!firstPassCompleted) condition will exit the loop.
-					if (!EventJournalClient.CanContinueReplay(lastEntryId))
+					if (!client.CanContinueReplay(lastEntryId))
 					{
 						System.Threading.Thread.Sleep(100); // CONTINUOUS mode only.
 					}
@@ -623,7 +628,7 @@ namespace Puppeteer.EventSourcing.DB
 				}
 			}
 
-			EventJournalClient.EndJournalReplay(forcedToEnd);
+			client.EndJournalReplay(forcedToEnd);
 
 			return lastEntryId;
 		}
@@ -633,19 +638,28 @@ namespace Puppeteer.EventSourcing.DB
 			return Task.FromResult(RehydrateFromEvent(afterEntryId, includeExposeData));
 		}
 
+		// Registering a Reaction is a read-modify-write over state shared by every
+		// Reaction of the actor, and N Reactions of one actor may Execute at the same
+		// time. Unguarded, two registrations racing either corrupt the registry mid-
+		// resize or hand the SAME id to two different Reactions, which would silently
+		// merge their checkpoints. The FileSystem store already serialises this; the
+		// in-process registries need the same gate.
 		protected internal override long GetOrCreateReactionId(string formattedReaction)
 		{
 			ArgumentNullException.ThrowIfNull(formattedReaction);
 
-			if (reactionRegistry.TryGetValue(formattedReaction, out long existingId))
+			lock (reactionRegistry)
 			{
-				return existingId;
-			}
+				if (reactionRegistry.TryGetValue(formattedReaction, out long existingId))
+				{
+					return existingId;
+				}
 
-			// Assign a new id.
-			long newId = nextReactionId++;
-			reactionRegistry[formattedReaction] = newId;
-			return newId;
+				// Assign a new id.
+				long newId = nextReactionId++;
+				reactionRegistry[formattedReaction] = newId;
+				return newId;
+			}
 		}
 
 		// Phase 5A: two-phase checkpoint — returns the (detected, confirmed) tuple in a single access.

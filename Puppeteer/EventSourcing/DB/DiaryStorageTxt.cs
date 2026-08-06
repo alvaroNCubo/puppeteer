@@ -69,6 +69,8 @@ namespace Puppeteer.EventSourcing.DB
 		internal string FilePath => filePath;
 		internal IReadOnlySet<long> ElidedIds => elidedIds;
 
+		protected internal override long LastJournaledEntryId() => nextEntryId - 1;
+
 		internal DiaryStorageTxt(IActorEventJournalClient eventJournalClient, string connectionString)
 			: base(eventJournalClient, connectionString)
 		{
@@ -438,7 +440,11 @@ namespace Puppeteer.EventSourcing.DB
 							ev.EntryId = FirstId;
 							ev.OccurredAt = OccurredAt;
 							ev.ActionId = ActionId;
-							ev.Arguments = ArgumentsForInvocation ?? "{}";
+							// A missing `args=` key means "no arguments", which every backend
+							// carries as the EMPTY blob (the encoding Parameters.LoadArguments
+							// reads back for a zero-parameter Action). Rendering it as any other
+							// text would make the invocation unreadable on replay.
+							ev.Arguments = ArgumentsForInvocation ?? string.Empty;
 							ev.ExposeData = ExposeData;
 							yield return ev;
 							break;
@@ -460,7 +466,8 @@ namespace Puppeteer.EventSourcing.DB
 							invocation.EntryId = SecondId > 0 ? SecondId : FirstId + 1;
 							invocation.OccurredAt = OccurredAt;
 							invocation.ActionId = ActionId;
-							invocation.Arguments = ArgumentsForInvocation ?? "{}";
+							// See the invocation case: absent `args=` is the EMPTY blob.
+							invocation.Arguments = ArgumentsForInvocation ?? string.Empty;
 							invocation.ExposeData = ExposeData;
 							yield return invocation;
 							break;
@@ -679,26 +686,28 @@ namespace Puppeteer.EventSourcing.DB
 
 		// ── Rehydration ─────────────────────────────────────────────────────
 
-		protected internal override long RehydrateFromEvent(long afterEntryId, bool includeExposeData = false)
+		protected internal override long RehydrateFromEvent(IActorEventJournalClient client, long afterEntryId, bool includeExposeData = false)
 		{
-			EventJournalClient.IsNew = events.Count == 0;
+			ArgumentNullException.ThrowIfNull(client);
+
+			client.IsNew = events.Count == 0;
 
 			long lastEntryId = afterEntryId;
 			bool firstPassCompleted = false;
 			bool forcedToEnd = false;
 
-			while (!forcedToEnd && !firstPassCompleted && EventJournalClient.CanContinueReplay(lastEntryId))
+			while (!forcedToEnd && !firstPassCompleted && client.CanContinueReplay(lastEntryId))
 			{
 				IEnumerable<EventData> orderedEvents = events
 					.Where(evt => evt.EntryId > lastEntryId)
 					.OrderBy(evt => evt.EntryId);
 
 				int eventCount = orderedEvents.Count();
-				EventJournalClient.BeginJournalReplay(eventCount);
+				client.BeginJournalReplay(eventCount);
 
 				foreach (var evt in orderedEvents)
 				{
-					if (!EventJournalClient.CanContinueReplay(lastEntryId))
+					if (!client.CanContinueReplay(lastEntryId))
 					{
 						forcedToEnd = true;
 						break;
@@ -712,20 +721,20 @@ namespace Puppeteer.EventSourcing.DB
 
 					if (evt is DefineEventData defineEvt)
 					{
-						EventJournalClient.AddKnownActionFromDefine(defineEvt.ActionId, defineEvt.DefineStatementText);
+						client.AddKnownActionFromDefine(defineEvt.ActionId, defineEvt.DefineStatementText);
 						lastEntryId = evt.EntryId;
 						continue;
 					}
 
 					EventData tempEvent = CloneForReplay(evt);
-					EventJournalClient.ReplayEvent(tempEvent);
+					client.ReplayEvent(tempEvent);
 					lastEntryId = evt.EntryId;
 				}
 
 				firstPassCompleted = true;
 			}
 
-			EventJournalClient.EndJournalReplay(forcedToEnd);
+			client.EndJournalReplay(forcedToEnd);
 
 			// Continue past any physically-elided IDs above the last live entry so
 			// the actor's counter starts beyond every ID ever issued — including
@@ -830,14 +839,21 @@ namespace Puppeteer.EventSourcing.DB
 			followerCheckpoints[followerId] = entryId;
 		}
 
+		// Same gate as the other in-process registry: N Reactions of one actor may
+		// Execute at the same time, and an unguarded read-modify-write here would
+		// either corrupt the registry or hand two Reactions the same id.
 		protected internal override long GetOrCreateReactionId(string formattedReaction)
 		{
 			ArgumentNullException.ThrowIfNull(formattedReaction);
-			if (reactionRegistry.TryGetValue(formattedReaction, out long existing))
-				return existing;
-			long newId = nextReactionId++;
-			reactionRegistry[formattedReaction] = newId;
-			return newId;
+
+			lock (reactionRegistry)
+			{
+				if (reactionRegistry.TryGetValue(formattedReaction, out long existing))
+					return existing;
+				long newId = nextReactionId++;
+				reactionRegistry[formattedReaction] = newId;
+				return newId;
+			}
 		}
 
 		protected internal override (long detected, long confirmed) GetReactionCheckpoint(long reactionId, int seekLevel)

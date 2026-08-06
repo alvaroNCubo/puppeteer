@@ -69,15 +69,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 		}
 
-		// B.3.1: include the wrapped expression. The actual evaluated body is
-		// dynamic and only known at runtime, so the hash captures the static
-		// shape of the eval-expression itself (which is what's parsed and
-		// journaled as part of the host script).
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(EvalStatement));
-			expression.AccumulatePromotionCandidateHash(ref hc);
-		}
 
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{

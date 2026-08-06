@@ -57,15 +57,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 				if (cmd is NewInstanceStatement newInstanceCmd)
 				{
-					if (newInstanceCmd.LValue is Id id && !id.IsParameter && id.IsOriginalLValueDeclaration)
-					{
-						Expression allocateLocalStorageExpr = newInstanceCmd.AllocateLocalStorageExpression(parametersParam);
-						expressions.Add(allocateLocalStorageExpr);
-					}
-					else if (newInstanceCmd.LValue is DottedId dottedId)
-					{
-						newInstanceCmd.AllocateLocalStorageExpression(parametersParam);
-					}
+					// Every assignment goes through the allocation: the statement is the
+					// authority on whether its target needs storage created first, so this
+					// block does not test the target's shape. Only a variable declaration
+					// creates anything; a member assignment (obj.Member = rValue) or a
+					// subscript assignment (coll[i] = rValue) writes to a location that
+					// already exists and yields an empty expression here.
+					Expression allocateLocalStorageExpr = newInstanceCmd.AllocateLocalStorageExpression(parametersParam);
+					expressions.Add(allocateLocalStorageExpr);
 
 					ParameterExpression localVarDeclarationExpr = (ParameterExpression)newInstanceCmd.LocalStorageExpression;
 					if (localVarDeclarationExpr != null) localVars.Add(localVarDeclarationExpr);
@@ -100,16 +99,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// B.3.1: propagate promotion-candidate hash through inner statements.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(BlockStatement));
-			hc.Add(statements.Length);
-			foreach (Statement source in statements)
-			{
-				source.AccumulatePromotionCandidateHash(ref hc);
-			}
-		}
 
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{

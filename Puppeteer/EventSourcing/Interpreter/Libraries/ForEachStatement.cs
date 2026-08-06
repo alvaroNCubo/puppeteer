@@ -411,17 +411,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			body.PreparePatternMatching(patternAst, ref position);
 		}
 
-		// B.3.1: include both loop variables (when present), iteration source,
-		// and body so two foreach-loops with different shapes hash distinctly.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(ForEachStatement));
-			hc.Add(indexOnly ? 1 : 0);
-			if (indexVariable != null) { hc.Add(1); indexVariable.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
-			if (variable != null) { hc.Add(1); variable.AccumulatePromotionCandidateHash(ref hc); } else { hc.Add(0); }
-			expression.AccumulatePromotionCandidateHash(ref hc);
-			body.AccumulatePromotionCandidateHash(ref hc);
-		}
 
 		internal override void Visit(ASTVisitor v)
 		{

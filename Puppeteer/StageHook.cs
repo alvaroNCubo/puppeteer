@@ -5,6 +5,7 @@ using Puppeteer.EventSourcing.Follower;
 using Puppeteer.EventSourcing.Interpreter.Formatters;
 using Puppeteer.EventSourcing.Playbill;
 using System;
+using System.Collections.Generic;
 
 namespace Puppeteer
 {
@@ -56,6 +57,17 @@ namespace Puppeteer
         public Action<long, byte[]> OnRecordWritten
         {
             set { handler.OnRecordWritten = value; }
+        }
+
+        // Durable source for a replication catch-up, parallel to Playbill.ReadRecordsAfter.
+        // OnRecordWritten only reports what this process writes; a Stage that rehydrated
+        // still owes a joining peer everything already in the journal, so the catch-up
+        // reads it from there. Wire-encoded on this side because the codec is internal to
+        // this assembly, and those bytes are what a cue carries.
+        public void ReadJournalRecordsAfter(long afterEntryId, List<EventSourcing.DB.JournalWireRecord> result)
+        {
+            ArgumentNullException.ThrowIfNull(result);
+            handler.ReadWireRecordsAfter(afterEntryId, result);
         }
 
         // === Playbill (Fase 5) ===
@@ -127,12 +139,22 @@ namespace Puppeteer
             // replication path as Script and Invocation records. Handle them by
             // populating the actor's vocabulary directly — Define entries do not
             // produce EventData (they mutate the actor's cache, not its state).
+            //
+            // A replicated record arrives encoded the way the sending store writes its
+            // own records, so it is decoded the way this actor's journal decodes its
+            // own — with its compression, its encryption and its key. Decoding with a
+            // hardcoded "plain" setting worked only while no journal ever protected its
+            // payloads: an encrypted record cannot be opened without the key, so a peer
+            // could not apply what it was sent no matter how it was configured.
+            var (compression, encryption, encryptionKey) = handler.JournalWireEncoding;
+
             EventRecordType peekedType = BinaryEventCodec.PeekRecordType(body);
             if (peekedType == EventRecordType.Define)
             {
                 bool defOk = BinaryEventCodec.TryDecodeDefine(body, bodyLength,
                     out _, out _,
-                    out int defineActionId, out string defineStatementText, out _);
+                    out int defineActionId, out string defineStatementText, out _,
+                    compression, encryption, encryptionKey);
                 if (!defOk) throw new InvalidOperationException("Failed to decode Define journal record");
                 ((EventSourcing.DB.IActorEventJournalClient)handler).AddKnownActionFromDefine(defineActionId, defineStatementText);
                 return;
@@ -140,7 +162,8 @@ namespace Puppeteer
 
             bool success = BinaryEventCodec.TryDecode(body, bodyLength,
                 out EventRecordType eventType, out long entryId, out DateTime occurredAt,
-                out string scriptOrArguments, out int actionId);
+                out string scriptOrArguments, out int actionId,
+                compression, encryption, encryptionKey);
 
             if (!success) throw new InvalidOperationException("Failed to decode journal record");
 

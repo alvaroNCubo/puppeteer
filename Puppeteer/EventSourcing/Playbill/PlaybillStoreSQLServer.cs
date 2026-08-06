@@ -56,25 +56,37 @@ namespace Puppeteer.EventSourcing.Playbill
 					CREATE INDEX IX_PlaybillRecords_SchemaName ON [{recordsTable}] (SchemaName);
 				END;";
 
-			using (var connection = new SqlConnection(ConnectionString))
+			// The connection is CONSTRUCTED inside the guarded block — see the MySQL
+			// backend for the rationale: a connection-string key the backend does not
+			// know is refused while parsing, before Open(), and must still surface as a
+			// Playbill provisioning failure that names the actor.
+			try
 			{
-				try
+				using (var connection = new SqlConnection(ConnectionString))
 				{
-					connection.Open();
-					using (var command = new SqlCommand(sql, connection))
+					try
 					{
-						command.ExecuteNonQuery();
+						connection.Open();
+						using (var command = new SqlCommand(sql, connection))
+						{
+							command.ExecuteNonQuery();
+						}
+					}
+					finally
+					{
+						connection.Close();
 					}
 				}
-				catch (SqlException e)
-				{
-					Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
-					throw new LanguageException($"Failed to provision Playbill tables on SQL Server for actor '{ActorName}': {e.Message}");
-				}
-				finally
-				{
-					connection.Close();
-				}
+			}
+			catch (SqlException e)
+			{
+				Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
+				throw new LanguageException($"Failed to provision Playbill tables on SQL Server for actor '{ActorName}': {e.Message}");
+			}
+			catch (ArgumentException e)
+			{
+				Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
+				throw new LanguageException($"Failed to provision Playbill tables on SQL Server for actor '{ActorName}': the connection string was rejected while parsing: {e.Message}");
 			}
 		}
 

@@ -447,7 +447,8 @@ namespace Puppeteer.EventSourcing.Follower
 					break;
 
 				case ExposeNode expose:
-					CollectCaptureNamesFromParameter(expose.Expression, names);
+					foreach (var pair in expose.Pairs)
+						CollectCaptureNamesFromParameter(pair.Expression, names);
 					break;
 
 				case TellPatternNode tell:
@@ -560,8 +561,11 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					break;
 				case ExposeNode exposeNode:
-					// Validate the type in the expose expression (if it's a TypedParameterNode).
-					ValidateTypesInParameter(exposeNode.Expression);
+					// Validate the type in every expose expression (if it's a TypedParameterNode).
+					foreach (var pair in exposeNode.Pairs)
+					{
+						ValidateTypesInParameter(pair.Expression);
+					}
 					break;
 
 				case GuardedExpressionNode guarded:
@@ -702,8 +706,11 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 					break;
 				case ExposeNode exposeNode:
-					// Resolve the type in the expose expression (if it's a TypedParameterNode).
-					ResolveTypesInParameter(exposeNode.Expression);
+					// Resolve the type in every expose expression (if it's a TypedParameterNode).
+					foreach (var pair in exposeNode.Pairs)
+					{
+						ResolveTypesInParameter(pair.Expression);
+					}
 					break;
 
 				case GuardedExpressionNode guarded:

@@ -479,6 +479,16 @@ namespace Puppeteer.EventSourcing.Interpreter
 						{
 							case '\'':
 								ProcessStringLiteral();
+								// A 'c' suffix immediately after the closing quote makes it a CHAR
+								// literal instead of a string. Adjacency is required, exactly as for
+								// the 'L' of a long: with a space in between the identifier is its own
+								// token, so `print 'text' c;` still reads c as a label.
+								if (IsCharSuffix())
+								{
+									input.SkipChar();
+									CurrentToken = new Token(TokenType.@char, input.LexemeStart, input.LexemeEnd);
+									return;
+								}
 								CurrentToken = new Token(TokenType.stringLit, input.LexemeStart, input.LexemeEnd);
 								return;
 							case '.':
@@ -822,21 +832,64 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private static readonly string CARACTERES_VALIDOS = new string(new char[] { '"', ';', '=', ':', ',', '(', ')', '+', '\'', '/', '*', '-', '>', '<', '!', '{', '}', '%', '.', '&', '|', '[', ']', '$', '_', '?' });
 
+		// Prefixes a parameter reference for legibility ('@total' reads as a parameter where
+		// 'total' alone would read as any identifier). It carries no meaning of its own: the two
+		// spellings denote the same Id, which the lexer realizes by absorbing the sigil rather
+		// than emitting a token for it.
+		private const char PARAMETER_SIGIL = '@';
+
+		// Advances past the run of whitespace that separates two tokens, and REJECTS anything
+		// else it cannot account for.
+		//
+		// The rule used to be stated by exclusion — "not a letter/digit, not in
+		// CARACTERES_VALIDOS, not the end-of-input sentinel" was treated as skippable space —
+		// which silently swallowed every character the language has no meaning for, control
+		// characters included. That made the "invalid characters" error at the end of the token
+		// switch unreachable for them: they never got there. Silence is the wrong answer for a
+		// replay engine, because a corrupted entry does not fail — it parses into a DIFFERENT
+		// valid program, and the divergence surfaces far from its cause, if ever.
+		//
+		// Whitespace is now stated positively, so an unaccounted character is a hard error at
+		// the position where it appears. This governs only the space BETWEEN tokens: a string
+		// literal and a comment have their own scanners and still carry any character verbatim.
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private void SkipWhitespaceAndLoad()
 		{
 			while (true)
 			{
-				bool isEndOfFile_or_notSpace = char.IsLetterOrDigit(input.CurrentChar) || CARACTERES_VALIDOS.IndexOf(input.CurrentChar) >= 0 || input.CurrentChar == '\f';
-				if (isEndOfFile_or_notSpace)
+				char current = input.CurrentChar;
+
+				// End of input is signalled by '\f', which char.IsWhiteSpace also reports as
+				// space — test it first so the scan stops here instead of running past the end.
+				if (current == '\f')
 				{
 					break;
 				}
-				else
+
+				bool startsAToken = char.IsLetterOrDigit(current) || CARACTERES_VALIDOS.IndexOf(current) >= 0;
+				if (startsAToken)
+				{
+					break;
+				}
+
+				// The parameter sigil is accounted for, not garbage: '@name' is a legibility
+				// alias of 'name', and the language implements that equivalence by absorbing the
+				// sigil here, so the Id that reaches the parser is the bare name either way.
+				// It is skipped like space precisely because it carries no meaning of its own.
+				if (current == PARAMETER_SIGIL)
 				{
 					input.SetLexemeStartToNextCharIndex();
 					input.SkipChar();
+					continue;
 				}
+
+				if (!char.IsWhiteSpace(current))
+				{
+					throw new LanguageException($"Invalid character U+{((int)current):X4} at line {input.Row}, column {input.Column}.", current.ToString(), input.Row, input.Column);
+				}
+
+				input.SetLexemeStartToNextCharIndex();
+				input.SkipChar();
 			}
 		}
 
@@ -904,6 +957,13 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			bool isLongSuffix = input.CurrentChar == 'l' || input.CurrentChar == 'L';
 			return isLongSuffix;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private bool IsCharSuffix()
+		{
+			bool isCharSuffix = input.CurrentChar == 'c' || input.CurrentChar == 'C';
+			return isCharSuffix;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]

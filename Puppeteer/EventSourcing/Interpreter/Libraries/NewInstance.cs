@@ -455,6 +455,39 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 throw new LanguageException($"Ambiguous reference: class '{className}' with the given constructor signature exists in multiple namespaces: {namespaces}. Use the 'in' clause to specify the namespace (e.g. ClassName(...) in MyNamespace).");
             }
 
+            // Same ambiguity, same refusal as the method path (EnumOverloadAmbiguity): an argument
+            // that reads BOTH as an enum member and as a value of its own type leaves the choice to
+            // the engine, so while new text is being admitted it is refused and the author says
+            // which they meant. Only the refusal is added here — this path ALREADY prefers
+            // exactness over enum-binding (IsConstructorExactTypeMatch), which is the rule the
+            // method path was missing.
+            if (usingExact && !ReplayResolutionScope.Active)
+            {
+                ConstructorInfo enumBound = null;
+                int enumBoundCandidates = 0;
+                bool hasCandidateWithoutEnumBinding = false;
+                foreach (ConstructorInfo candidate in exactConstructors)
+                {
+                    if (BindsAnArgumentAsEnum(candidate))
+                    {
+                        enumBoundCandidates++;
+                        enumBound ??= candidate;
+                    }
+                    else
+                    {
+                        hasCandidateWithoutEnumBinding = true;
+                    }
+                }
+                if (EnumOverloadAmbiguity.IsAmbiguous(enumBoundCandidates, hasCandidateWithoutEnumBinding))
+                {
+                    throw EnumOverloadAmbiguity.Refuse(
+                        enumBound.DeclaringType,
+                        className,
+                        enumBound,
+                        hasCandidateWithoutEnumBinding ? FirstWithoutEnumBinding(exactConstructors) : null);
+                }
+            }
+
             // Non-params path: prefer a constructor whose parameter types EXACTLY match the
             // argument types over one reached by numeric widening, so an int argument binds
             // C(int) rather than C(long)/C(double) when both exist (otherwise selection would
@@ -481,6 +514,32 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 if (argType == null || argType != parameters[i].ParameterType) return false;
             }
             return true;
+        }
+
+        // True when this constructor satisfies the call only by reading some argument's value as an
+        // enum member — the reading that competes with taking the value at its own type.
+        private bool BindsAnArgumentAsEnum(ConstructorInfo constructorInfo)
+        {
+            ParameterInfo[] parameters = constructorInfo.GetParameters();
+            if (parameters.Length != arguments.Length) return false;
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (parameters[i].ParameterType.IsEnum
+                    && AstExpression.ClassifyEnumArg(arguments[i]) != AstExpression.EnumArgKind.NotEnumBindable)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private ConstructorInfo FirstWithoutEnumBinding(List<ConstructorInfo> candidates)
+        {
+            foreach (ConstructorInfo candidate in candidates)
+            {
+                if (!BindsAnArgumentAsEnum(candidate)) return candidate;
+            }
+            return null;
         }
 
         private static ConstructorInfo PickDeterministicConstructor(List<ConstructorInfo> candidates)

@@ -256,50 +256,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		}
 
 
-		internal Expression RValueReferenceExpression { get; private set; } = null;
-		internal Expression LValueStorageExpression { get; private set; } = null;
-
-
-
-		internal Expression AllocateStorageExpression(ParameterExpression parametersParam)
-		{
-			if (!this.id.Program.IsCompiledMode) throw new LanguageException("Cannot generate Expression-based storage in interpreted mode.");
-			if (LValueStorageExpression != null) throw new LanguageException($"Storage for the declaration of Id '{id.Name}' has already been generated.");
-			if (RValueReferenceExpression != null) throw new LanguageException($"Storage for the declaration of Id '{id.Name}' has already been generated.");
-
-			var instanceType = this.id.ForcedType;
-
-			if (this.Property() != null)
-			{
-				var fieldInfo = FindField(instanceType);
-				var instanceExp = this.id.RValueReferenceExpression;
-				if (fieldInfo != null)
-				{
-					LValueStorageExpression = RValueReferenceExpression = Expression.Field(instanceExp, fieldInfo);
-				}
-				else
-				{
-					var propertyGetInfo = FindPropertyByName(instanceType, this.Property(), lookupSetter: false);
-					if (propertyGetInfo != null)
-					{
-						RValueReferenceExpression = Expression.Property(instanceExp, propertyGetInfo);
-					}
-
-					var propertySetInfo = FindPropertyByName(instanceType, this.Property(), lookupSetter: true);
-					if (propertySetInfo != null)
-					{
-						LValueStorageExpression = Expression.Property(instanceExp, propertySetInfo);
-					}
-				}
-			}
-			else if (this.Method() != null)
-			{
-				throw new LanguageException($"Cannot assign to a method ('{id.Name}.{this.Method()}').");
-			}
-
-			return Expression.Empty();
-		}
-
 		internal override void write(StringBuilder result, DatabaseType databaseType)
 		{
 			result.Append(id.Name);

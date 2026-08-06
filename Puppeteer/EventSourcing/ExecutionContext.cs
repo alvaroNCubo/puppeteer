@@ -76,6 +76,23 @@ namespace Puppeteer.EventSourcing
             itIsThePresentActors[actor] = (itIsThePresent, now);
         }
 
+        // Engine-internal entry into a replay window. The public SetContext keeps
+        // ItIsThePresent monotonic for a registered actor (a host must never send an
+        // actor back into replay), but the engine's replay primitives — catch-up over
+        // an already-hydrated actor, application of a replicated entry — are the one
+        // legitimate back-transition: they re-apply already-journaled entries and must
+        // lower the flag for the window's duration. The window closes through the
+        // public SetContext, whose guards then apply again.
+        internal void EnterReplayWindow(DateTime now, Actor actor)
+        {
+            ArgumentNullException.ThrowIfNull(actor);
+            if (now == DateTime.MinValue) throw new ArgumentNullException(nameof(now));
+            if (actor is ActorV2)
+                throw new LanguageException("ExecutionContext is not available for ActorV2. Use Reactions / OnRecordWritten for external side-effects.");
+
+            itIsThePresentActors[actor] = (false, now);
+        }
+
         internal void Clear(Actor actor)
         {
             ArgumentNullException.ThrowIfNull(actor);

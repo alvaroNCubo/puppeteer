@@ -228,7 +228,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 				if (paramId != null)
 				{
-					var paramDecl = paramId.Parameter.ParameterDeclarationExpression();
+					// Bind the storage through the Parameters THIS lambda receives (allocating it
+					// when this is the parameter's first compiled reference), so the check reads
+					// the slot of the set handed to the invocation. Reusing the existing storage
+					// is safe: every initialization path binds it from the received set at run
+					// time (Parameter.RuntimeSymbolLookupExpression).
+					Parameter parameter = paramId.Parameter;
+					Expression paramDecl = parameter.LValueStorageExpression == null
+						? parameter.AllocateParameterStorageExpression(parametersParam, isLValue: true)
+						: parameter.LValueStorageExpression;
 					var objectField = typeof(VariableSymbol).GetField(
 						nameof(VariableSymbol.value),
 						System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);

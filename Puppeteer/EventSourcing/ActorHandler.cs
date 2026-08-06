@@ -30,7 +30,30 @@ namespace Puppeteer.EventSourcing
 		internal const int MAX_NORMAL_LOAD_POOL_SIZE = 250;
 
 		private Diary dairy = null;
+
+		// Test seam: exposes the journal so a test can observe the replication of a buffered
+		// journal (pending count, replicated watermark, local high-water) and wait for it to
+		// catch up before asserting. Production drives that catch-up through rehydration and
+		// Distill, which drain the queue themselves.
+		internal Diary Journal => dairy;
+
 		private readonly Actor actor;
+
+		// Execution-mode policy, owned by the handler because the handler IS the actor's
+		// identity: one journal, one write lock, one Program cache. Several Actor faces can
+		// share a single handler (the V1->V2 bridge reuses it), and they must not disagree
+		// about the engine — AdjustCompilationMode mutates a cached Program in place and
+		// ReleaseStatements drops its AST irreversibly, so two policies over one cache is a
+		// race, not a preference. Production leaves this Automatic and lets the invocation
+		// path pick the engine; the explicit values exist to pin the mode from the test
+		// suite, which is why the Actor-side setter is not part of the published surface.
+		private CompilationModePolicy compiledModePolicy = CompilationModePolicy.Automatic;
+
+		internal CompilationModePolicy CompiledModePolicy
+		{
+			get => compiledModePolicy;
+			set => compiledModePolicy = value;
+		}
 
 		private string commandLineError;
 		private DateTime timeStamp;
@@ -329,7 +352,7 @@ namespace Puppeteer.EventSourcing
 			else
 				throw new LanguageException($"Cannot shadow an actor of type '{this.actor.GetType().Name}': only ActorV1 and ActorV2 families are supported in S1.");
 
-			shadowActor.CompiledModePolicy = this.actor.CompiledModePolicy;
+			shadowActor.CompiledModePolicy = this.CompiledModePolicy;
 
 			ActorHandler shadow = shadowActor.Handler;
 			shadow.IsShadow = true;
@@ -359,6 +382,11 @@ namespace Puppeteer.EventSourcing
 
 			return shadow;
 		}
+
+		// Accessor for the Actor wrapping this handler. Used by the SymbolTable to
+		// derive the domain's replay signal from RecoveringState (the flag exists on
+		// the ActorV1 plane only, so the derivation needs the actor's family).
+		internal Actor Actor => actor;
 
 		// Accessor for the Actor wrapping this handler. Used by the
 		// actor.Shadow(cfg) facade to build the Shadow object over the shadow actor
@@ -979,12 +1007,9 @@ namespace Puppeteer.EventSourcing
 
 			try
 			{
+				// The domain-facing replay signals (ItIsThePresent global + ExecutionContext)
+				// derive from this flag at its setter — see SymbolTable.RecoveringState.
 				symbolTable.RecoveringState = true;
-				if (actor is ActorV1)
-				{
-					symbolTable.SetVariable("ItIsThePresent", false, typeof(bool));
-					ExecutionContext.Current.SetContext(DateTime.Now, false, actor);
-				}
 
 				currentTransition = ActorTransitions.Recovering;
 
@@ -1108,10 +1133,14 @@ namespace Puppeteer.EventSourcing
 									// necessary effect (non-validation) in its eval branch, where it propagates
 									// types of globals for cross-entry resolution. Without evals (the whole journal) the
 									// full validation is skipped; with evals (rare) that propagation is preserved.
+									// Replay, not admission: this text was already accepted when it ran live,
+								// so an enum binding that has since become ambiguous must resolve to
+								// what the text says rather than be refused (ReplayResolutionScope).
+								using (ReplayResolutionScope.Enter())
 									rentedProgram.SolveReferences(rentedProgram.Parameters, withStaticValidation: rentedProgram.HasEval);
 								else if (!rentedProgram.IsCompiledMode)
 									// A freshly-parsed ScriptEvent whose rendered text matches a cached
-									// Action (the promotion overlap). It owns its own Parameters, so rebinding
+									// Action. It owns its own Parameters, so rebinding
 									// them here is safe; mirrors the live interpreted cache-hit path.
 									rentedProgram.SolveParameters(rentedProgram.Parameters);
 								if (stageTiming) LabInstrumentation.AddResolveTicks(System.Diagnostics.Stopwatch.GetTimestamp() - resolveT0);
@@ -1171,7 +1200,11 @@ namespace Puppeteer.EventSourcing
 										// rebind lazily inside ExecuteExpression.
 										rentedProgram.SolveParameters(rentedProgram.Parameters);
 								}
-								Perform(rentedProgram, rentedProgram.Parameters);
+								// Covers the LAZY resolution too: a compiled Action materialized from a
+								// Define resolves on its first invocation, and that first invocation is
+								// this replay, so the scope is in effect when it happens.
+								using (ReplayResolutionScope.Enter())
+									Perform(rentedProgram, rentedProgram.Parameters);
 								if (stageTiming) LabInstrumentation.AddExecuteTicks(System.Diagnostics.Stopwatch.GetTimestamp() - execT0);
 								executedOk = true;
 							}
@@ -1270,11 +1303,6 @@ namespace Puppeteer.EventSourcing
 				}
 
 				symbolTable.RecoveringState = false;
-				if (actor is ActorV1)
-				{
-					symbolTable.SetVariable("ItIsThePresent", true, typeof(bool));
-					ExecutionContext.Current.SetContext(DateTime.Now, true, actor);
-				}
 
 				currentTransition = ActorTransitions.Recovered;
 			}
@@ -1300,6 +1328,34 @@ namespace Puppeteer.EventSourcing
 		{
 			set { if (dairy != null) dairy.OnRecordWritten = value; }
 		}
+
+		// Durable counterpart of OnRecordWritten for a replication catch-up: the same
+		// wire-encoded records, but read from the journal instead of observed as they
+		// are written. A host that must serve a peer's gap needs both — the callback
+		// covers what is written while the peer is attached, this covers everything
+		// already journaled, including entries written in an earlier process life.
+		internal void ReadWireRecordsAfter(long afterEntryId, List<Puppeteer.EventSourcing.DB.JournalWireRecord> result)
+		{
+			ArgumentNullException.ThrowIfNull(result);
+			if (dairy == null)
+				throw new LanguageException($"Actor '{Name}' has no EventSourcingStorage configured; there is no journal to read a catch-up from.");
+
+			dairy.Storage.ReadWireRecordsAfter(afterEntryId, result);
+		}
+
+		// The payload encoding this actor's journal uses, for the hosting layer that has
+		// to decode a record arriving from a peer. A replicated record is encoded by the
+		// sender's store in exactly this shape, so applying one means decoding it the
+		// way this actor's own journal would — including with its key. Assembly-internal
+		// on purpose: the key is reachable from the host that owns the actor, never from
+		// the public surface.
+		internal (Puppeteer.EventSourcing.DB.FileSystem.PayloadCompression compression,
+			Puppeteer.EventSourcing.DB.FileSystem.EncryptionMode encryption,
+			byte[] key) JournalWireEncoding =>
+			dairy == null
+				? (Puppeteer.EventSourcing.DB.FileSystem.PayloadCompression.None,
+					Puppeteer.EventSourcing.DB.FileSystem.EncryptionMode.None, null)
+				: (dairy.Storage.WireCompression, dairy.Storage.WireEncryption, dairy.Storage.WireEncryptionKey);
 
 		internal void GracefulExit()
 		{
@@ -1349,6 +1405,9 @@ namespace Puppeteer.EventSourcing
 			rwLock.EnterWriteLock();
 			try
 			{
+				// A replicated entry is a replay of something already journaled elsewhere;
+				// the domain-facing replay signals derive from this flag at its setter
+				// (see SymbolTable.RecoveringState).
 				symbolTable.RecoveringState = true;
 
 				Parser parser = ParsersPool.Rent();
@@ -1362,24 +1421,9 @@ namespace Puppeteer.EventSourcing
 						program = parser.Rehydrate();
 						// Honor the actor's real execution policy (see GenerateAndRentProgram):
 						// an AlwaysCompiled actor must run the replayed script compiled.
-						program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+						program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 						program.Parameters = ParametersPool.Rent();
 						program.SolveParameters(program.Parameters);
-						// B.3.1: rehydration also observes the promotion candidate —
-						// replaying 30k scripts in a legacy journal decrements the
-						// counter the same way live writes do, so post-replay the
-						// system arrives in the exact state it would have reached
-						// running the same writes live. B.3.3 returns a
-						// PromotionResult here only if the counter tipped AND the
-						// candidate is not yet in the index — we DISCARD it during
-						// rehydration because (signed clarification) nothing
-						// changes: the Define only appears from the next
-						// PerformCommand that is written onwards. Replay
-						// must not write new journal entries; the in-memory
-						// materialization (actionCommands + index update) is left
-						// in place since it is naturally re-derivable from the
-						// next live write.
-						_ = ObservePromotionCandidate(program, scriptEvent.Script);
 						break;
 
 					case ActionEventData actionEvent:
@@ -1557,13 +1601,13 @@ namespace Puppeteer.EventSourcing
 
 					// Honor the actor's real execution policy, exactly as the live script path
 					// does (PrepareCommandProgram: AdjustCompilationMode(useInterpretedMode: true,
-					// this.actor.CompiledModePolicy)). Rehydrate() leaves the program interpreted
+					// this.CompiledModePolicy)). Rehydrate() leaves the program interpreted
 					// (IsCompiledMode = false); without this an AlwaysCompiled actor would run the
 					// replayed script via Perform -> ExecuteExpression while its Ids report
 					// interpreted mode, throwing "Cannot generate Expression-based storage in
 					// interpreted mode". Under Automatic/AlwaysInterpreted the mode stays
 					// interpreted (unchanged behavior); only AlwaysCompiled is corrected.
-					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 
 					program.Parameters = ParametersPool.Rent();
 
@@ -1580,7 +1624,14 @@ namespace Puppeteer.EventSourcing
 				case ActionEventData executable:
 
 					if (executable.ActionId < 0) throw new LanguageException("ActionId cannot be negative");
-					if (String.IsNullOrEmpty(executable.Arguments)) throw new LanguageException("Arguments cannot be null or empty");
+
+					// An EMPTY arguments blob is NOT rejected here: it is the canonical encoding
+					// of a zero-argument invocation (see Parameters.LoadArguments), and whether a
+					// blob matches an invocation depends on the TARGET Action's parameter list —
+					// known only at the binding stage. Rejecting it eagerly dropped every
+					// invocation of a parameterless Action during replay; permissive rehydration
+					// logged the failure and continued, so the actor recovered a state silently
+					// missing those acts.
 
 					// Phase 5 of the Action refactor: the legacy "Action with ID X
 					// does not exist in the cache" throw is dropped. The cache is
@@ -1626,7 +1677,23 @@ namespace Puppeteer.EventSourcing
 
 		void IActorEventJournalClient.ReplayEvent(EventData retornableEventData)
 		{
-			eventsQueue.Add(retornableEventData);
+			ArgumentNullException.ThrowIfNull(retornableEventData);
+
+			// The actor accepts replayed records only while one of its own rehydration
+			// pipelines is open; the queue is released when that pipeline closes. A record
+			// arriving afterwards means some reader is still delivering to the actor after
+			// its replay ended — the record has nowhere to go and would be lost. Named here
+			// rather than left as a dereference of a released field, because the backends
+			// that log-and-continue per batch would otherwise surface it as a bare
+			// NullReferenceException and keep going with an incomplete replay.
+			var queue = eventsQueue;
+			if (queue == null)
+				throw new LanguageException(
+					$"Actor '{Name}' received a journal record to replay while no rehydration is in progress. "
+					+ "A replay's destination belongs to the read that opened it: a reader delivering to this "
+					+ "actor must do so within the rehydration it started.");
+
+			queue.Add(retornableEventData);
 		}
 
 		void IActorEventJournalClient.EndJournalReplay(bool forcedToEnd)
@@ -1648,12 +1715,9 @@ namespace Puppeteer.EventSourcing
 			rwLock.EnterWriteLock();
 			try
 			{
+				// The domain-facing replay signals derive from this flag at its setter
+				// (see SymbolTable.RecoveringState).
 				symbolTable.RecoveringState = true;
-				if (actor is ActorV1)
-				{
-					symbolTable.SetVariable("ItIsThePresent", false, typeof(bool));
-					ExecutionContext.Current.SetContext(DateTime.Now, false, actor);
-				}
 
 				dairy = new Diary(dbType, connection, this);
 				await dairy.RehydrateFromEventAsync();
@@ -1664,11 +1728,6 @@ namespace Puppeteer.EventSourcing
 				rwLock.ExitWriteLock();
 			}
 			symbolTable.RecoveringState = false;
-			if (actor is ActorV1)
-			{
-				symbolTable.SetVariable("ItIsThePresent", true, typeof(bool));
-				ExecutionContext.Current.SetContext(DateTime.Now, true, actor);
-			}
 
 			if (this.OnAfterRecovering != null) this.OnAfterRecovering(dbType, connection, this.Name, this.EntryId);
 		}
@@ -1677,6 +1736,102 @@ namespace Puppeteer.EventSourcing
 		private readonly ReaderWriterLockSlim rwLock = new ReaderWriterLockSlim();
 		private readonly SemaphoreSlim _block = new SemaphoreSlim(1, 1);
 		private static string runningScript = "";
+
+		// Re-entrancy contract of the actor's lock, stated instead of leaked. A command
+		// owns the write lock for its WHOLE body (PerformCmd / PerformCmdAsync /
+		// PerformCheckThenCmd) and a read-only surface owns the read lock (PerformQry /
+		// PerformChk / PerformEmit). So C# that a body invoked — a puppet method, a
+		// persistence hook — calling back into THIS SAME actor to perform another command is a
+		// recursive acquisition on the same thread. The BCL answers that with a bare
+		// LockRecursionException that names neither the actor, nor the command, nor the
+		// alternative; from a read lock it is worse ("write lock may not be acquired with
+		// read lock held"), and on the async path the nested _block.WaitAsync would not
+		// throw at all, it would deadlock.
+		//
+		// Re-entrancy stays forbidden BY DESIGN, and not merely for lack of a recursive
+		// lock: the nested entry would clobber the _reusableCommandPrepared instance the
+		// command in flight is executing from (one per handler), and its journal entry
+		// would land inside the commit scope of the outer one. So the nested call is
+		// rejected here with a typed error that names the supported shapes.
+		//
+		// The contract covers every perform surface, not only the command. A `perform` is one
+		// of PerformChk / PerformCommand / PerformEnact / PerformQry — an Enact rides on the
+		// command path, so it is guarded there — and over those surfaces:
+		//   * no perform may nest another perform,
+		//   * no perform may nest a Reaction,
+		//   * a Reaction may nest one perform AT A TIME: its check takes and RELEASES the read
+		//     lock before its command takes the write lock. Sequential, never overlapping, so
+		//     a Reaction's own perform reaches this guard holding nothing and passes.
+		// The first two rules are derivable from the lock, and derivable EXACTLY, because
+		// ReaderWriterLockSlim reports ownership PER THREAD: a second caller arriving on a
+		// different thread holds nothing here and is serialized by the lock instead. That is
+		// ordinary concurrency and stays legal — nesting means same thread AND same actor.
+		//
+		// Reading the actor mid-perform is not merely a lock problem, which is why the query
+		// and check surfaces are refused rather than allowed to read: while the verb is in
+		// flight there is no settled state to observe. Its journal entry is not committed, so
+		// a nested read would see state mid-mutation and a nested Reaction would walk a
+		// journal whose current entry does not exist yet.
+		internal const string PERFORM_COMMAND = "command";
+		internal const string PERFORM_QUERY = "query";
+		internal const string PERFORM_CHECK = "check";
+		internal const string PERFORM_EMIT = "reaction's emit";
+		internal const string PERFORM_REACTION = "reaction";
+
+		private void GuardAgainstNestedPerform(string inbound, string script)
+		{
+			if (!rwLock.IsWriteLockHeld && !rwLock.IsReadLockHeld) return;
+
+			string holder = rwLock.IsWriteLockHeld
+				? "a command"
+				: "a query, a check or a reaction's emit";
+
+			string holderNoun = rwLock.IsWriteLockHeld ? "command" : "read-only perform";
+
+			string advice;
+			if (inbound == PERFORM_COMMAND)
+			{
+				advice =
+					"A command's body — including any C# it invokes — must not perform another command on its OWN actor. " +
+					"Supported instead: (a) let the act the body already journals be the anchor and declare a Reaction over " +
+					"this actor's own journal (it runs after the commit, on its own thread; Outbox.Emit records durably and " +
+					"Program.Emit pushes to the reaction's OutputTarget), or (b) perform the command on a DIFFERENT actor, " +
+					"which is legal from inside a command body.";
+			}
+			else if (inbound == PERFORM_REACTION)
+			{
+				advice =
+					"A Reaction observes the journal AFTER the commit, on its own thread, so it cannot be driven from " +
+					"inside the very perform it would observe — that entry does not exist yet. Supported instead: declare " +
+					"the Reaction as a Cue and let the commit trigger it, or call Execute from outside any perform.";
+			}
+			else
+			{
+				advice =
+					$"A perform is not re-entrant: the {holderNoun} in flight owns this actor until it completes, and " +
+					"while it is in flight there is no settled state to read. Supported instead: read what the body " +
+					$"already has in the SAME script, or perform the {inbound} on a DIFFERENT actor.";
+			}
+
+			// A Reaction is named, not scripted, so the subject of the sentence changes with it.
+			string subject = inbound == PERFORM_REACTION
+				? $"The attempted Reaction was: {script}."
+				: $"The attempted script was: {script}.";
+
+			throw new LanguageException(
+				$"Actor '{this.Name}' cannot perform a nested {inbound}: this thread is already executing {holder} " +
+				$"on this same actor, which owns the actor's lock until it completes. {subject} " +
+				advice);
+		}
+
+		// Rule 2 of the contract above, reached from the Reaction execution chokepoint
+		// (Reaction.Execute, which both Reactions.Execute and the Cued/Continuous path funnel
+		// through). The Reaction is named instead of a script because that is what an author
+		// would recognise here.
+		internal void GuardAgainstNestedReaction(string reactionName)
+		{
+			GuardAgainstNestedPerform(PERFORM_REACTION, reactionName);
+		}
 
 		internal string RunningScript
 		{
@@ -1776,13 +1931,16 @@ namespace Puppeteer.EventSourcing
 			// Honor the actor's real execution policy (see AddKnownActionFromDefine): an
 			// AlwaysInterpreted actor must materialize this cached Action interpreted so
 			// its @parameter Ids bind on the interpreted replay path.
-			program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+			program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 			program.Parameters = new Parameters(parameters);
 			// Resolve references once for an interpreted cached Action so idParameters is
 			// populated for the per-invocation SolveParameters at the replay sites.
 			if (!program.IsCompiledMode)
 				program.SolveReferences(program.Parameters, withStaticValidation: false);
-			_ = actionCommands.Add(actionId, actionScript, program);
+			// A2: same frozen signature as the Define-replay path (AddKnownActionFromDefine).
+			// An Action materialized through this route must not leave an observing Reaction
+			// without the authoritative types of the globals its body references.
+			_ = actionCommands.Add(actionId, actionScript, program, FreezeGlobalSignature(actionScript, program.Parameters));
 		}
 
 		// Phase 4 of the Action refactor (project_puppeteer_action_refactor_plan.md):
@@ -1844,7 +2002,7 @@ namespace Puppeteer.EventSourcing
 
 			bodyProgram.SetContextInfo();
 			// Honor the actor's real execution policy. The live cache-miss path builds
-			// the same Action with this.actor.CompiledModePolicy (PrepareCommandProgram),
+			// the same Action with this.CompiledModePolicy (PrepareCommandProgram),
 			// so an AlwaysInterpreted actor must materialize this replayed Action
 			// interpreted as well. Hardcoding Automatic left the cached Action COMPILED
 			// while Perform ran it via Execute() (the interpreted walker never calls
@@ -1852,16 +2010,15 @@ namespace Puppeteer.EventSourcing
 			// its @parameter Ids were never bound and replay threw "Variable '<param>'
 			// has not been defined". This also aligns the tell-bearing corollary: a body
 			// with a tell is interpreted (IsCompiledMode = !ContainsTell) under any policy.
-			bodyProgram.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+			bodyProgram.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 
 			string parametersDeclarationText = Parameters.CanonicalDeclarationsToParametersString(defineStmt.ParametersText);
-			if (!string.IsNullOrEmpty(parametersDeclarationText))
-			{
-				// DomainLibraries are passed so that an @parameter typed as a domain
-				// enum (journaled by type name) resolves when reconstructing the
-				// Parameters from text; without this the internal parser would only accept primitives.
-				bodyProgram.Parameters = new Parameters(parametersDeclarationText, libraries);
-			}
+			// A ZERO-parameter header — `define action <id> () as ... end;` — must still yield an
+			// EMPTY set, never null: the replay binding path dereferences Program.Parameters once
+			// per invocation (ApplyActionInvocationArguments, ApplyReplicatedEvent) and so does
+			// every Reaction observing the Action, so a null left a parameterless Action's
+			// invocation unreplayable.
+			bodyProgram.Parameters = new Parameters(parametersDeclarationText);
 
 			// The `define action` canonical header EXCLUDES the system parameter Now
 			// (UserParametersAsCanonicalText / ArgumentsAsString drop it, symmetric with the
@@ -1945,14 +2102,24 @@ namespace Puppeteer.EventSourcing
 			}
 
 			probe.SetContextInfo();
-			probe.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+			probe.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 
 			// A fresh Parameters (rebuilt from the declaration text, DomainLibraries for
 			// enum-typed params) keeps the probe's parameter binding from touching the
-			// shape Parameters the cached Program holds.
-			Parameters probeParameters = shapeParameters != null
-				? new Parameters(shapeParameters.ParametersAsString(), libraries)
-				: new Parameters();
+			// shape Parameters the cached Program holds — which on the LIVE path is the
+			// caller's rented bag, still in use right after this returns.
+			//
+			// Rebuilt from the CANONICAL DECLARATIONS (the same `name:type` header a Define
+			// journal entry carries), NOT from ParametersAsString: that form also serializes
+			// an Eval parameter's SCRIPT, and a script containing a comma does not survive
+			// the ctor's comma-split ("Parameter name is not valid"). The probe only needs
+			// the SHAPE — it binds @parameter Ids, it never evaluates one.
+			string probeDeclarations = shapeParameters != null
+				? Parameters.CanonicalDeclarationsToParametersString(shapeParameters.UserParametersAsCanonicalText())
+				: string.Empty;
+			Parameters probeParameters = string.IsNullOrEmpty(probeDeclarations)
+				? new Parameters()
+				: new Parameters(probeDeclarations);
 
 			probe.SolveReferences(probeParameters, withStaticValidation: false);
 
@@ -1978,18 +2145,6 @@ namespace Puppeteer.EventSourcing
 			internal string FormatedScriptForDairy;
 			internal bool NeedsToSolveParameters;
 			internal bool NeedsToSolveReferences;
-			// B.3.3: non-null when the IsScript observation tipped a recurrent
-			// promotion candidate over the threshold AND it had not been
-			// promoted before. Carries everything the journal write needs to
-			// emit an atomic Define + Invocation pair instead of a Script row.
-			internal PromotionResult Promotion;
-			// B.3.4: non-null when an incoming Script-shape was rerouted to
-			// an already-promoted Action via promotionCandidateToActionId.
-			// Carries the Parameters object populated with the values
-			// extracted from the incoming script's literals — replaces the
-			// caller's (typically EMPTY_PARAMETERS) for both LoadArguments
-			// and ArgumentsAsString at the journal-write step.
-			internal Parameters PromotedArgumentParameters;
 
 			internal void Reset()
 			{
@@ -1999,8 +2154,6 @@ namespace Puppeteer.EventSourcing
 				FormatedScriptForDairy = null;
 				NeedsToSolveParameters = false;
 				NeedsToSolveReferences = false;
-				Promotion = null;
-				PromotedArgumentParameters = null;
 			}
 		}
 
@@ -2046,29 +2199,15 @@ namespace Puppeteer.EventSourcing
 				// depends on the user parameters (see Parameters.HasAnyUserParameter).
 				if (parameters == EMPTY_PARAMETERS || !parameters.HasAnyUserParameter())
 				{
-					// Without user parameters: would be a V1 Script unless the
-					// candidate hash matches an already-promoted Action — in
-					// which case B.3.4 reroutes the incoming script as an
-					// invocation of that Action, so the journal grows with
-					// a single compact Invocation row instead of a Script row.
-					if (TryRouteScriptAsPromotedAction(parameters, commandPrepared))
-					{
-						// Routed: commandPrepared is now shaped as IsExistingAction
-						// targeting the promoted Action; the original Script
-						// Program is discarded.
-					}
-					else
-					{
-						commandPrepared.Entry = JournalEntry.IsScript;
-						commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
-						commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
-						// B.3.1 + B.3.3: observe this Script's promotion candidate
-						// for the automatic-promotion counter. If the observation
-						// fires promotion (counter at 0, not yet promoted), the
-						// returned PromotionResult tells ExecuteCommandWithWriteLock
-						// to journal Define + Invocation instead of a Script row.
-						commandPrepared.Promotion = ObservePromotionCandidate(commandPrepared.Program, commandPrepared.FormatedScriptForDairy);
-					}
+					// Without user parameters this is a V1 Script: it is journaled as a
+					// Script row carrying its canonical text. The command text is NEVER
+					// rewritten into a synthesized Action — a rewrite at the text level
+					// cannot tell an authored LABEL (an output statement's alias, an
+					// upgrade guard's name) from a VALUE, so it silently changed what the
+					// command meant.
+					commandPrepared.Entry = JournalEntry.IsScript;
+					commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
+					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
 				}
 				else
 				{
@@ -2102,20 +2241,35 @@ namespace Puppeteer.EventSourcing
 						commandPrepared.Entry = JournalEntry.IsExistingAction;
 						commandPrepared.Program = (Program)existingAction.Program;
 						commandPrepared.CacheEntry = existingAction;
-						commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+						commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 						if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, existingAction);
 						return;
 					}
 
 					commandPrepared.Entry = JournalEntry.IsNewAction;
 					var nextActionId = this.TakeAndIncrementActionId();
-					commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-					commandPrepared.CacheEntry = actionCommands.Add(nextActionId, identityKey, commandPrepared.Program);
+					commandPrepared.Program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
+					// A2 (reactions ref-resolution): freeze the Action's resolved global
+					// signature HERE too, not only when a Define is replayed
+					// (AddKnownActionFromDefine). A Reaction observing this Action seeds its own
+					// symbol table from that map (Reaction.SolveActionReferences); with the map
+					// empty it has no authoritative type for a receiver global the body
+					// references, so under AlwaysInterpreted its reference resolution failed
+					// ("Unknown property or method 'X' on type 'Object'"), the observed action's
+					// @parameters reached the matcher unresolved and the match never completed —
+					// the projection silently did not fire until a restart replayed the Define.
+					// The signature must not depend on whether this process defined the Action or
+					// read it back.
+					commandPrepared.CacheEntry = actionCommands.Add(
+						nextActionId,
+						identityKey,
+						commandPrepared.Program,
+						FreezeGlobalSignature(identityKey, parameters));
 					if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, commandPrepared.CacheEntry);
 				}
 				// On a cache miss, SolveReferences is always needed to resolve the program's full
 				// structure (LValues, RValues, global variables, parameters).
-				commandPrepared.NeedsToSolveReferences = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				commandPrepared.NeedsToSolveReferences = !commandPrepared.Program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
@@ -2123,7 +2277,7 @@ namespace Puppeteer.EventSourcing
 				// Only the parameters need to be rebound with the new values (SolveParameters).
 				commandPrepared.Entry = JournalEntry.IsExistingAction;
 				commandPrepared.Program = (Program)commandPrepared.CacheEntry.Program;
-				commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				commandPrepared.NeedsToSolveParameters = !commandPrepared.Program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 		}
 
@@ -2151,36 +2305,13 @@ namespace Puppeteer.EventSourcing
 				&& !(SuppressReactionJournaling && InReactionAction);
 			long nextEntryId = -1;
 
-			// B.3.4: when the incoming Script was rerouted to a promoted
-			// Action, the caller's `parameters` is typically EMPTY; the
-			// actual argument values live on PromotedArgumentParameters
-			// (extracted from the script's literals). Substitute it here
-			// so LoadArguments / SolveParameters / journal-side ArgumentsAsString
-			// all see the populated set.
-			Parameters effectiveParameters = commandPrepared.PromotedArgumentParameters ?? parameters;
-
-			// System Now contract on the promotion-routing path. Now is a per-call
-			// system parameter the framework injects via SetNow only when the program
-			// references it; the caller's injection targeted `parameters`. When the
-			// Script was routed to a promoted Action, effectiveParameters is the
-			// freshly-built PromotedArgumentParameters (literals only) — a DIFFERENT
-			// instance that never received SetNow. Since effectiveParameters is what
-			// feeds SolveReferences (eagerly here, and lazily in Program.ExecuteExpression
-			// on the compiled Action's first compile), Now must be present on it too;
-			// otherwise the Id 'Now' resolves to no scope and the codegen throws. Now
-			// stays excluded from the journal signature/args by Parameters.IsSystemNow.
-			if (!ReferenceEquals(effectiveParameters, parameters) && effectiveParameters != EMPTY_PARAMETERS && commandPrepared.Program.ReferencesNow)
-			{
-				effectiveParameters.SetNow(now);
-			}
-
 			// recomputeEvalParameters:false on the check-then-command path — the WriteLock
 			// re-check already evaluated Eval params once (command-time); the command reuses
 			// that value instead of re-executing the eval expression.
-			commandPrepared.Program.LoadArguments(effectiveParameters, recomputeEvalParameters);
+			commandPrepared.Program.LoadArguments(parameters, recomputeEvalParameters);
 
-			if (commandPrepared.NeedsToSolveReferences) commandPrepared.Program.SolveReferences(effectiveParameters, withStaticValidation: true);
-			if (commandPrepared.NeedsToSolveParameters) commandPrepared.Program.SolveParameters(effectiveParameters);
+			if (commandPrepared.NeedsToSolveReferences) commandPrepared.Program.SolveReferences(parameters, withStaticValidation: true);
+			if (commandPrepared.NeedsToSolveParameters) commandPrepared.Program.SolveParameters(parameters);
 
 			// Hoisted out of the try so the write-time-failure catch can reuse the Define
 			// entry id it reserved here: a failed PARAMETRIC command journals a self-contained
@@ -2199,14 +2330,7 @@ namespace Puppeteer.EventSourcing
 				// from the Invocation row).
 				if (writeNewEntry)
 				{
-					// B.3.3: a Script observation that fires automatic promotion
-					// emits Define + Invocation atomically (same two-row dance
-					// IsNewAction uses for an explicit V2 first invocation).
-					// B.3.4: but when the materialization reused an existing
-					// Action body (idempotent path), only the Invocation is
-					// new — we do NOT take a Define entryId for that case.
-					bool promotionNeedsDefine = commandPrepared.Promotion != null && commandPrepared.Promotion.RequiresDefineWrite;
-					if (commandPrepared.Entry == JournalEntry.IsNewAction || promotionNeedsDefine)
+					if (commandPrepared.Entry == JournalEntry.IsNewAction)
 					{
 						defineEntryIdForCutover = this.TakeAndIncrementEntryId();
 					}
@@ -2220,7 +2344,7 @@ namespace Puppeteer.EventSourcing
 				// is where we set it here.
 				commandPrepared.Program.EntryId = nextEntryId;
 
-				result = Perform(commandPrepared.Program, effectiveParameters);
+				result = Perform(commandPrepared.Program, parameters);
 
 				// Eval determinism: the dairy snapshot was taken in PrepareCommand
 				// BEFORE Perform, when EvalStatement.forDairy was still null — that
@@ -2246,33 +2370,7 @@ namespace Puppeteer.EventSourcing
 					switch (commandPrepared.Entry)
 					{
 						case JournalEntry.IsScript:
-							if (commandPrepared.Promotion != null && commandPrepared.Promotion.RequiresDefineWrite)
-							{
-								// B.3.3: automatic Script → Action promotion. Emit
-								// Define + first Invocation atomically; from here
-								// onwards this candidate routes via actionCommands.
-								dairy.WriteDefineWithFirstInvocation(
-									commandPrepared.Promotion.ActionId,
-									commandPrepared.Promotion.DefineText,
-									defineEntryIdForCutover,
-									nextEntryId,
-									now,
-									commandPrepared.Promotion.ArgumentsString,
-									commandPrepared.Program.LastExposeData);
-							}
-							else if (commandPrepared.Promotion != null)
-							{
-								// B.3.4: idempotent promotion — the Action body is
-								// already journalled (e.g. from a previous run);
-								// emit only the Invocation row.
-								dairy.WriteInvocationEntry(
-									commandPrepared.Promotion.ActionId,
-									nextEntryId,
-									now,
-									commandPrepared.Promotion.ArgumentsString,
-									commandPrepared.Program.LastExposeData);
-							}
-							else if (!String.IsNullOrWhiteSpace(commandPrepared.FormatedScriptForDairy))
+							if (!String.IsNullOrWhiteSpace(commandPrepared.FormatedScriptForDairy))
 							{
 								dairy.WriteScriptEntry(nextEntryId, commandPrepared.FormatedScriptForDairy, now, commandPrepared.Program.LastExposeData);
 							}
@@ -2282,20 +2380,11 @@ namespace Puppeteer.EventSourcing
 							// the parsed Program via TryGetLastExecutedScript and
 							// skip the parse. ActionEvents already benefit from
 							// actionCommands LRU and are intentionally NOT cached here.
-							// Note: even on a promoted write, the runtime effect
-							// came from the Script's interpreted Program, so we
-							// still publish that instance — followers consuming
-							// the Invocation row receive the same Program identity
-							// they would have for a regular Script row.
 							PublishLastExecutedScript(nextEntryId, commandPrepared.Program);
 							break;
 
 						case JournalEntry.IsExistingAction:
-							// B.3.4: when the incoming Script was rerouted to a
-							// promoted Action, use PromotedArgumentParameters
-							// for the journal payload — the caller's
-							// `parameters` is EMPTY in that case.
-							argumentValues = (commandPrepared.PromotedArgumentParameters ?? parameters).ArgumentsAsString(this.DatabaseType);
+							argumentValues = parameters.ArgumentsAsString(this.DatabaseType);
 							var actionId = commandPrepared.CacheEntry.Id;
 							dairy.WriteInvocationEntry(actionId, nextEntryId, now, argumentValues, commandPrepared.Program.LastExposeData);
 							break;
@@ -2381,12 +2470,12 @@ namespace Puppeteer.EventSourcing
 									commandPrepared.CacheEntry.Id,
 									nextEntryId,
 									now,
-									(commandPrepared.PromotedArgumentParameters ?? parameters).ArgumentsAsString(this.DatabaseType),
+									parameters.ArgumentsAsString(this.DatabaseType),
 									null);
 								break;
 
 							default:
-								// A non-parametric Script (with or without promotion): the rendered body
+								// A non-parametric Script: the rendered body
 								// is already a complete, replayable sentence — persist it as-is.
 								dairy.WriteScriptEntry(nextEntryId, commandPrepared.FormatedScriptForDairy, now, null);
 								break;
@@ -2436,6 +2525,10 @@ namespace Puppeteer.EventSourcing
 		{
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (parameters == null) throw new LanguageException("Can not send null parameters");
+
+			// Before touching any shared state: a nested command on this same actor is
+			// rejected with the contract, not with a raw threading error.
+			GuardAgainstNestedPerform(PERFORM_COMMAND, script);
 
 			string result = null;
 
@@ -2541,6 +2634,11 @@ namespace Puppeteer.EventSourcing
 
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 
+			// Nested-command contract (see GuardAgainstNestedPerform). Checked BEFORE
+			// _block.WaitAsync: on this path a nested entry would not even reach the write
+			// lock, it would block forever on the semaphore.
+			GuardAgainstNestedPerform(PERFORM_COMMAND, script);
+
 			string result = null;
 			JournalEntry entry = JournalEntry.Unknown;
 			string formatedScriptForDairy = null;
@@ -2554,16 +2652,6 @@ namespace Puppeteer.EventSourcing
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
 			bool executionError = false;
-			// B.3.3: when an IsScript observation fires automatic promotion,
-			// this carries the materialized PromotionResult so the journal
-			// write below emits Define + Invocation instead of a Script row.
-			PromotionResult promotion = null;
-			// B.3.4: when an incoming would-be Script was rerouted to an
-			// already-promoted Action, this carries the Parameters populated
-			// with the values extracted from the script's literals. Used in
-			// place of the caller's `parameters` for LoadArguments and for
-			// the Invocation row's ArgumentsAsString.
-			Parameters promotedArgumentParameters = null;
 			// Same gate as the sync path (ExecuteCommandWithWriteLock): it only
 			// suppresses journaling when we are INSIDE a Reaction's .Do(...) Action
 			// (InReactionAction == true). Other direct user PerformCmds
@@ -2593,44 +2681,13 @@ namespace Puppeteer.EventSourcing
 					// HasAnyUserParameter excludes the system Now (see the sync path).
 					if (parameters == EMPTY_PARAMETERS || !parameters.HasAnyUserParameter())
 					{
-						// B.3.4: before classifying as IsScript, check whether
-						// this script's candidate hash matches an already-
-						// promoted Action. If so, reshape the local state to
-						// look like a regular IsExistingAction invocation.
-						int candidateHash = program.PromotionCandidateHash;
-						if (promotionCandidateToActionId.TryGetValue(candidateHash, out int routedActionId)
-							&& actionCommands.TryGetValue(routedActionId, out CommandCacheEntry routedEntry))
-						{
-							string canonicalForRouting = program.ConvertToString(this.DatabaseType);
-							var routedExtraction = PromotionCandidate.LiteralExtractor.Extract(canonicalForRouting);
-							string declarationText = routedEntry.Program.Parameters != null
-								? routedEntry.Program.Parameters.ParametersAsString()
-								: routedExtraction.ParametersDeclaration;
-							Parameters routedArgs = string.IsNullOrWhiteSpace(declarationText)
-								? new Parameters()
-								: new Parameters(declarationText);
-							if (!string.IsNullOrWhiteSpace(routedExtraction.ArgumentsString))
-							{
-								routedArgs.LoadArguments(routedExtraction.ArgumentsString);
-							}
-							entry = JournalEntry.IsExistingAction;
-							program = routedEntry.Program;
-							commandCacheEntry = routedEntry;
-							promotedArgumentParameters = routedArgs;
-							formatedScriptForDairy = canonicalForRouting;
-							needsToSolveReferences = false;
-							needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-						}
-						else
-						{
-							entry = JournalEntry.IsScript;
-							program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
-							formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
-							// B.3.1 + B.3.3: observe the promotion candidate
-							// (parallel to the sync branch).
-							promotion = ObservePromotionCandidate(program, formatedScriptForDairy);
-							needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-						}
+						// Without user parameters this is a V1 Script, journaled as a Script
+						// row carrying its canonical text (parallel to the sync branch). The
+						// command text is never rewritten into a synthesized Action.
+						entry = JournalEntry.IsScript;
+						program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
+						formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
+						needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 					}
 					else
 					{
@@ -2654,17 +2711,24 @@ namespace Puppeteer.EventSourcing
 							program = existingAction.Program;
 							commandCacheEntry = existingAction;
 							needsToSolveReferences = false;
-							needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+							needsToSolveParameters = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 							if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, existingAction);
 						}
 						else
 						{
 							entry = JournalEntry.IsNewAction;
 							var nextActionId = this.TakeAndIncrementActionId();
-							program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-							commandCacheEntry = actionCommands.Add(nextActionId, identityKey, program);
+							program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
+							// A2: freeze the global signature on the async live path too — see the
+							// sync twin in PrepareCommandProgram for why an empty map left a
+							// Reaction unable to resolve the observed Action under AlwaysInterpreted.
+							commandCacheEntry = actionCommands.Add(
+								nextActionId,
+								identityKey,
+								program,
+								FreezeGlobalSignature(identityKey, parameters));
 							if (!string.Equals(identityKey, script, StringComparison.Ordinal)) actionCommands.AddScriptAlias(script, commandCacheEntry);
-							needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+							needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 						}
 					}
 				}
@@ -2674,8 +2738,8 @@ namespace Puppeteer.EventSourcing
 					// Only rebind parameters (SolveParameters) if interpreted mode.
 					entry = JournalEntry.IsExistingAction;
 					program = commandCacheEntry.Program;
-					needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-					needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+					needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+					needsToSolveParameters = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
 
 				commandLineError = "";
@@ -2695,80 +2759,84 @@ namespace Puppeteer.EventSourcing
 					parameters.SetNow(now);
 				}
 
-				rwLock.EnterWriteLock();
-
-				// B.3.4: when the incoming Script was rerouted to a promoted
-				// Action, substitute the populated Parameters for the
-				// caller's (empty) `parameters` — parallel to the sync path.
-				Parameters effectiveParameters = promotedArgumentParameters ?? parameters;
-
-				// System Now contract on the promotion-routing path. Now is a per-call
-				// system parameter the framework injects via SetNow only when the program
-				// references it; the SetNow above targeted the caller's `parameters`. When
-				// the Script was routed to a promoted Action, effectiveParameters is the
-				// freshly-built PromotedArgumentParameters (literals only) — a DIFFERENT
-				// instance that never received SetNow. Since effectiveParameters is what
-				// feeds SolveReferences (eagerly here, and lazily in Program.ExecuteExpression
-				// on the compiled Action's first compile), Now must be present on it too;
-				// otherwise the Id 'Now' resolves to no scope and the codegen throws. This
-				// generalizes to any per-call system parameter the framework injects at
-				// runtime (today Now is the only one). Now stays excluded from the journal
-				// signature/args by Parameters.IsSystemNow, so this does not contaminate it.
-				if (!ReferenceEquals(effectiveParameters, parameters) && effectiveParameters != EMPTY_PARAMETERS && program.ReferencesNow)
-				{
-					effectiveParameters.SetNow(now);
-				}
-
-				program.LoadArguments(effectiveParameters);
-
-				if (needsToSolveReferences) program.SolveReferences(effectiveParameters, withStaticValidation: true);
-				if (needsToSolveParameters) program.SolveParameters(effectiveParameters);
-
 				// Phase 4 of the Action refactor: take BOTH entry ids upfront
 				// when this is a first invocation (IsNewAction) so the Define row
 				// precedes the Invocation row in the monotonic journal. See
 				// matching block in ExecuteCommandWithWriteLock for rationale.
 				long defineEntryIdForCutover = -1;
 
+				// The write lock spans PREPARATION AND EXECUTION, and a single finally
+				// releases it — the shape the two synchronous command paths already have
+				// (PerformCmd, PerformCheckThenCmd), where preparation is protected because
+				// it lives inside the method the try wraps. Here preparation is inlined (see
+				// the header comment on why this path cannot share _reusableCommandPrepared),
+				// so the protection has to be stated. It matters because SolveReferences runs
+				// the static validation: a script that is syntactically valid but references
+				// an unknown member fails HERE, after the lock is held. Without this finally
+				// covering it, the throw escaped still owning the lock, and since
+				// ReaderWriterLockSlim ownership is thread-affine and never reclaimed, the
+				// actor stayed wedged: the same thread was refused by the nested-command
+				// guard, every other thread blocked forever on the acquire. A statically
+				// refused command now leaves the actor exactly as usable as one that failed
+				// at execution time.
+				//
+				// Preparation cannot move outside the lock the way the read-only paths place
+				// it (PerformQry, PerformChk, PerformEmit): SolveReferences resolves and
+				// declares globals in the SymbolTable that read-lock holders observe
+				// concurrently, so it belongs under the writer's exclusion.
+				//
+				// The release stays BEFORE the journal awaits below: the lock is thread-affine
+				// and must not be held across a continuation.
+				rwLock.EnterWriteLock();
+
 				try
 				{
-					runningScript = script;
-					if (writeNewEntry)
+					program.LoadArguments(parameters);
+
+					if (needsToSolveReferences) program.SolveReferences(parameters, withStaticValidation: true);
+					if (needsToSolveParameters) program.SolveParameters(parameters);
+
+					// Execution is the only region whose failure is CAPTURED instead of
+					// propagated: an act that ran and failed still happened, so it is
+					// journaled and the exception is rethrown after the commit (below). A
+					// preparation failure is the opposite — the act never began, so it must
+					// escape this catch and journal NOTHING. That is why the two regions keep
+					// separate try blocks even though both are covered by the same lock.
+					try
 					{
-						// B.3.3: a Script observation that fires promotion writes
-						// Define + Invocation (mirrors the sync path's behaviour).
-						// B.3.4: but on the idempotent reuse path no Define is
-						// needed — only the Invocation entry id.
-						bool promotionNeedsDefine = promotion != null && promotion.RequiresDefineWrite;
-						if (entry == JournalEntry.IsNewAction || promotionNeedsDefine)
+						runningScript = script;
+						if (writeNewEntry)
 						{
-							defineEntryIdForCutover = this.TakeAndIncrementEntryId();
+							if (entry == JournalEntry.IsNewAction)
+							{
+								defineEntryIdForCutover = this.TakeAndIncrementEntryId();
+							}
+							nextEntryId = this.TakeAndIncrementEntryId();
 						}
-						nextEntryId = this.TakeAndIncrementEntryId();
+
+						// Plan 6 (A): propagate entry id for ack-side elision (see
+						// matching comment in ExecuteCommandWithWriteLock).
+						program.EntryId = nextEntryId;
+
+						result = Perform(program, parameters);
+
+						// Eval determinism: re-render of the dairy snapshot post-Perform
+						// (mirror of the sync path in ExecuteCommandWithWriteLock). The snapshot
+						// was taken before Perform with EvalStatement.forDairy==null, that is why
+						// it emitted the non-deterministic literal `Eval(<expr>);`. Now executed,
+						// each executed Eval journals its EVALUATED form.
+						if (program.HasEval)
+						{
+							program.InvalidateDairyRenderCache();
+							formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
+						}
 					}
-
-					// Plan 6 (A): propagate entry id for ack-side elision (see
-					// matching comment in ExecuteCommandWithWriteLock).
-					program.EntryId = nextEntryId;
-
-					result = Perform(program, effectiveParameters);
-
-					// Eval determinism: re-render of the dairy snapshot post-Perform
-					// (mirror of the sync path in ExecuteCommandWithWriteLock). The snapshot
-					// was taken before Perform with EvalStatement.forDairy==null, that is why
-					// it emitted the non-deterministic literal `Eval(<expr>);`. Now executed,
-					// each executed Eval journals its EVALUATED form.
-					if (program.HasEval)
+					catch (Exception e)
 					{
-						program.InvalidateDairyRenderCache();
-						formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
+						executionException = e;
+						executionError = true;
+						commandLineError = program.GetCommandErrorLine();
 					}
-				}
-				catch (Exception e)
-				{
-					executionException = e;
-					executionError = true;
-					commandLineError = program.GetCommandErrorLine();
 				}
 				finally
 				{
@@ -2790,32 +2858,7 @@ namespace Puppeteer.EventSourcing
 					switch (entry)
 					{
 						case JournalEntry.IsScript:
-							if (promotion != null && promotion.RequiresDefineWrite)
-							{
-								// B.3.3: automatic Script → Action promotion (async
-								// path mirror of the sync branch in
-								// ExecuteCommandWithWriteLock).
-								await dairy.WriteDefineWithFirstInvocationAsync(
-									promotion.ActionId,
-									promotion.DefineText,
-									defineEntryIdForCutover,
-									nextEntryId,
-									now,
-									promotion.ArgumentsString,
-									program.LastExposeData);
-							}
-							else if (promotion != null)
-							{
-								// B.3.4: idempotent promotion — Action body already
-								// on disk; emit only the Invocation row.
-								await dairy.WriteInvocationEntryAsync(
-									promotion.ActionId,
-									nextEntryId,
-									now,
-									promotion.ArgumentsString,
-									program.LastExposeData);
-							}
-							else if (!String.IsNullOrWhiteSpace(formatedScriptForDairy))
+							if (!String.IsNullOrWhiteSpace(formatedScriptForDairy))
 							{
 								await dairy.WriteScriptEntryAsync(nextEntryId, formatedScriptForDairy, now, program.LastExposeData);
 							}
@@ -2826,10 +2869,7 @@ namespace Puppeteer.EventSourcing
 							break;
 
 						case JournalEntry.IsExistingAction:
-							// B.3.4: use promotedArgumentParameters when this is
-							// a Script-routed-to-Action invocation (parallel to
-							// the sync path).
-							argumentValues = (promotedArgumentParameters ?? parameters).ArgumentsAsString(this.DatabaseType);
+							argumentValues = parameters.ArgumentsAsString(this.DatabaseType);
 							var actionId = commandCacheEntry.Id;
 							await dairy.WriteInvocationEntryAsync(actionId, nextEntryId, now, argumentValues, program.LastExposeData);
 							break;
@@ -2931,6 +2971,12 @@ namespace Puppeteer.EventSourcing
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (parameters == null) throw new LanguageException("Can not send null parameters");
 
+			// Re-entrancy contract (see GuardAgainstNestedPerform). A query nested in any
+			// perform is refused for the same reason a command is, and the raw BCL answer here
+			// was worse: EnterReadLock on a thread already holding the write lock throws
+			// LockRecursionException naming nothing.
+			GuardAgainstNestedPerform(PERFORM_QUERY, script);
+
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
 			string result = null;
@@ -2949,23 +2995,23 @@ namespace Puppeteer.EventSourcing
 
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
-					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
-					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 				}
 				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
-				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
 				// CACHE HIT: Program already compiled, references already resolved.
 				// In Automatic: IsCompiledMode=true -> both false -> nothing is done (the compiled lambda is reused directly).
 				// In AlwaysInterpreted (tests): both true -> references and parameters are re-resolved.
-				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveParameters = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
 			// Now is a per-call SYSTEM parameter (V1 and V2): each query carries its own
@@ -3020,11 +3066,27 @@ namespace Puppeteer.EventSourcing
 		// Parser: isQuery:true — blocks expose (which would persist to the journal) and global variable declaration.
 		// Cache: cachedQueries — compiled and cached with the same rules as PerformQry.
 		// Returns void (not string) because the result is an external side effect, not a return value.
+		// Emit against the actor's DEFAULT push destination. Kept for every caller that
+		// does not carry a per-reaction sink.
 		internal string PerformEmit(string script, Parameters parameters)
+		{
+			return PerformEmit(script, parameters, outputTarget, outputTargetFormatter);
+		}
+
+		// Emit against an EXPLICIT push destination. A Reaction resolves its own effective
+		// sink (its own if the declaring scope installed one, else the actor's default) and
+		// passes it here, because whether the projection document is CAPTURED at all
+		// depends on there being somewhere to push it.
+		internal string PerformEmit(string script, Parameters parameters, IOutputSink sinkForThisEmit, IOutputFormatter formatForThisEmit)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(script);
 			ArgumentNullException.ThrowIfNull(parameters);
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
+
+			// Re-entrancy contract (see GuardAgainstNestedPerform). The Reaction that legally
+			// drives this surface holds no lock when it does — it runs after the commit, on its
+			// own thread — so this refuses only an emit reached from inside another perform.
+			GuardAgainstNestedPerform(PERFORM_EMIT, script);
 
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
@@ -3043,21 +3105,21 @@ namespace Puppeteer.EventSourcing
 
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
-					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
-					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 				}
 				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
-				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
 				// CACHE HIT: see documentation in PerformQry about needsToSolveReferences on cache hit.
-				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveParameters = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
 			// Now is a per-call SYSTEM parameter (V1 and V2), thread-safe under the read
@@ -3094,9 +3156,9 @@ namespace Puppeteer.EventSourcing
 
 			try
 			{
-				if (outputTarget != null)
+				if (sinkForThisEmit != null)
 				{
-					using (FormatterContext.Push(outputTargetFormatter))
+					using (FormatterContext.Push(formatForThisEmit))
 					{
 						emittedDocument = Perform(program, parameters);
 					}
@@ -3157,6 +3219,12 @@ namespace Puppeteer.EventSourcing
 			ArgumentNullException.ThrowIfNull(parameters);
 			if (script.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 
+			// Re-entrancy contract (see GuardAgainstNestedPerform). The two legal callers reach
+			// this holding nothing: PerformCheckThenCmd runs it as phase 1, BEFORE taking the
+			// write lock — the re-check under the lock does not come through here, it calls
+			// ExecuteCheck directly — and a Reaction's `when:` runs after the commit.
+			GuardAgainstNestedPerform(PERFORM_CHECK, script);
+
 			bool needsToSolveParameters = false;
 			bool needsToSolveReferences = false;
 			string result = null;
@@ -3173,20 +3241,20 @@ namespace Puppeteer.EventSourcing
 
 				if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 				{
-					program.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 					cachedQueries.TryAdd(script, program);
 				}
 				else
 				{
-					program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+					program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 				}
 				// Cache miss: resolve the full structure (LValues, RValues, globals, parameters)
-				needsToSolveReferences = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveReferences = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 			else
 			{
 				// CACHE HIT: only rebind parameters. See the method comment about the difference from PerformQry.
-				needsToSolveParameters = !program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+				needsToSolveParameters = !program.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 			}
 
 			// Now is a per-call SYSTEM parameter (V1 and V2), thread-safe under the read
@@ -3265,6 +3333,11 @@ namespace Puppeteer.EventSourcing
 			if (scriptForCmd.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Script exceeds the maximun length");
 			if (scriptForChk.Length > Lexer.MAX_LEXEME_SIZE) throw new LanguageException("Check script exceeds the maximun length");
 
+			// Nested-command contract (see GuardAgainstNestedPerform). Checked before the
+			// ReadLock pre-check too: from inside a command this path would die on the
+			// pre-check's EnterReadLock instead, with an even less legible BCL message.
+			GuardAgainstNestedPerform(PERFORM_COMMAND, scriptForCmd);
+
 			// Record the caller-supplied parameter values before the check runs. The check
 			// script executes TWICE (ReadLock pre-check, WriteLock re-check) and the author is
 			// unaware of that, so every parameter it dirties is restored to this original
@@ -3311,20 +3384,20 @@ namespace Puppeteer.EventSourcing
 
 					if (parameters == EMPTY_PARAMETERS || parameters.HasAnyParameter())
 					{
-						programChk.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
+						programChk.AdjustCompilationMode(useInterpretedMode: false, this.CompiledModePolicy);
 						cachedQueries.TryAdd(scriptForChk, programChk);
 					}
 					else
 					{
-						programChk.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+						programChk.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 					}
 					// Cache miss: resolve the full structure
-					needsToSolveReferencesChk = !programChk.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+					needsToSolveReferencesChk = !programChk.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
 				else
 				{
 					// CACHE HIT: only rebind parameters. See documentation in PerformChk.
-					needsToSolveParametersChk = !programChk.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
+					needsToSolveParametersChk = !programChk.IsCompiledMode || this.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
 				}
 
 				// Now is a SYSTEM parameter injected by the framework (V1 and V2),
@@ -3400,7 +3473,7 @@ namespace Puppeteer.EventSourcing
 
 			string result;
 
-			switch (this.actor.CompiledModePolicy)
+			switch (this.CompiledModePolicy)
 			{
 				case CompilationModePolicy.Automatic:
 					if (program.IsCompiledMode)
@@ -3622,18 +3695,47 @@ namespace Puppeteer.EventSourcing
 			// would even re-dispatch a ghost message) instead of the replay branch that
 			// captures it for takeover re-delivery (RegisterReissueEnvelope). It also keeps
 			// writeNewEntry=false, so catch-up never re-persists an already-journaled entry.
-			// Save/restore so looped/nested calls compose.
+			// Save/restore so looped/nested calls compose. The domain-facing replay
+			// signals (ItIsThePresent global + ExecutionContext) derive from this flag
+			// at its setter — see SymbolTable.RecoveringState.
 			bool priorRecoveringState = symbolTable.RecoveringState;
 			symbolTable.RecoveringState = true;
 
 			eventsQueue = new BlockingCollection<EventData>(MAX_NORMAL_LOAD_POOL_SIZE);
 
-			long lastEntryId = dairy.RehydrateFromEvent(this.EntryId);
-			eventsQueue.CompleteAdding();
+			// Producer (RehydrateFromEvent -> IActorEventJournalClient.ReplayEvent ->
+			// eventsQueue.Add) and consumer (the drain loop below) MUST overlap. eventsQueue is
+			// BOUNDED to MAX_NORMAL_LOAD_POOL_SIZE, so Add BLOCKS once the queue is full. If the
+			// producer ran to completion before the consumer started (the earlier shape), any
+			// backlog larger than the queue capacity would block Add forever — no drainer runs on
+			// the same thread — a self-deadlock that also strands the actor write lock held by the
+			// catch-up loop, so every later read (EnterReadLock) hangs behind it. The normal
+			// rehydration path (EventSourcingStorage) already avoids this by overlapping the two;
+			// mirror it. The CONSUMER stays on THIS thread because Perform mutates actor state under
+			// the write lock and ReaderWriterLockSlim is thread-affine — so the PRODUCER is the side
+			// that moves to a Task (it only reads the journal and enqueues; no state, no lock).
+			// fromEntryId is captured here so the producer replays from the EntryId as of method
+			// entry, unaffected by the consumer advancing this.EntryId as it drains.
+			long fromEntryId = this.EntryId;
+			BlockingCollection<EventData> localQueue = eventsQueue;
+			Task<long> producerTask = Task.Run(() =>
+			{
+				try
+				{
+					return dairy.RehydrateFromEvent(fromEntryId);
+				}
+				finally
+				{
+					localQueue.CompleteAdding();
+				}
+			});
 
 			Parser parser = ParsersPool.Rent();
+			Exception consumerException = null;
 			try
 			{
+				try
+				{
 				foreach (EventData eventData in eventsQueue.GetConsumingEnumerable())
 				{
 					Program program;
@@ -3645,7 +3747,7 @@ namespace Puppeteer.EventSourcing
 							program = parser.Rehydrate();
 							// Honor the actor's real execution policy (see GenerateAndRentProgram):
 							// an AlwaysCompiled actor must run the replayed script compiled.
-							program.AdjustCompilationMode(useInterpretedMode: true, this.actor.CompiledModePolicy);
+							program.AdjustCompilationMode(useInterpretedMode: true, this.CompiledModePolicy);
 							program.Parameters = ParametersPool.Rent();
 							program.SolveParameters(program.Parameters);
 							break;
@@ -3672,7 +3774,9 @@ namespace Puppeteer.EventSourcing
 					program.Parameters["Now", typeof(DateTime)] = eventData.OccurredAt;
 
 					if (!actionCommands.ContainsAction(program.Script))
-						program.SolveReferences(program.Parameters, withStaticValidation: true);
+						// Replay, not admission — see the EventSourcingStorage resolver stage.
+						using (ReplayResolutionScope.Enter())
+							program.SolveReferences(program.Parameters, withStaticValidation: true);
 					else if (!program.IsCompiledMode)
 						// Interpreted cached Action: rebind the @parameter Ids to this
 						// invocation's arguments before the interpreted Perform. See the
@@ -3681,7 +3785,8 @@ namespace Puppeteer.EventSourcing
 
 					try
 					{
-						Perform(program, program.Parameters);
+						using (ReplayResolutionScope.Enter())
+							Perform(program, program.Parameters);
 						// B.1c: free the resolved AST of compiled cached Actions
 						// during red-black replay (ActionEventData only; mirror of
 						// the primary rehydration path).
@@ -3725,6 +3830,34 @@ namespace Puppeteer.EventSourcing
 					LabInstrumentation.IncrementReplayEventsCounted();
 					LabInstrumentation.OnReplayEventCounted?.Invoke(eventData.EntryId);
 				}
+				}
+				catch (Exception consumerEx)
+				{
+					// The consumer failed mid-drain. Unblock a producer that may be parked on a
+					// full-queue Add (CompleteAdding makes the pending/next Add throw) so its Task
+					// can finish instead of leaking a blocked thread, then rethrow the root cause.
+					consumerException = consumerEx;
+					eventsQueue.CompleteAdding();
+				}
+
+				long lastEntryId;
+				try
+				{
+					lastEntryId = producerTask.GetAwaiter().GetResult();
+				}
+				catch
+				{
+					// If the consumer already failed, its exception is the root cause; surface it
+					// over the producer's secondary InvalidOperationException raised by the
+					// CompleteAdding unblock above.
+					if (consumerException != null) throw consumerException;
+					throw;
+				}
+
+				if (consumerException != null) throw consumerException;
+
+				this.EntryId = Int64.Max(lastEntryId, this.EntryId);
+				return this.EntryId;
 			}
 			finally
 			{
@@ -3732,9 +3865,6 @@ namespace Puppeteer.EventSourcing
 				eventsQueue = null;
 				symbolTable.RecoveringState = priorRecoveringState;
 			}
-
-			this.EntryId = Int64.Max(lastEntryId, this.EntryId);
-			return this.EntryId;
 		}
 
 		internal void UnlockAndRunAlive()
@@ -4040,278 +4170,6 @@ namespace Puppeteer.EventSourcing
 		internal long LastExecutedScriptMisses => Interlocked.Read(ref lastExecutedScriptMisses);
 		internal int LastExecutedScriptWindowCapacity => LastExecutedScriptWindowSize;
 
-		// B.3.1: promotion-candidate tracking. Each Script (V1,
-		// JournalEntry.IsScript path) parses to a Program whose AST has a
-		// PromotionCandidateHash that ignores literal *values* but preserves
-		// types and structure — scripts that differ only in their literal
-		// arguments share the same hash. We maintain an in-memory countdown
-		// per candidate hash: starts at the configured threshold (default
-		// 10), decrements on each observation, and once it reaches zero the
-		// candidate is marked as "ready to promote" (actual promotion is
-		// wired in B.3.3+). The counter is rebuilt naturally by rehydration:
-		// replay sees the same Scripts in order and decrements identically;
-		// once the journal contains a Define for an already-promoted
-		// candidate, B.3.3 will register the mapping in
-		// promotionCandidateToActionId so subsequent invocations route as
-		// Actions immediately.
-		internal const int DEFAULT_PROMOTION_CANDIDATE_THRESHOLD = 10;
-		private int promotionCandidateThreshold = DEFAULT_PROMOTION_CANDIDATE_THRESHOLD;
-		private readonly Dictionary<int, int> promotionCandidateCountdown = new Dictionary<int, int>();
-		private readonly Dictionary<int, int> promotionCandidateToActionId = new Dictionary<int, int>();
-		private long promotionCandidateObservationsTotal;
-		private long promotionCandidateReadyObservations;
-
-		internal void SetPromotionCandidateThreshold(int n)
-		{
-			if (n < 1) throw new LanguageException($"Promotion candidate threshold must be >= 1, got {n}.");
-			promotionCandidateThreshold = n;
-		}
-
-		internal int PromotionCandidateThreshold => promotionCandidateThreshold;
-		internal long PromotionCandidateObservationsTotal => Interlocked.Read(ref promotionCandidateObservationsTotal);
-		internal long PromotionCandidateReadyObservations => Interlocked.Read(ref promotionCandidateReadyObservations);
-		internal int DistinctPromotionCandidateCount => promotionCandidateCountdown.Count;
-		internal int ReadyPromotionCandidateCount
-		{
-			get
-			{
-				int n = 0;
-				foreach (var kvp in promotionCandidateCountdown)
-				{
-					if (kvp.Value == 0) n++;
-				}
-				return n;
-			}
-		}
-
-		// B.3.3: carries the materialized state needed to journal a Define +
-		// first Invocation pair in place of the would-be Script entry.
-		// Produced by ObservePromotionCandidate when an observation tips a
-		// candidate from "ready" (counter at 0, not yet promoted) into
-		// "promoted" — at that point the Action exists in actionCommands
-		// and is indexed by promotionCandidateToActionId, but the journal
-		// still needs the rows written.
-		//
-		// B.3.4: when MaterializePromotion's idempotency path fires (the
-		// Action's body is already in actionCommands — e.g. because a
-		// previous run wrote the Define and the current run is the first
-		// live write of the same shape after restart) DefineText is null
-		// and the writer emits only an Invocation row. The journal does not
-		// duplicate the Define.
-		internal sealed class PromotionResult
-		{
-			internal readonly int ActionId;
-			internal readonly string DefineText;
-			internal readonly string ArgumentsString;
-
-			internal bool RequiresDefineWrite => !string.IsNullOrEmpty(DefineText);
-
-			internal PromotionResult(int actionId, string defineText, string argumentsString)
-			{
-				ArgumentNullException.ThrowIfNull(argumentsString);
-				ActionId = actionId;
-				DefineText = defineText;
-				ArgumentsString = argumentsString;
-			}
-		}
-
-		// B.3.1 + B.3.3: hook invoked from PrepareCommandProgram after a fresh
-		// Script parse (JournalEntry.IsScript). Updates the per-candidate
-		// countdown; when the threshold has been crossed AND the candidate
-		// has not already been promoted, materializes the equivalent Action
-		// and returns a PromotionResult so the caller can switch its journal
-		// write from a single Script row to an atomic Define + Invocation
-		// pair. Returns null otherwise.
-		//
-		// Promotion is idempotent: once a candidate is in
-		// promotionCandidateToActionId, subsequent observations only tick
-		// the ready meter; B.3.4 will route those incoming scripts directly
-		// to the promoted Action via the same index.
-		private PromotionResult ObservePromotionCandidate(Program program, string canonicalScript)
-		{
-			ArgumentNullException.ThrowIfNull(program);
-			ArgumentNullException.ThrowIfNull(canonicalScript);
-
-			int hash = program.PromotionCandidateHash;
-			Interlocked.Increment(ref promotionCandidateObservationsTotal);
-
-			bool ready;
-			if (promotionCandidateCountdown.TryGetValue(hash, out int remaining))
-			{
-				if (remaining == 0)
-				{
-					Interlocked.Increment(ref promotionCandidateReadyObservations);
-					ready = true;
-				}
-				else
-				{
-					promotionCandidateCountdown[hash] = remaining - 1;
-					ready = (remaining - 1 == 0 && promotionCandidateThreshold == 1);
-				}
-			}
-			else
-			{
-				// First observation of this candidate. The threshold is the
-				// total observation count needed before promotion, so we
-				// initialize the countdown at threshold-1 (this observation
-				// already counts as #1). When threshold == 1, initial == 0
-				// and this very observation is "ready".
-				int initial = promotionCandidateThreshold - 1;
-				if (initial < 0) initial = 0;
-				promotionCandidateCountdown[hash] = initial;
-				ready = (initial == 0);
-			}
-
-			if (!ready) return null;
-			if (promotionCandidateToActionId.ContainsKey(hash)) return null;
-
-			return MaterializePromotion(hash, canonicalScript);
-		}
-
-		// B.3.4: route an incoming Script-shape directly as an invocation of
-		// a previously-promoted Action. Looks up the parsed Program's
-		// PromotionCandidateHash in the promotionCandidateToActionId index;
-		// on hit, reshapes commandPrepared from "would-be IsScript" into
-		// "IsExistingAction" targeting the promoted Action, populating
-		// PromotedArgumentParameters with the values extracted from the
-		// incoming script's literals. Returns true when routing happened;
-		// false when the candidate has not been promoted yet (the caller
-		// proceeds with the regular IsScript path and B.3.3 may decide to
-		// fire promotion if the counter is ready).
-		//
-		// Effect on the journal: the row written for this PerformCmd is a
-		// compact Invocation (actionId, arguments) instead of a Script row
-		// with the full canonical text. This is the payoff of the whole
-		// promotion mechanism — repeated endpoints stop bloating the
-		// journal once their shape has been characterized as recurrent.
-		private bool TryRouteScriptAsPromotedAction(Parameters callerParameters, CommandPrepared commandPrepared)
-		{
-			ArgumentNullException.ThrowIfNull(callerParameters);
-			ArgumentNullException.ThrowIfNull(commandPrepared);
-			if (commandPrepared.Program == null) return false;
-
-			int candidateHash = commandPrepared.Program.PromotionCandidateHash;
-			if (!promotionCandidateToActionId.TryGetValue(candidateHash, out int promotedActionId)) return false;
-			if (!actionCommands.TryGetValue(promotedActionId, out CommandCacheEntry promotedEntry)) return false;
-
-			// Render the incoming script canonically and extract its literals;
-			// the extracted ArgumentsString supplies the runtime parameter
-			// values for the promoted Action invocation.
-			string canonicalScript = commandPrepared.Program.ConvertToString(this.DatabaseType);
-			var extraction = PromotionCandidate.LiteralExtractor.Extract(canonicalScript);
-
-			// Build a Parameters populated with the parameter declaration of
-			// the promoted Action (same shape it was registered with) and the
-			// extracted argument values.
-			string declarationText = promotedEntry.Program.Parameters != null
-				? promotedEntry.Program.Parameters.ParametersAsString()
-				: extraction.ParametersDeclaration;
-			Parameters routedArgs = string.IsNullOrWhiteSpace(declarationText)
-				? new Parameters()
-				: new Parameters(declarationText);
-			if (!string.IsNullOrWhiteSpace(extraction.ArgumentsString))
-			{
-				routedArgs.LoadArguments(extraction.ArgumentsString);
-			}
-
-			// Reshape commandPrepared. The original (Script) Program is
-			// discarded; from here onwards the flow behaves as a regular
-			// V2 IsExistingAction invocation pointing at the promoted Action.
-			commandPrepared.Entry = JournalEntry.IsExistingAction;
-			commandPrepared.Program = promotedEntry.Program;
-			commandPrepared.CacheEntry = promotedEntry;
-			commandPrepared.PromotedArgumentParameters = routedArgs;
-			commandPrepared.NeedsToSolveParameters = !promotedEntry.Program.IsCompiledMode || this.actor.CompiledModePolicy == CompilationModePolicy.AlwaysInterpreted;
-			commandPrepared.NeedsToSolveReferences = false;
-			return true;
-		}
-
-		// B.3.3: builds the equivalent V2 Action for a recurrent Script,
-		// registers it in actionCommands so subsequent Script writes can be
-		// routed via the promotionCandidateToActionId index (B.3.4), and
-		// returns the Define text + arguments string the caller needs to
-		// journal Define + first Invocation atomically. The runtime effect
-		// of the current PerformCmd is unaffected — the original Script
-		// Program is what executes; the new Action Program exists for
-		// future invocations and for replay determinism.
-		private PromotionResult MaterializePromotion(int candidateHash, string canonicalScript)
-		{
-			ArgumentNullException.ThrowIfNullOrWhiteSpace(canonicalScript);
-
-			var extraction = PromotionCandidate.LiteralExtractor.Extract(canonicalScript);
-
-			// Build the Parameters object up front. We need it both to bind
-			// the new Action's Program and to render the Define statement's
-			// parameter list in canonical `name:type` syntax (different from
-			// the `In,name:type` constructor grammar — see Parameters
-			// .UserParametersAsCanonicalText vs the Parameters ctor).
-			Parameters declaredParameters = string.IsNullOrWhiteSpace(extraction.ParametersDeclaration)
-				? new Parameters()
-				: new Parameters(extraction.ParametersDeclaration);
-			string defineParametersText = declaredParameters.UserParametersAsCanonicalText();
-
-			// B.3.4 idempotent reuse: if an Action with this body text already
-			// exists in actionCommands — which happens on the first live
-			// write after a restart whose journal already contains a Define
-			// for this shape — we wire the candidate→action index without
-			// allocating a fresh ActionId AND signal the journal writer to
-			// emit only the Invocation row (DefineText = null). This keeps
-			// the journal free of duplicate Define rows across restart
-			// cycles, while leaving the runtime invariants intact: future
-			// live writes of the same shape will hit B.3.4 routing via the
-			// freshly-repopulated index.
-			int actionId;
-			if (actionCommands.TryGetValue(extraction.ActionBodyText, out CommandCacheEntry existingEntry))
-			{
-				actionId = existingEntry.Id;
-				promotionCandidateToActionId[candidateHash] = actionId;
-				return new PromotionResult(actionId, defineText: null, extraction.ArgumentsString);
-			}
-
-			actionId = this.TakeAndIncrementActionId();
-
-			// Parse the extracted body and bind the parameters declaration
-			// so the resulting Program is shaped exactly as it would have
-			// been had the user written the Action explicitly.
-			Parser parser = ParsersPool.Rent();
-			Program actionProgram;
-			try
-			{
-				parser.SetSource(extraction.ActionBodyText);
-				actionProgram = parser.Parse(isQuery: false, isCheck: false);
-			}
-			finally
-			{
-				ParsersPool.Return(parser);
-			}
-
-			actionProgram.SetContextInfo();
-			actionProgram.Parameters = declaredParameters;
-			actionProgram.AdjustCompilationMode(useInterpretedMode: false, this.actor.CompiledModePolicy);
-
-			// An interpreted promoted Action (AlwaysInterpreted actor) is executed by
-			// Program.Execute() on every routed invocation — the interpreted walker never
-			// calls ExecuteExpression, the only path that lazily resolves a compiled Action.
-			// Resolve its references once here so idParameters is populated for the
-			// per-invocation SolveParameters (B.3.4 routing sets NeedsToSolveParameters).
-			// Without this the synthesized @parameter Ids (p0, p1, ...) never bind and the
-			// first routed invocation throws "Variable 'p0' has not been defined". This
-			// mirrors the replay-side AddKnownActionFromDefine; compiled Actions resolve
-			// lazily inside ExecuteExpression and need nothing here.
-			if (!actionProgram.IsCompiledMode && actionProgram.Parameters != null)
-				actionProgram.SolveReferences(actionProgram.Parameters, withStaticValidation: false);
-
-			actionCommands.Add(actionId, extraction.ActionBodyText, actionProgram);
-			promotionCandidateToActionId[candidateHash] = actionId;
-
-			string defineText = DefineActionStatement.ComposeJournalText(
-				actionId,
-				defineParametersText,
-				extraction.ActionBodyText);
-
-			return new PromotionResult(actionId, defineText, extraction.ArgumentsString);
-		}
-
 		private class CommandCache
 		{
 			private readonly Dictionary<string, CommandCacheEntry> cmdCacheByScript = new Dictionary<string, CommandCacheEntry>();
@@ -4366,7 +4224,7 @@ namespace Puppeteer.EventSourcing
 		internal class CommandCacheEntry
 		{
 			// Shared empty signature so entries built on paths that do not freeze a
-			// signature (V1 AddKnownAction, promotion) never expose a null map.
+			// signature (V1 AddKnownAction) never expose a null map.
 			private static readonly IReadOnlyDictionary<string, Type> EmptyGlobalSignature =
 				new Dictionary<string, Type>(0);
 

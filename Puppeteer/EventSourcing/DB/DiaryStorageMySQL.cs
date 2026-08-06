@@ -101,9 +101,11 @@ namespace Puppeteer.EventSourcing.DB
 
 			statement.Append(@"
 				CREATE TABLE IF NOT EXISTS Reaction (
-					Id INT NOT NULL,
+					Id INT NOT NULL AUTO_INCREMENT,
 					Reaction TEXT NOT NULL,
-					PRIMARY KEY (Id)
+					ReactionHash BINARY(32) GENERATED ALWAYS AS (UNHEX(SHA2(Reaction, 256))) STORED,
+					PRIMARY KEY (Id),
+					UNIQUE KEY UQ_Reaction_ReactionHash (ReactionHash)
 				) ENGINE=InnoDB CHARSET=utf8;"
 			);
 
@@ -205,9 +207,11 @@ namespace Puppeteer.EventSourcing.DB
 
 			statement.Append(@"
 				CREATE TABLE IF NOT EXISTS Reaction (
-					Id INT NOT NULL,
+					Id INT NOT NULL AUTO_INCREMENT,
 					Reaction TEXT NOT NULL,
-					PRIMARY KEY (Id)
+					ReactionHash BINARY(32) GENERATED ALWAYS AS (UNHEX(SHA2(Reaction, 256))) STORED,
+					PRIMARY KEY (Id),
+					UNIQUE KEY UQ_Reaction_ReactionHash (ReactionHash)
 				) ENGINE=InnoDB CHARSET=utf8;"
 			);
 
@@ -344,9 +348,38 @@ namespace Puppeteer.EventSourcing.DB
 		// AddKnownActionFromDefine.
 
 
-		protected internal override long RehydrateFromEvent(long afterEntryId = 0, bool includeExposeData = false)
+		// A missing journal table means an empty journal, not an error: the replication of a
+		// buffered journal asks for this head before the first rehydration, and it is the
+		// rehydration that creates the table. Probing information_schema instead of catching
+		// the aggregate's failure keeps a genuine connectivity or permission error propagating.
+		protected internal override long LastJournaledEntryId()
 		{
-			EventJournalClient.IsNew = CreateDiary(this.Name);
+			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			{
+				connection.Open();
+
+				using (MySqlCommand exists = new MySqlCommand(
+					"SELECT count(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_NAME = @TableName AND TABLE_SCHEMA in (SELECT DATABASE())",
+					connection))
+				{
+					exists.Parameters.AddWithValue("@TableName", Name);
+					object found = exists.ExecuteScalar();
+					if (found == null || found == DBNull.Value || Convert.ToInt64(found) == 0) return 0;
+				}
+
+				using (MySqlCommand command = new MySqlCommand($"SELECT COALESCE(MAX(id), 0) FROM `{Name}`", connection))
+				{
+					object result = command.ExecuteScalar();
+					return (result == null || result == DBNull.Value) ? 0 : Convert.ToInt64(result);
+				}
+			}
+		}
+
+		protected internal override long RehydrateFromEvent(IActorEventJournalClient client, long afterEntryId = 0, bool includeExposeData = false)
+		{
+			ArgumentNullException.ThrowIfNull(client);
+
+			client.IsNew = CreateDiary(this.Name);
 
 			bool canContinueReplay = false;
 			long lastId = afterEntryId;
@@ -375,7 +408,7 @@ namespace Puppeteer.EventSourcing.DB
 					{
 						reader.Read();
 						long totalRecords = reader.GetInt64(0);
-						EventJournalClient.BeginJournalReplay(totalRecords);
+						client.BeginJournalReplay(totalRecords);
 						reader.Close();
 					}
 				}
@@ -388,9 +421,16 @@ namespace Puppeteer.EventSourcing.DB
 			try
 			{
 				int fails = 0;
-				long entryId = 0;
+				// Seed the scan cursor at the resume point, not 0. When the follower
+				// starts already at head, the first scan (d.id > afterEntryId) returns
+				// no rows and the row loop never assigns entryId; leaving it at 0 makes
+				// delta = lastId - entryId = afterEntryId != 0, which is misread as
+				// forward progress and rewinds lastId to 0 on the next pass, re-replaying
+				// the whole journal. Seeded at afterEntryId, an empty first scan yields
+				// delta == 0 and the loop exits with the cursor unchanged.
+				long entryId = afterEntryId;
 
-				while (!shouldExit && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+				while (!shouldExit && (canContinueReplay = client.CanContinueReplay(entryId)))
 				{
 					// Phase 5 of the Action refactor: legacy LoadActionsWithExitStatus
 					// (pre-load the _ACTION lateral table) is dropped. Define entries
@@ -422,11 +462,11 @@ namespace Puppeteer.EventSourcing.DB
 								{
 									bool exitRead = false;
 									int attempts = 5;
-									while (!exitRead && attempts > 0 && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+									while (!exitRead && attempts > 0 && (canContinueReplay = client.CanContinueReplay(entryId)))
 									{
 										try
 										{
-											while (reader.Read() && (canContinueReplay = EventJournalClient.CanContinueReplay(entryId)))
+											while (reader.Read() && (canContinueReplay = client.CanContinueReplay(entryId)))
 											{
 
 												fails = 0;
@@ -443,7 +483,7 @@ namespace Puppeteer.EventSourcing.DB
 												{
 													int defineActionId = reader.GetInt32(3);
 													string defineStatementText = reader.GetString(2);
-													EventJournalClient.AddKnownActionFromDefine(defineActionId, defineStatementText);
+													client.AddKnownActionFromDefine(defineActionId, defineStatementText);
 													continue;
 												}
 
@@ -466,7 +506,7 @@ namespace Puppeteer.EventSourcing.DB
 													actionData.Arguments = arguments;
 													actionData.ExposeData = exposeJson;
 
-													EventJournalClient.ReplayEvent(actionData);
+													client.ReplayEvent(actionData);
 												}
 												else
 												{
@@ -479,7 +519,7 @@ namespace Puppeteer.EventSourcing.DB
 													scriptData.Script = script;
 													scriptData.ExposeData = exposeJson;
 
-													EventJournalClient.ReplayEvent(scriptData);
+													client.ReplayEvent(scriptData);
 												}
 											}
 											exitRead = true;
@@ -521,7 +561,7 @@ namespace Puppeteer.EventSourcing.DB
 						const bool AT_LEAST_IS_NECESSARY_ONE_MORE_TIME = false;
 						if (leaderInitializationCount < 1)
 						{
-							EventJournalClient.EndJournalReplay(forcedToEnd: !canContinueReplay);
+							client.EndJournalReplay(forcedToEnd: !canContinueReplay);
 							shouldExit = AT_LEAST_IS_NECESSARY_ONE_MORE_TIME;
 							leaderInitializationCount++;
 						}
@@ -1431,62 +1471,70 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			ArgumentNullException.ThrowIfNull(formattedReaction);
 
-			// First try to get the ID if it already exists
-			string selectSql = "SELECT Id FROM Reaction WHERE Reaction = @FormattedReaction";
-			long existingId = 0;
+			// The registry id is a surrogate for the reaction's textual form, scoped to
+			// this database — it is not the journal's EntryId, which the actor assigns.
+			// The database engine assigns it (AUTO_INCREMENT), so N concurrent claimants
+			// (e.g. N cues starting together on a fresh diary) can never collide on the
+			// primary key. The unique index on the text's hash makes the claim
+			// get-or-create: when two claimants race to register the SAME reaction, the
+			// loser's INSERT is rejected as a duplicate and the retry re-reads the row
+			// the winner created.
+			//
+			// The lookup seeks that same unique index — a fixed 32-byte key computed by
+			// the engine with the same expression as the stored column, covering (the
+			// secondary index carries the primary key) — instead of scanning full texts.
+			const int DUPLICATE_KEY = 1062;
+			const int maxAttempts = 4;
 
-			using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+			string selectSql = "SELECT Id FROM Reaction WHERE ReactionHash = UNHEX(SHA2(@FormattedReaction, 256))";
+			string insertSql = "INSERT INTO Reaction (Reaction) VALUES (@FormattedReaction)";
+
+			for (int attempt = 1; ; attempt++)
 			{
-				try
-				{
-					connection.Open();
+				long existingId = 0;
 
-					using (MySqlCommand command = new MySqlCommand(selectSql, connection))
+				using (MySqlConnection connection = new MySqlConnection(ConnectionString))
+				{
+					try
 					{
-						command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
-						using (MySqlDataReader reader = command.ExecuteReader())
+						connection.Open();
+
+						using (MySqlCommand command = new MySqlCommand(selectSql, connection))
 						{
-							if (reader.Read())
+							command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
+							using (MySqlDataReader reader = command.ExecuteReader())
 							{
-								existingId = reader.GetInt32("Id");
+								if (reader.Read())
+								{
+									existingId = reader.GetInt32("Id");
+								}
+								reader.Close();
 							}
-							reader.Close();
+						}
+
+						if (existingId != 0)
+						{
+							return existingId;
+						}
+
+						// Does not exist: insert and let the engine assign the id.
+						using (MySqlCommand command = new MySqlCommand(insertSql, connection))
+						{
+							command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
+							command.ExecuteNonQuery();
+							return command.LastInsertedId;
 						}
 					}
-
-					if (existingId != 0)
+					catch (MySqlException error) when (error.Number == DUPLICATE_KEY && attempt < maxAttempts)
 					{
-						return existingId;
+						// Another claimant registered this same reaction first: re-read its row.
 					}
-
-					// Does not exist: generate a new ID and insert.
-					// Get the current maximum ReactionId.
-					string maxIdSql = "SELECT COALESCE(MAX(Id), 0) FROM Reaction";
-					int newId = 0;
-					using (MySqlCommand command = new MySqlCommand(maxIdSql, connection))
+					finally
 					{
-						object result = command.ExecuteScalar();
-						newId = Convert.ToInt32(result) + 1;
+						connection.Close();
 					}
-
-					// Insert the new reaction
-					string insertSql = "INSERT INTO Reaction (Id, Reaction) VALUES (@ReactionId, @FormattedReaction)";
-					using (MySqlCommand command = new MySqlCommand(insertSql, connection))
-					{
-						command.Parameters.AddWithValue("@ReactionId", newId);
-						command.Parameters.AddWithValue("@FormattedReaction", formattedReaction);
-						command.ExecuteNonQuery();
-					}
-
-					existingId = newId;
-				}
-				finally
-				{
-					connection.Close();
 				}
 			}
-
-			return existingId;
 		}
 
 		// PHASE 5A: two-phase checkpoint - returns tuple (detected, confirmed) in a single access

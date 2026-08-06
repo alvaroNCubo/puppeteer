@@ -44,31 +44,23 @@ namespace Puppeteer.EventSourcing.Interpreter.Utils
 			{
 				result = System.Decimal.ToDouble((decimal)value);
 			}
-			// string -> char: a DTO often carries a char as a single-character string. A length-1
-			// string coerces to its one char; any other length is a clear error (never a silent
-			// truncation). Mirrors the string<->enum coercion applied at the parameter boundary.
-			else if (actual == typeof(string) && target == typeof(char))
+			// -> Enum (the abstract base used as the SYMBOL marker at the parameter boundary): the
+			// carried representation is the member NAME. An enum value handed over by the caller is
+			// normalized to its name here so the slot holds one representation, and a string is
+			// already in it. WHICH enum the name belongs to is not decided here — it is resolved at
+			// the call site against the signature actually invoked.
+			else if (target == typeof(Enum))
 			{
-				result = StringToChar((string)value);
+				result = value is Enum ? value.ToString() : value;
 			}
-			// Collection analog: string[] / List<string> / IEnumerable<string> -> char[] or List<char>,
-			// coercing each element the same way (length-1 per element, else a clear error). Guarded on a
-			// string element source so a List<char>/char[] source falls through to the generic handling below.
-			else if (target.IsArray && target.GetElementType() == typeof(char) && IsStringCollection(actual))
-			{
-				List<char> chars = new List<char>();
-				foreach (var element in (IEnumerable)value) chars.Add(StringToChar((string)element));
-				char[] res = new char[chars.Count];
-				for (int i = 0; i < chars.Count; i++) res[i] = chars[i];
-				return res;
-			}
-			else if (target.IsGenericType && target.GetGenericTypeDefinition() == typeof(List<>)
-					 && target.GetGenericArguments()[0] == typeof(char) && IsStringCollection(actual))
-			{
-				List<char> res = new List<char>();
-				foreach (var element in (IEnumerable)value) res.Add(StringToChar((string)element));
-				return res;
-			}
+			// NEITHER direction between string and char is converted here any more, scalar or
+			// collection. char -> string was a promotion, and a promotion cannot be undone once it has
+			// been written into a journal: a char argument bound a string parameter non-exactly, so a
+			// char overload added later took the binding from entries already recorded. string -> char
+			// was worse-shaped, because its legality depended on the VALUE (length 1) rather than the
+			// type, so the same script bound or failed according to what the string happened to hold.
+			// A string is a sequence and a char is one of its positions, so the position is NAMED:
+			// text[0] already yields a char, and the DSL can now write one directly as 'L'c.
 			else if (target.IsArray && actual == typeof(List<int>))
 			{
 				List<int> typedValue = value as List<int>;

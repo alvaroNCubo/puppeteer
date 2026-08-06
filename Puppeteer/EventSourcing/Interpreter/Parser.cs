@@ -236,10 +236,21 @@ namespace Puppeteer.EventSourcing.Interpreter
 			ReadOnlySpan<char> typeName = lexer.CurrentLexeme();
 			Type type = null;
 
+			// This table must list EVERY primitive the parameter plane admits
+			// (Parameter.IsSupportedParameterType), because this parser re-reads the
+			// `define action` header that Parameters.CanonicalTypeName wrote. A type the
+			// writer can emit but this table omits produces a header that cannot be read
+			// back: the command journals and then fails to replay, in both compilation
+			// modes, while a query — which freezes no signature — runs clean. `long` was
+			// exactly that hole.
 			if (typeName.Equals("int".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(int);
+			else if (typeName.Equals("long".AsSpan(), StringComparison.OrdinalIgnoreCase))
+				type = typeof(long);
 			else if (typeName.Equals("string".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(string);
+			else if (typeName.Equals("char".AsSpan(), StringComparison.OrdinalIgnoreCase))
+				type = typeof(char);
 			else if (typeName.Equals("bool".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(bool);
 			else if (typeName.Equals("double".AsSpan(), StringComparison.OrdinalIgnoreCase))
@@ -248,21 +259,18 @@ namespace Puppeteer.EventSourcing.Interpreter
 				type = typeof(DateTime);
 			else if (typeName.Equals("decimal".AsSpan(), StringComparison.OrdinalIgnoreCase))
 				type = typeof(decimal);
+			// The symbol marker: a string value declared to be an enum MEMBER NAME. `System.Enum`
+			// is the abstract base, owned by the language — no domain enum can be named here, which
+			// is what the next comment is about.
+			else if (typeName.Equals("enum".AsSpan(), StringComparison.OrdinalIgnoreCase))
+				type = typeof(Enum);
 
-			// An @parameter typed as a domain enum is journaled by the type NAME
-			// (Parameters.CanonicalTypeName emits type.Name); replay re-parses that
-			// header `define action (state:StateEnum) as ...` and resolves the name via
-			// the actor's DomainLibraries (which already index enums by name). The value
-			// travels by member name in the arguments blob (Parameters.ArgumentsValue
-			// uses Enum.Parse), readable and symbolic ('FL', not its ordinal).
-			if (type == null && libraries.TryGetType(typeName.ToString(), out Type domainType) && domainType.IsEnum)
-			{
-				type = domainType;
-			}
-
+			// A `define action` header declares LANGUAGE primitives only, so the actor's
+			// libraries are never consulted to resolve a parameter type: no domain type can
+			// appear in a declaration to begin with (see Parameter.IsSupportedParameterType).
 			if (type == null)
 			{
-				throw new LanguageException($"Invalid type in procedure parameters: '{typeName}' at line {Row()}, column {Column()}. Valid primitive types: int, string, bool, double, datetime, decimal (or a known domain enum).", typeName.ToString(), Row(), Column());
+				throw new LanguageException($"Invalid type in procedure parameters: '{typeName}' at line {Row()}, column {Column()}. Valid primitive types: int, long, double, decimal, char, string, bool, datetime, enum.", typeName.ToString(), Row(), Column());
 			}
 			lexer.Accept();
 
@@ -688,15 +696,18 @@ namespace Puppeteer.EventSourcing.Interpreter
             {
                 return CanonicalTypeName(type.GetElementType()) + "[]";
             }
+            // Kept in lockstep with ParseTypeName above and with
+            // Parameters.CanonicalTypeName: these three are one round-trip, and a type
+            // present in one but missing from another is a header that cannot be re-read.
             if (type == typeof(int)) return "int";
+            if (type == typeof(long)) return "long";
             if (type == typeof(string)) return "string";
+            if (type == typeof(char)) return "char";
             if (type == typeof(bool)) return "bool";
             if (type == typeof(double)) return "double";
             if (type == typeof(DateTime)) return "datetime";
             if (type == typeof(decimal)) return "decimal";
-            // Domain enum: rendered by its type name (resolved when re-parsing via
-            // DomainLibraries). Fixed-point round-trip with Parameters.CanonicalTypeName.
-            if (type.IsEnum) return type.Name;
+            if (type == typeof(Enum)) return "enum";
             throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
         }
 
@@ -1601,6 +1612,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 				case TokenType.@decimal:
 				case TokenType.@double:
 				case TokenType.@long:
+				case TokenType.@char:
 				case TokenType.nullToken:
 				case TokenType.date:
 				case TokenType.boolFalse:
@@ -1628,6 +1640,7 @@ namespace Puppeteer.EventSourcing.Interpreter
                 case TokenType.@decimal:
                 case TokenType.@double:
                 case TokenType.@long:
+                case TokenType.@char:
 				case TokenType.nullToken:
                 case TokenType.date:
                 case TokenType.boolFalse:
@@ -1755,6 +1768,10 @@ namespace Puppeteer.EventSourcing.Interpreter
 					result = ParseLong();
 					break;
 
+				case TokenType.@char:
+					result = ParseChar();
+					break;
+
 				case TokenType.nullToken:
 					result = ParseNull();
 					break;
@@ -1793,8 +1810,30 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private AstExpression ParseString()
 		{
-			ReadOnlySpan<char> raw = lexer.CurrentLexeme();
+			string literal = UnquoteLiteral(lexer.CurrentLexeme());
+			lexer.Accept();
+			return literal == "" ? LiteralString.EMPTY : new LiteralString(literal);
+		}
 
+		// A char literal is the same quoted lexeme as a string plus the 'c' suffix, which the Lexer
+		// has already consumed, so it unquotes through the same code — the escape sequences the
+		// Lexer recognizes inside '...' must be read back identically for both or the two forms
+		// drift apart. What the char adds is the length rule: exactly one character, so an empty or
+		// longer literal is a clear error at PARSE time rather than a value that fails later.
+		private AstExpression ParseChar()
+		{
+			string literal = UnquoteLiteral(lexer.CurrentLexeme());
+			if (literal.Length != 1)
+			{
+				throw new LanguageException($"A char literal must hold exactly one character, but '{literal}' has {literal.Length} at line {Row()}, column {Column()}. Drop the 'c' suffix to write it as a string.", literal, Row(), Column());
+			}
+			AstExpression charLiteral = new LiteralChar(literal[0]);
+			lexer.Accept();
+			return charLiteral;
+		}
+
+		private static string UnquoteLiteral(ReadOnlySpan<char> raw)
+		{
 			if (raw.Length >= 2 && (raw[0] == '\''))
 				raw = raw.Slice(1, raw.Length - 2);
 
@@ -1820,9 +1859,7 @@ namespace Puppeteer.EventSourcing.Interpreter
 					sb.Append(raw[i]);
 				}
 			}
-			string literal = sb.ToString();
-			lexer.Accept();
-			return literal == "" ? LiteralString.EMPTY : new LiteralString(literal);
+			return sb.ToString();
 		}
 
 		private AstExpression ParseDouble()

@@ -40,8 +40,15 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void Execute(ExecutionOutput output)
 		{
-			if (lValue is DottedId reference)
+			// Every member assignment shape goes through the same DotAccess contract: a
+			// DottedId (obj.Member, receiver named by an Id) and a ChainedDotAccess
+			// (obj.Inner.Member, or Class(args).Member — a receiver that is itself an
+			// expression) both resolve their receiver via GetTarget and name the member via
+			// Property. Dispatching on the base type keeps the two shapes on one code path.
+			if (lValue is DotAccess reference)
 			{
+				RejectMethodCallAsLValue(reference);
+
 				object value = reference.GetTarget();
 				object rightExpressionValue = rValue.Execute();
 
@@ -58,11 +65,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					propertyInfo.SetValue(value, TypeConversion.ImplicitCast(rightExpressionValue, propertyInfo.PropertyType));
 					return;
 				}
-				throw new LanguageException($"Type of variable '{reference.Id()}' does not have a property named '{reference.Property()}'.");
-			}
-			else if (lValue is ChainedDotAccess)
-			{
-
+				throw new LanguageException($"Type '{value.GetType()}' does not have an assignable member named '{reference.Property()}'.");
 			}
 			else if (lValue is SubscriptAstExpression subscript)
 			{
@@ -86,66 +89,83 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				{
 					rightExpressionType = rightExpressionValue.GetType();
 				}
+				Type numericStorageType = NumericStorageWiderThan(((Id)lValue).ForcedType, rightExpressionValue?.GetType());
+				if (numericStorageType != null)
+				{
+					rightExpressionValue = AstExpression.CoerceNumericValue(rightExpressionValue, numericStorageType);
+					rightExpressionType = numericStorageType;
+				}
 				string newVariable = ((Id)lValue).Name;
 				((Id)lValue).Store(rightExpressionValue, rightExpressionType);
 			}
 		}
 
+		// The target of this assignment when it is a variable DECLARATION — the only target
+		// whose storage has to be created before the assignment is lowered. False for every
+		// target that writes to a location that already exists:
+		//   a parameter               its storage is created with the parameter itself;
+		//   a re-assignment           the variable was declared by an earlier occurrence;
+		//   a member or a subscript    the location belongs to the receiver / the collection.
+		internal bool TryGetDeclaredVariable(out Id variable)
+		{
+			variable = null;
+			if (!(lValue is Id id)) return false;
+			if (!id.IsLValue) return false;
+			if (id.IsParameter) return false;
+			if (!id.IsOriginalLValueDeclaration) return false;
+
+			variable = id;
+			return true;
+		}
+
+		// Creates the storage this assignment's target needs, ahead of lowering the assignment
+		// itself. Total over every target shape the grammar can produce, so the caller does not
+		// have to know which shapes declare storage — it just asks.
 		internal Expression AllocateLocalStorageExpression(ParameterExpression parametersParam)
 		{
-			if (lValue is DottedId dottedReferenceId)
+			if (TryGetDeclaredVariable(out Id declaredVariable))
 			{
-				return dottedReferenceId.AllocateStorageExpression(parametersParam);
+				return declaredVariable.AllocateStorageExpression(parametersParam, useLValueReference: declaredVariable.IsLValue);
 			}
-			else if (lValue is ChainedDotAccess)
-			{
-				throw new NotImplementedException();
-			}
-			else if (lValue is SubscriptAstExpression)
+
+			// Nothing to create. For a member assignment (obj.Member = rValue) that is not
+			// merely an optimization: the storage belongs to the RECEIVER, and the receiver's
+			// own storage is allocated on demand while ExecuteExpression resolves it through
+			// DotAccess.GetTargetExpression. Pre-building a member L-value here would instead
+			// read the receiver's already-generated expression, which does not exist when the
+			// receiver is a global carried over from a previous journal entry: such a receiver
+			// is filtered out of this program's declarations (its name is already in the
+			// SymbolTable), so no Id occurrence binds it and its reference expression is still
+			// null while the enclosing block is being lowered.
+			if (lValue is DotAccess || lValue is SubscriptAstExpression || lValue is Id)
 			{
 				return Expression.Empty();
 			}
-			else if (lValue is Id referenceId)
-			{
-				return referenceId.AllocateStorageExpression(parametersParam, useLValueReference: referenceId.IsLValue);
-			}
-			else
-			{
-				throw new LanguageException($"The lValue must be an Id, DottedId, or ChainedDotAccess, but found '{lValue?.GetType().Name ?? "null"}'.");
-			}
+
+			throw new LanguageException($"The target of an assignment must be a variable, a member access or a subscript, but found '{lValue?.GetType().Name ?? "null"}'.");
 		}
 
+		// The block-scoped variable this assignment contributes to the enclosing block, or null
+		// when it contributes none. A declaration owns a VariableSymbol that the block has to
+		// declare; a member or subscript target owns nothing.
 		internal Expression LocalStorageExpression
 		{
 			get
 			{
-				if (lValue is DottedId reference)
+				if (lValue is Id id && id.IsLValue && id.IsOriginalLValueDeclaration)
 				{
-					return null;
+					return id.LValueStorageExpression;
 				}
-				else if (lValue is ChainedDotAccess)
-				{
-					throw new NotImplementedException();
-				}
-				else if (lValue is SubscriptAstExpression)
-				{
-					return null;
-				}
-				else if (lValue is Id id)
-				{
-					return id.IsOriginalLValueDeclaration ? id.LValueStorageExpression : null;
-				}
-				else
-				{
-					throw new LanguageException($"The lValue must be an Id or DottedId, but found '{lValue?.GetType().Name ?? "null"}'.");
-				}
+				return null;
 			}
 		}
 
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
-			if (lValue is DottedId reference)
+			if (lValue is DotAccess reference)
 			{
+				RejectMethodCallAsLValue(reference);
+
 				// value = reference.GetTarget();
 				var instanceExpr = reference.GetTargetExpression(parametersParam);
 				// rightExpressionValue = rValue.ExecuteExpression();
@@ -186,11 +206,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					return Expression.Assign(propertyExpr, Expression.Convert(castedValue, propertyInfo.PropertyType));
 				}
 
-				throw new LanguageException($"Type of variable '{reference.Id()}' does not have a property named '{reference.Property()}'.");
-			}
-			else if (lValue is ChainedDotAccess)
-			{
-				return Expression.Empty();
+				throw new LanguageException($"Type '{instanceExpr.Type}' does not have an assignable member named '{reference.Property()}'.");
 			}
 			else if (lValue is SubscriptAstExpression subscript)
 			{
@@ -215,6 +231,12 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// `assignReferenceId` and `symbolVar` is initialized exactly where it is read.
 				var lValueStorage = id.ExecuteExpression(parametersParam);
 				var rightExprValue = rValue.ExecuteExpression(parametersParam);
+
+				Type numericStorageType = NumericStorageWiderThan(id.ForcedType, rightExprValue.Type);
+				if (numericStorageType != null)
+				{
+					rightExprValue = Expression.Convert(rightExprValue, numericStorageType);
+				}
 
 				var objectField = typeof(VariableSymbol).GetField(
 					nameof(VariableSymbol.value),
@@ -285,7 +307,32 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 			if (type != null && lValue is Id id && id.IsOriginalLValueDeclaration && id.ForcedType == null)
 			{
-				if (
+				// This occurrence carries no ForcedType yet, but the SYMBOL may already be typed
+				// by an earlier assignment: a variable fixed by a previous statement of the same
+				// script, or a global fixed by a previous command, reaches this validation in
+				// exactly that state. Fixing the storage to the VALUE's type would retype the
+				// variable to fit the value, which is the one move the ladder forbids, and the
+				// consequences split by direction. A narrower storage then reported the conflict
+				// from the ForcedType setter, whose diagnostic names host runtime types instead
+				// of the script's vocabulary — the very substitution this refusal exists to
+				// prevent. A WIDER storage was rejected outright, because retyping it down to the
+				// value's type contradicts a type the symbol already holds, so an assignment the
+				// ladder admits never reached the coercion that completes it.
+				//
+				// So when the storage is already typed, the ladder decides the pair here, exactly
+				// as it does below for an occurrence that does carry a ForcedType, and the storage
+				// keeps its declared type either way.
+				Type declaredNumericStorage = id.ComputeType();
+				bool storageAlreadyTypedOffThisOccurrence = declaredNumericStorage != null
+					&& declaredNumericStorage != type
+					&& AstExpression.IsPromotableNumeric(declaredNumericStorage)
+					&& AstExpression.IsPromotableNumeric(type);
+				if (storageAlreadyTypedOffThisOccurrence)
+				{
+					RefuseWhenNumericStorageIsNarrower(lValue, declaredNumericStorage, type);
+					lValue.ForcedType = declaredNumericStorage;
+				}
+				else if (
 					type == typeof(string) ||
 					type == typeof(int) ||
 					type == typeof(double) ||
@@ -321,7 +368,22 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// for the symmetric "member only on subclass" pattern.
 				bool covariantOverrideAccepted = rValue is DotAccess rValueAsDotAccess
 					&& rValueAsDotAccess.HasOverrideReturnTypeAssignableTo(lValue.ForcedType);
-				if (!covariantOverrideAccepted)
+				if (AstExpression.IsPromotableNumeric(lValue.ForcedType) && AstExpression.IsPromotableNumeric(type))
+				{
+					// Two members of the numeric family. IsAssignableFrom is false for every
+					// such pair — they are unrelated structs — so the ladder stands in for it:
+					// the storage holds the value when the ladder names the STORAGE as the
+					// wider of the two, exactly as a reference storage holds a value of its
+					// own type or of a subtype.
+					//
+					// The variable is never retyped to fit the value. Resolving a wider type
+					// for the pair would be resolving it up the hierarchy, and the only
+					// ancestor two numeric structs share is System.ValueType — a type off the
+					// ladder, so the operators reject every later reference to the variable
+					// and the diagnostic names an ancestor the author never wrote.
+					RefuseWhenNumericStorageIsNarrower(lValue, lValue.ForcedType, type);
+				}
+				else if (!covariantOverrideAccepted)
 				{
 					// Sibling reassignment: rValue's type is neither base nor subclass
 					// of the lValue's ForcedType, but both descend from a shared base
@@ -353,6 +415,67 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			else
 				lValue.ValidateStatically();
 			rValue.ValidateStatically();
+		}
+
+		// The ladder's refusal, in one place, so that every route into a numeric assignment
+		// states the rule with the same words. A refusal an author cannot act on is worse than
+		// none: it must name the storage, the value and the literal that opens the storage wide
+		// enough, in the vocabulary of the script. Returns without throwing whenever the pair is
+		// admissible — either side off the ladder, or the storage already the wider of the two.
+		private static void RefuseWhenNumericStorageIsNarrower(AstExpression lValue, Type storageType, Type valueType)
+		{
+			if (storageType == null || valueType == null) return;
+			if (!AstExpression.IsPromotableNumeric(storageType) || !AstExpression.IsPromotableNumeric(valueType)) return;
+			if (AstExpression.PromotedNumericType(storageType, valueType) == storageType) return;
+
+			string variableName = (lValue is Id numericLValue) ? numericLValue.Name : null;
+			string storage = (variableName == null) ? "this storage" : $"'{variableName}'";
+			throw new LanguageException(
+				$"Cannot store a {NumericTypeName(valueType)} value in {storage}, which is declared {NumericTypeName(storageType)}. "
+				+ $"A numeric value reaches a storage of its own type or a wider one (int, long, double, decimal), never a narrower one: "
+				+ $"declare the storage at the wider type (for instance '{ZeroLiteralOf(valueType)}' instead of '{ZeroLiteralOf(storageType)}').");
+		}
+
+		// The name the AUTHOR writes for a numeric type. A diagnostic about a script quotes the
+		// script's vocabulary, not the host runtime's: an author who wrote 'int' cannot act on
+		// a message that names Int32.
+		private static string NumericTypeName(Type numericType)
+		{
+			if (numericType == typeof(int)) return "int";
+			if (numericType == typeof(long)) return "long";
+			if (numericType == typeof(double)) return "double";
+			if (numericType == typeof(decimal)) return "decimal";
+			return numericType.Name;
+		}
+
+		// The zero literal that declares a storage of this type, so the diagnostic can show the
+		// one-character edit that opens the storage wide enough instead of only naming the rule.
+		private static string ZeroLiteralOf(Type numericType)
+		{
+			if (numericType == typeof(long)) return "0L";
+			if (numericType == typeof(double)) return "0.0";
+			if (numericType == typeof(decimal)) return "0m";
+			return "0";
+		}
+
+		// The storage's declared type when it is a numeric type WIDER than the value about to
+		// be stored, null otherwise (nothing to coerce, or either side off the ladder). Never
+		// narrows: the answer is the storage type only when the ladder names it as the wider
+		// of the two, which is the same condition that admitted the assignment.
+		//
+		// A numeric value narrower than its storage must be widened AT THE STORE, because for
+		// value types "fits" means the representation itself changes. Leaving the narrower
+		// value in the slot makes the two engines disagree about the variable: the interpreted
+		// plane reports the stored value's runtime type, while the compiled plane coerces the
+		// slot to the declared type on every read — so the same script renders the variable
+		// differently by compilation mode, and a local slot, whose compiled read is an unbox
+		// rather than a conversion, fails outright. Coercing here keeps the declared type and
+		// the stored value in agreement, which is the single fact both planes read back.
+		private static Type NumericStorageWiderThan(Type storageType, Type valueType)
+		{
+			if (storageType == null || valueType == null) return null;
+			if (storageType == valueType) return null;
+			return AstExpression.PromotedNumericType(storageType, valueType) == storageType ? storageType : null;
 		}
 
 		// Least common base of two types: the most derived type that is assignable
@@ -391,14 +514,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
-		// B.3.1: include LValue + RValue contributions so two assignments with
-		// the same shape but different literal RHS hash equally.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(NewInstanceStatement));
-			lValue.AccumulatePromotionCandidateHash(ref hc);
-			rValue.AccumulatePromotionCandidateHash(ref hc);
-		}
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{
@@ -447,9 +562,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+		// The last link of the chain must name a member, not invoke one: the result of a call
+		// is a value, not a storage location. Reported as a language error instead of failing
+		// the member lookup with an empty member name.
+		private static void RejectMethodCallAsLValue(DotAccess reference)
+		{
+			if (reference.Method() != null) throw new LanguageException($"Cannot assign to the result of a method call ('{reference.Method()}').");
+		}
+
 		private FieldInfo FindField()
 		{
-			DottedId reference = (DottedId)lValue;
+			DotAccess reference = (DotAccess)lValue;
 			object instance = (object)reference.GetTarget();
 			string targetFieldName = reference.Property();
 			FieldInfo fieldEncontrado = null;
@@ -470,8 +593,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private FieldInfo FindFieldExpression(ParameterExpression parametersParam)
 		{
-			if (!(lValue is DottedId reference))
-				throw new LanguageException("lValue must be DottedId");
+			if (!(lValue is DotAccess reference))
+				throw new LanguageException("The lValue of a member assignment must be a member access.");
 
 			// Obtain the expression that represents the object
 			var instanceExpr = reference.GetTargetExpression(parametersParam);
@@ -480,7 +603,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// Look up the FieldInfo via reflection on the object type
 			var instanceType = instanceExpr.Type;
 			if (instanceType == null)
-				throw new LanguageException($"Could not determine the object type for reference '{reference.Id()}.{targetFieldName}'.");
+				throw new LanguageException($"Could not determine the receiver type of the assignment to member '{targetFieldName}'.");
 
 			FieldInfo fieldEncontrado = FindAssignableFieldOn(instanceType, targetFieldName);
 			if (fieldEncontrado != null) return fieldEncontrado;
@@ -518,7 +641,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private PropertyInfo FindProperty()
 		{
-			DottedId reference = (DottedId)lValue;
+			DotAccess reference = (DotAccess)lValue;
 			object instance = (object)reference.GetTarget();
 
 			string targetPropertyName = reference.Property();
@@ -552,8 +675,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		private PropertyInfo FindPropertyExpression(ParameterExpression parametersParam)
 		{
-			if (!(lValue is DottedId reference))
-				throw new LanguageException("lValue must be DottedId");
+			if (!(lValue is DotAccess reference))
+				throw new LanguageException("The lValue of a member assignment must be a member access.");
 
 			// Obtain the expression that represents the object
 			var instanceExpr = reference.GetTargetExpression(parametersParam);
@@ -562,7 +685,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// Look up the PropertyInfo via reflection on the object type
 			var instanceType = instanceExpr.Type;
 			if (instanceType == null)
-				throw new LanguageException($"Could not determine the object type for reference '{reference.Id()}.{targetPropertyName}'.");
+				throw new LanguageException($"Could not determine the receiver type of the assignment to member '{targetPropertyName}'.");
 
 			PropertyInfo foundProperty = FindAssignablePropertyOn(instanceType, targetPropertyName, reference);
 			if (foundProperty != null) return foundProperty;
@@ -582,7 +705,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return null;
 		}
 
-		private PropertyInfo FindAssignablePropertyOn(Type objectType, string targetPropertyName, DottedId reference)
+		private PropertyInfo FindAssignablePropertyOn(Type objectType, string targetPropertyName, DotAccess reference)
 		{
 			foreach (PropertyInfo property in objectType.GetProperties(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
 			{

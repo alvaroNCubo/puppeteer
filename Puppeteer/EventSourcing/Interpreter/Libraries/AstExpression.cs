@@ -78,6 +78,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				Type t = id.ComputeType();
 				if (t == null || t == typeof(object)) return EnumArgKind.Symbol;
 				if (t == typeof(string)) return EnumArgKind.StringValue;
+				// The symbol marker (`typeof(Enum)` at the parameter boundary): the value is a
+				// member name, exactly like a string, and it says so at the border instead of
+				// leaving the call site to guess. It is enum-bindable for the same reason a string
+				// is, and it is NOT compatible with a parameter of any other type — so where a
+				// string would be ambiguous between two readings, this has only one and needs no
+				// cast to disambiguate. Reading it as text is then the case that must be written
+				// explicitly, by calling ToString() on it.
+				if (t == typeof(Enum)) return EnumArgKind.StringValue;
 			}
 			return EnumArgKind.NotEnumBindable;
 		}
@@ -215,6 +223,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					break;
 				case EnumArgKind.StringValue:
 					nameExpr = arg.ExecuteExpression(parametersParam);
+					// A StringValue argument CARRIES a member name but is not always TYPED as a
+					// string: the symbol marker (`typeof(Enum)` at the parameter boundary) is
+					// declared as the abstract base while its slot stores the name. The declared
+					// type is what the expression gets typed with, so it has to be brought back to
+					// string here or the call below is built against the wrong signature. Routed
+					// through object because Enum -> string is not a CLR conversion, while the value
+					// in the slot has been a string since it crossed the boundary.
+					if (nameExpr.Type != typeof(string))
+					{
+						nameExpr = Expression.Convert(Expression.Convert(nameExpr, typeof(object)), typeof(string));
+					}
 					break;
 				default:
 					throw new LanguageException($"Argument cannot be bound to enum '{enumType.Name}'.");
@@ -372,12 +391,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return Convert.ToDecimal(evaluatedArgument);
 			}
-			// A length-1 string coerces to char at the parameter boundary (DTOs carry a char as a
-			// single-character string). ImplicitCast enforces the length-1 rule / raises a clear error.
-			else if (parameterType == typeof(char) && argumentType == typeof(string))
-			{
-				return TypeConversion.ImplicitCast(evaluatedArgument, parameterType);
-			}
+			// No string -> char branch either. A string is a sequence and a char is one of its
+			// positions, so there is no conversion between them to apply — the author names the
+			// position: text[0]. A length-1 string used to be accepted here, which made the rule
+			// depend on the VALUE rather than the type, so the same script was legal or not according
+			// to what happened to be in the string at that moment.
+			// No char -> string branch: a char argument no longer reaches a string parameter
+			// implicitly, so there is nothing to coerce here. An explicit (string)x is an OpCast and
+			// arrives already typed.
 
 			return evaluatedArgument;
 		}
@@ -424,21 +445,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				return Expression.Convert(argument, typeof(decimal));
 			}
 
-			// string -> char (length-1). Route through ImplicitCast so the length rule is enforced at
-			// runtime; a bare Expression.Convert(string, char) is not a valid CLR conversion and would throw.
-			if (parameterType == typeof(char) && argumentType == typeof(string))
-			{
-				return Expression.Convert(
-					Expression.Call(
-						typeof(TypeConversion).GetMethod(
-							nameof(TypeConversion.ImplicitCast), BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public),
-						argument,
-						Expression.Constant(parameterType, typeof(Type))
-					),
-					parameterType
-				);
-			}
-			
+			// Neither direction between string and char is emitted here: the promotion is gone and so
+			// is the length-1 coercion, so the compiled path has nothing to emit and stays in step
+			// with the interpreted one.
+
 			// If types are not directly assignable, use ImplicitCast.
 			if (!AreCompatible(argumentType, parameterType))
 			{
@@ -503,13 +513,28 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 			else if (paramType == typeof(string))
 			{
+				// A char does NOT satisfy a string parameter. The promotion existed to spare the
+				// author a conversion when a value is naturally one letter, back when the language
+				// could not WRITE a char at all — so every char reaching a call site had to arrive as
+				// a one-character string, or through this promotion. The `'L'c` literal replaced that
+				// need, and the promotion had a cost the ergonomics did not pay for: a char argument
+				// bound a string parameter NON-EXACTLY, so adding a char overload later took the
+				// binding away from entries already in the journal, silently. What a promotion cannot
+				// be is undone once it is written down.
+				//
+				// A char that is genuinely meant as text says so by calling ToString() on it. There is
+				// no cast to string in this language, for the reason OpCast.ExplicitCast gives: text is
+				// produced by an operation that names its format, not by a conversion.
 				compatible = argType == typeof(string);
 			}
 			else if (paramType == typeof(char))
 			{
-				// A char parameter accepts a real char or a (length-1) string; DTOs carry a char as a
-				// single-character string. The length is checked when the value is coerced.
-				compatible = argType == typeof(char) || argType == typeof(string);
+				// A char parameter accepts a char. A length-1 string used to satisfy it, which made
+				// compatibility depend on the VALUE and not the type: the same script bound or failed
+				// according to what the string happened to hold. A string is a sequence and a char is
+				// one of its positions, so the author names the position — text[0], which already
+				// yields a char.
+				compatible = argType == typeof(char);
 			}
 			else if (paramType == typeof(DateTime))
 			{
@@ -609,10 +634,27 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		protected Type PromotesTo(Type leftType, Type rightType)
 		{
-			// Numeric promotion ladder: decimal dominates double dominates long dominates int.
-			// int widens to long (safe); long never narrows to int implicitly.
-			if (!IsPromotableNumeric(leftType) || !IsPromotableNumeric(rightType))
+			Type promoted = PromotedNumericType(leftType, rightType);
+			if (promoted == null)
 				throw new LanguageException($"Binary operation {this.GetType().Name} cannot combine {leftType.Name} and {rightType.Name}");
+
+			return promoted;
+		}
+
+		// The numeric promotion ladder: decimal dominates double dominates long dominates int.
+		// int widens to long (safe); long never narrows to int implicitly. Returns null when
+		// either type is off the ladder, leaving the decision to the caller.
+		//
+		// Exposed as a static because the ladder is the ordering of the numeric family, not a
+		// rule of any single operator: the operators use it to promote their operands, and an
+		// assignment uses it to decide whether the value fits the storage. The family has no
+		// usable ordering in the type hierarchy — the common ancestor of two numeric structs
+		// is System.ValueType, which carries no numeric semantics — so the ladder is the only
+		// place that ordering exists.
+		internal static Type PromotedNumericType(Type leftType, Type rightType)
+		{
+			if (!IsPromotableNumeric(leftType) || !IsPromotableNumeric(rightType))
+				return null;
 
 			if (leftType == typeof(decimal) || rightType == typeof(decimal))
 				return typeof(decimal);
@@ -631,7 +673,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		// Widens an already-evaluated boxed numeric value to the promoted target type
 		// (interpreted operators). Only widenings occur here (int->long->double->decimal),
 		// so no value is ever narrowed/lost.
-		protected static object CoerceNumericValue(object value, Type target)
+		internal static object CoerceNumericValue(object value, Type target)
 		{
 			if (target == typeof(long)) return Convert.ToInt64(value);
 			if (target == typeof(double)) return Convert.ToDouble(value);

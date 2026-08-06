@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
-using System.Reflection;
 using System.Text;
 
 namespace Puppeteer.EventSourcing.Interpreter.Formatters
@@ -501,32 +499,17 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 				return;
 			}
 
-			// Last resort: a domain object that exposes a print(StringBuilder)
-			// method, or just ToString(). The print(StringBuilder) escape
-			// hatch is JSON-shaped (the contract is "your print emits JSON
-			// fragments"); under TOON we still call it but emit the raw
-			// string as-is, prefixed by the key. Not pretty but preserves
-			// the legacy contract.
-			MethodInfo possiblePrint = type
-				.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-				.FirstOrDefault(m =>
-					m.Name.ToLower() == "print" &&
-					m.GetParameters().Length == 1 &&
-					m.GetParameters()[0].ParameterType == typeof(StringBuilder));
+			// The static pass could not decide this value's type, so the refusal
+			// lands here instead: the sink emits values, never material. Rendering
+			// the material would be the material authoring the projection, which is
+			// the actor's. Only a leaf without a branch of its own reaches this
+			// point legitimately.
+			if (!ProjectionLeaf.IsLeaf(type)) throw ProjectionLeaf.MaterialReachedTheSink(type);
 			WriteFieldPrefix();
 			WriteKey(name);
 			WriteStructure(':');
 			sink.Append(' ');
-			if (possiblePrint != null)
-			{
-				var tmp = new StringBuilder();
-				possiblePrint.Invoke(value, new object[] { tmp });
-				sink.Append(tmp.ToString());
-			}
-			else
-			{
-				WriteString(value.ToString());
-			}
+			WriteString(value.ToString());
 			sink.Append('\n');
 			atLineStart = true;
 		}
@@ -571,7 +554,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 					: dt.ToString("MM/dd/yyyy HH:mm:ss", CultureInfo.InvariantCulture);
 				WriteNumber(s);
 			}
-			else WriteString(value.ToString());
+			else
+			{
+				// An element of a sequence whose element type the static pass could
+				// not decide. Same refusal as the scalar path: values render,
+				// material does not.
+				if (!ProjectionLeaf.IsLeaf(type)) throw ProjectionLeaf.MaterialReachedTheSink(type);
+				WriteString(value.ToString());
+			}
 		}
 
 		// ── EWIs ───────────────────────────────────────────────────────────

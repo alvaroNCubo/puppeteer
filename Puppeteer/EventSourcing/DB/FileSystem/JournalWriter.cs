@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -39,8 +40,14 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			Directory.CreateDirectory(journalDir);
 		}
 
-		internal void Initialize()
+		// Returns true when the sparse index that came back from disk disagreed with the
+		// journal files and had to be healed, so the caller can persist the corrected
+		// index. See ReconcileSealedFilesIntoIndex for why the index cannot be trusted
+		// as it was loaded.
+		internal bool Initialize()
 		{
+			bool indexHealed = false;
+
 			if (metadata.CurrentFileSequence > 0)
 			{
 				activeFileSequence = metadata.CurrentFileSequence;
@@ -49,17 +56,21 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				if (File.Exists(activePath))
 				{
 					activeStream = new FileStream(activePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096);
-					RecoverActiveFile();
+					indexHealed = RecoverActiveFile();
 				}
 				else
 				{
 					OpenNewFile(activeFileSequence);
 				}
+
+				indexHealed |= ReconcileSealedFilesIntoIndex();
 			}
 			else
 			{
 				OpenNewFile(1);
 			}
+
+			return indexHealed;
 		}
 
 		internal void AppendRecord(byte[] record, long entryId)
@@ -163,13 +174,14 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			activeStream.Seek(0, SeekOrigin.End);
 		}
 
-		private void RecoverActiveFile()
+		// Returns true when it had to heal the index entry of the active file.
+		private bool RecoverActiveFile()
 		{
 			if (activeStream.Length < HEADER_SIZE)
 			{
 				activeStream.Dispose();
 				OpenNewFile(activeFileSequence);
-				return;
+				return false;
 			}
 
 			activeStream.Seek(0, SeekOrigin.Begin);
@@ -180,7 +192,7 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			{
 				activeStream.Dispose();
 				OpenNewFile(activeFileSequence);
-				return;
+				return false;
 			}
 
 			activeFirstEntryId = 0;
@@ -221,13 +233,16 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 				activeStream.SetLength(lastValidPosition);
 			}
 
+			bool indexHealed = false;
+
 			if (activeEventCount > 0 && activeFirstEntryId > 0)
 			{
-				var existingEntry = index.GetEntryByFileNumber(activeFileSequence);
-				if (existingEntry == null)
-				{
-					index.AddEntry(activeFirstEntryId, activeFileSequence, activeLastEntryId);
-				}
+				// The scan above is ground truth from the actual file bytes: widen the
+				// index entry to it. A previously persisted entry can stop short of the
+				// real tail (the index is saved periodically, each record is flushed
+				// durably), and readers treat LastEntryId as an upper bound of what the
+				// file holds -- so a short entry would hide committed records.
+				indexHealed = index.WidenOrAddEntry(activeFirstEntryId, activeFileSequence, activeLastEntryId);
 
 				// Fix LastWrittenEntryId if meta.bin was persisted before the crash:
 				// activeLastEntryId is ground truth from the actual file bytes.
@@ -236,6 +251,115 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			}
 
 			activeStream.Seek(0, SeekOrigin.End);
+
+			return indexHealed;
+		}
+
+		// Reconciles the loaded sparse index with the sealed journal files on disk.
+		//
+		// AppendRecord flushes every record durably but the index is only persisted
+		// periodically, so the index that comes back from disk can lag the journal in two
+		// ways: an entry whose LastEntryId stops short of its file's real tail, and no
+		// entry at all for a file that was rolled over after the last index save. Both
+		// hide committed records, because every reader uses those entries to decide which
+		// files it can skip -- and they hide them silently, since the records themselves
+		// are intact on disk. FindFullySkippedFiles has the same dependency in the write
+		// direction: it derives a file's entry-id range from its index entry, so a short
+		// range can make it judge a file fully elided and delete it.
+		//
+		// The journal files are the authority; this index is a hint. After Initialize
+		// every file present is indexed and every entry covers at least the range its
+		// file really holds. Cost is one 32-byte header read per sealed file (same order
+		// as ComputeRealTotalEventCount, already paid at open), and a full record scan
+		// only for a file whose header was never sealed.
+		//
+		// Files with a sequence above the active one are left alone: OpenNewFile persists
+		// CurrentFileSequence before any record can reach the new file, so such a file
+		// can only be a header-only leftover of a lost metadata write.
+		private bool ReconcileSealedFilesIntoIndex()
+		{
+			bool indexHealed = false;
+
+			foreach (string filePath in Directory.GetFiles(journalDir, "journal_*.bin"))
+			{
+				int sequence = ParseFileSequence(filePath);
+				if (sequence <= 0 || sequence >= activeFileSequence) continue;
+
+				if (!TryReadFileEntryIdRange(filePath, out long firstEntryId, out long lastEntryId))
+					continue;
+
+				indexHealed |= index.WidenOrAddEntry(firstEntryId, sequence, lastEntryId);
+			}
+
+			return indexHealed;
+		}
+
+		private static int ParseFileSequence(string filePath)
+		{
+			string fileName = Path.GetFileNameWithoutExtension(filePath);
+			int separator = fileName.LastIndexOf('_');
+			if (separator < 0 || separator + 1 >= fileName.Length) return 0;
+
+			return int.TryParse(fileName.AsSpan(separator + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int sequence)
+				? sequence
+				: 0;
+		}
+
+		// Entry-id range a journal file really holds. The header is written when the file
+		// is sealed and is exact for a file the writer already closed; a file whose header
+		// is still zeroed (the process died before its seal) is scanned record by record.
+		// The scan stops at the first invalid length or CRC, the same way the readers do,
+		// so the range never claims records that no reader could decode.
+		private static bool TryReadFileEntryIdRange(string filePath, out long firstEntryId, out long lastEntryId)
+		{
+			var header = ReadFileHeader(filePath);
+			if (header != null && header.EventCount > 0 && header.FirstEntryId > 0 && header.LastEntryId >= header.FirstEntryId)
+			{
+				firstEntryId = header.FirstEntryId;
+				lastEntryId = header.LastEntryId;
+				return true;
+			}
+
+			return TryScanFileEntryIdRange(filePath, out firstEntryId, out lastEntryId);
+		}
+
+		private static bool TryScanFileEntryIdRange(string filePath, out long firstEntryId, out long lastEntryId)
+		{
+			firstEntryId = 0;
+			lastEntryId = 0;
+
+			using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 262144, FileOptions.SequentialScan))
+			{
+				long fileLength = fs.Length;
+				if (fileLength < HEADER_SIZE) return false;
+				fs.Seek(HEADER_SIZE, SeekOrigin.Begin);
+
+				long position = HEADER_SIZE;
+				byte[] lenBuf = new byte[4];
+
+				while (position < fileLength)
+				{
+					int read = fs.Read(lenBuf, 0, 4);
+					if (read < 4) break;
+					position += 4;
+
+					int recordLen = BitConverter.ToInt32(lenBuf, 0);
+					if (recordLen <= 0 || position + recordLen > fileLength) break;
+
+					byte[] recordBody = new byte[recordLen];
+					read = fs.Read(recordBody, 0, recordLen);
+					if (read < recordLen) break;
+					position += recordLen;
+
+					if (!BinaryEventCodec.ValidateCrc(recordBody, recordLen)) break;
+
+					long entryId = BinaryEventCodec.PeekEntryId(recordBody);
+					if (firstEntryId == 0) firstEntryId = entryId;
+					lastEntryId = entryId;
+				}
+			}
+
+			return firstEntryId > 0 && lastEntryId >= firstEntryId;
 		}
 
 		// Distill: rewrites the journal files in place keeping only the records that

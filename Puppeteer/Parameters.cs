@@ -29,20 +29,14 @@ namespace Puppeteer
 
 		public Parameters() { }
 
-		// Optional resolver for non-primitive types (domain enums) when re-parsing the
-		// parameter declaration from text during replay. It is supplied by ActorHandler
-		// (AddKnownActionFromDefine) which holds the actor's DomainLibraries; when it is
-		// null, ParameterType only accepts primitives (no change in behavior).
-		private readonly EventSourcing.DomainLibraries typeResolver;
-
-		internal Parameters(string parameters) : this(parameters, null) { }
-
-		internal Parameters(string parameters, EventSourcing.DomainLibraries typeResolver)
+		// No type resolver: a parameter declaration is read against the LANGUAGE's primitive
+		// types alone. Re-parsing never consults the actor's libraries because no domain type
+		// can appear in a declaration to begin with (see Parameter.IsSupportedParameterType).
+		internal Parameters(string parameters)
 		{
 			ArgumentNullException.ThrowIfNull(parameters);
 			if (this == EMPTY) throw new LanguageException("Parameters can not be modified for empty instance");
 
-			this.typeResolver = typeResolver;
 			int position = 0;
 			while (position < parameters.Length)
 			{
@@ -501,10 +495,16 @@ namespace Puppeteer
 			if (type == typeof(int)) return "int";
 			if (type == typeof(long)) return "long";
 			if (type == typeof(string)) return "string";
+			if (type == typeof(char)) return "char";
 			if (type == typeof(bool)) return "bool";
 			if (type == typeof(double)) return "double";
 			if (type == typeof(DateTime)) return "datetime";
 			if (type == typeof(decimal)) return "decimal";
+			// The symbol marker. Written as its own keyword rather than as `string` because the
+			// header is what replay reads to decide how the value binds: `rule:string` and
+			// `rule:enum` carry the same characters in the blob and different intent, and the
+			// intent is the half that must survive.
+			if (type == typeof(Enum)) return "enum";
 			if (type.IsArray)
 			{
 				return CanonicalTypeName(type.GetElementType()) + "[]";
@@ -513,10 +513,6 @@ namespace Puppeteer
 			{
 				return CanonicalTypeName(type.GenericTypeArguments[0]) + "[]";
 			}
-			// Domain enum: journaled by type NAME (replay resolves it via
-			// DomainLibraries in Parser.ParseTypeName / Parameters.ParameterType). The
-			// member value travels by name in the arguments blob (readable, not ordinal).
-			if (type.IsEnum) return type.Name;
 			throw new LanguageException($"Type '{type.Name}' is not a valid primitive in 'define action' parameter lists.");
 		}
 
@@ -605,6 +601,10 @@ namespace Puppeteer
 			{
 				sb.Append("long");
 			}
+			else if (type == typeof(char))
+			{
+				sb.Append("char");
+			}
 			else if (type == typeof(bool))
 			{
 				sb.Append("bool");
@@ -621,11 +621,9 @@ namespace Puppeteer
 			{
 				sb.Append("double");
 			}
-			else if (type.IsEnum)
+			else if (type == typeof(Enum))
 			{
-				// Domain enum: by type name (resolved via DomainLibraries when
-				// re-parsing). Symmetric with CanonicalTypeName.
-				sb.Append(type.Name);
+				sb.Append("enum");
 			}
 			else
 			{
@@ -721,11 +719,8 @@ namespace Puppeteer
 
 		private Type ParameterType(string parameters, ref int position)
 		{
-			// A type identifier that matches exactly (case-insensitive) a
-			// primitive is processed by the primitive route (no changes). If it is NOT primitive,
-			// it is attempted to be resolved as a domain enum via the typeResolver (DomainLibraries).
-			// This reconstructs an enum @parameter journaled by type name during replay;
-			// if the resolver is not available or the name is not a known enum, it fails hard.
+			// Only a primitive type keyword is a legal declaration. Anything else is refused by
+			// name: a declaration is written against the language's types, never a domain's.
 			Type baseType = null;
 			if (IsPrimitiveTypeKeyword(parameters, position))
 			{
@@ -743,9 +738,17 @@ namespace Puppeteer
 					case 'L':
 						baseType = LongType(parameters, ref position);
 						break;
+					case 'c':
+					case 'C':
+						baseType = CharType(parameters, ref position);
+						break;
 					case 'b':
 					case 'B':
 						baseType = BooleanType(parameters, ref position);
+						break;
+					case 'e':
+					case 'E':
+						baseType = EnumMarkerType(parameters, ref position);
 						break;
 					case 'd':
 					case 'D':
@@ -765,7 +768,7 @@ namespace Puppeteer
 				}
 			}
 
-			if (baseType == null) baseType = EnumParameterType(parameters, ref position);
+			if (baseType == null) RefuseNonPrimitiveDeclaredType(parameters, ref position);
 
 			// A trailing '?' marks a nullable value type (symmetric with WriteParameterType).
 			// Re-wrap into Nullable<T> so the Parameter ctor normalizes it back to T with
@@ -799,16 +802,18 @@ namespace Puppeteer
 			return token.Equals("int".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("long".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("string".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("char".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("bool".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("datetime".AsSpan(), StringComparison.OrdinalIgnoreCase)
 				|| token.Equals("decimal".AsSpan(), StringComparison.OrdinalIgnoreCase)
-				|| token.Equals("double".AsSpan(), StringComparison.OrdinalIgnoreCase);
+				|| token.Equals("double".AsSpan(), StringComparison.OrdinalIgnoreCase)
+				|| token.Equals("enum".AsSpan(), StringComparison.OrdinalIgnoreCase);
 		}
 
-		// Resolves a domain enum from its type name (journaled by
-		// CanonicalTypeName / WriteSingleParameterType). The member value is reconstructed
-		// in ArgumentsValue via Enum.Parse. Supports the array suffix `[]` for symmetry.
-		private Type EnumParameterType(string parameters, ref int position)
+		// A declared type that is not a primitive keyword is refused by NAME, so the message can
+		// point at the offending token instead of failing anonymously further along. Reading the
+		// identifier first is the whole purpose of this method.
+		private static void RefuseNonPrimitiveDeclaredType(string parameters, ref int position)
 		{
 			int start = position;
 			while (position < parameters.Length)
@@ -820,16 +825,7 @@ namespace Puppeteer
 			if (start == position) throw new LanguageException($"Unexpected type {parameters.Substring(start)}");
 			string typeName = parameters.Substring(start, position - start);
 
-			if (typeResolver == null || !typeResolver.TryGetType(typeName, out Type resolved) || !resolved.IsEnum)
-			{
-				throw new LanguageException($"Type '{typeName}' is not a valid primitive or known domain enum.");
-			}
-
-			if (IsArray(parameters, ref position))
-			{
-				return resolved.MakeArrayType();
-			}
-			return resolved;
+			throw new LanguageException($"Type '{typeName}' is not a valid parameter type. A parameter declaration is written against the language's primitives: int, long, double, decimal, char, string, bool, datetime, or a one-level collection of those. A domain type never appears in a declaration.");
 		}
 
 		private bool IsArray(string parameters, ref int position)
@@ -993,6 +989,59 @@ namespace Puppeteer
 			return typeof(int);
 		}
 
+		// The symbol marker `enum`. Scalar only: a COLLECTION of symbols has no reading of its own
+		// at a call site (each element would have to be resolved against a signature that takes a
+		// collection of one specific enum), so the array suffix is deliberately not consumed here
+		// and `enum[]` is refused by name like any other non-primitive declaration.
+		private Type EnumMarkerType(string parameters, ref int position)
+		{
+			if (parameters.Length < position + 4)
+			{
+				throw new LanguageException($"{parameters.Substring(position)} is not a known type");
+			}
+
+			bool valid =
+				(parameters[position + 0] == 'e' || parameters[position + 0] == 'E') &&
+				(parameters[position + 1] == 'n' || parameters[position + 1] == 'N') &&
+				(parameters[position + 2] == 'u' || parameters[position + 2] == 'U') &&
+				(parameters[position + 3] == 'm' || parameters[position + 3] == 'M');
+
+			if (!valid)
+			{
+				throw new LanguageException($"{parameters.Substring(position, position + 4 - position)} is not a known type");
+			}
+			position += 4;
+
+			return typeof(Enum);
+		}
+
+		private Type CharType(string parameters, ref int position)
+		{
+			if (parameters.Length < position + 4)
+			{
+				throw new LanguageException($"{parameters.Substring(position)} is not a known type");
+			}
+
+			bool valid =
+				(parameters[position + 0] == 'c' || parameters[position + 0] == 'C') &&
+				(parameters[position + 1] == 'h' || parameters[position + 1] == 'H') &&
+				(parameters[position + 2] == 'a' || parameters[position + 2] == 'A') &&
+				(parameters[position + 3] == 'r' || parameters[position + 3] == 'R');
+
+			if (!valid)
+			{
+				throw new LanguageException($"{parameters.Substring(position, position + 4 - position)} is not a known type");
+			}
+			position += 4;
+
+			if (IsArray(parameters, ref position))
+			{
+				return typeof(char[]);
+			}
+
+			return typeof(char);
+		}
+
 		private Type LongType(string parameters, ref int position)
 		{
 			if (parameters.Length < position + 4)
@@ -1073,6 +1122,20 @@ namespace Puppeteer
 					// A null argument (nullable In/InOut) is journaled as '?' and restored to
 					// null by LoadArguments; without this it would fall into the primitive writer
 					// and unbox (int)null.
+					//
+					// The marker is only readable back into a NULLABLE slot: LoadArguments assigns
+					// null, and Parameter's In/InOut guard rejects null on a non-nullable declared
+					// type. Emitting it into a non-nullable slot would therefore write a row the
+					// reader cannot accept — and because rehydration is permissive, the act would
+					// silently DISAPPEAR from rebuilt state one restart later instead of failing.
+					// An empty non-nullable slot at write time means the value never reached this
+					// set (an Eval whose computed value was deposited elsewhere is the shape that
+					// exposed this), so fail HERE, where the defect is, naming the parameter.
+					if (!parameter.IsNullable)
+					{
+						throw new LanguageException($"Parameter '{parameter.Name}' of type '{parameterType.Name}' has no value; " +
+							"a non-nullable argument cannot be journaled as the null placeholder because it could not be read back.");
+					}
 					sb.Append('?');
 				}
 				else if (parameterType.IsGenericType || parameterType.IsArray)
@@ -1090,6 +1153,15 @@ namespace Puppeteer
 
 		internal void LoadArguments(string agumentsAsString)
 		{
+			// A ZERO-argument invocation is journaled as an EMPTY arguments blob, symmetric with
+			// ArgumentsAsString: it writes nothing when the list declares no USER parameter (a
+			// list holding only system ones writes nothing either, since those are excluded).
+			// "No arguments" is therefore a legal ENCODING, not a missing value. Rejecting it
+			// here made a record the write path produces unreadable by the read path: every
+			// invocation of a parameterless Action failed on replay, and because rehydration is
+			// permissive the actor came back MISSING those acts instead of failing loudly.
+			if (!HasAnyUserParameter() && string.IsNullOrWhiteSpace(agumentsAsString)) return;
+
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(agumentsAsString);
 
 			int position = 0;
@@ -1143,6 +1215,7 @@ namespace Puppeteer
 			// Improvement A: Out parameter defaults served from BoxCache (singletons),
 			// instead of boxing a new default(T) on each LoadArguments.
 			if (type == typeof(int)) return BoxCache.IntZero;
+			if (type == typeof(char)) return default(char);
 			if (type == typeof(bool)) return BoxCache.False;
 			if (type == typeof(DateTime)) return BoxCache.DateTimeDefault;
 			if (type == typeof(decimal)) return BoxCache.DecimalDefault;
@@ -1166,6 +1239,10 @@ namespace Puppeteer
 			else if (parameterType.GenericTypeArguments[0] == typeof(string))
 			{
 				parameter.Value = ValueCollectionString(agumentsAsString, ref position);
+			}
+			else if (parameterType.GenericTypeArguments[0] == typeof(char))
+			{
+				parameter.Value = ValueCollectionChar(agumentsAsString, ref position);
 			}
 			else if (parameterType.GenericTypeArguments[0] == typeof(bool))
 			{
@@ -1282,6 +1359,21 @@ namespace Puppeteer
 				position++;
 			}
 
+			return list;
+		}
+
+		// Delegates to the string reader so the quoting rules cannot drift between the two: on
+		// the wire a char collection IS a collection of one-character quoted literals, narrowed
+		// here. A member of any other length means a corrupt blob, not a surprising value.
+		private object ValueCollectionChar(string agumentsAsString, ref int position)
+		{
+			object asStrings = ValueCollectionString(agumentsAsString, ref position);
+			List<char> list = new List<char>();
+			foreach (string written in (IEnumerable<string>)asStrings)
+			{
+				if (written.Length != 1) throw new LanguageException("Parameter definition is not valid");
+				list.Add(written[0]);
+			}
 			return list;
 		}
 
@@ -1473,9 +1565,19 @@ namespace Puppeteer
 
 			// Improvement B: SetParsedScalar avoids ImplicitCast (the value already arrives with the
 			// exact type). Improvement A: int/bool take the box from BoxCache when cacheable.
-			if (parameterType == typeof(string))
+			// Symmetric with the writer: the symbol marker reads back through the string reader.
+			if (parameterType == typeof(string) || parameterType == typeof(Enum))
 			{
 				parameter.SetParsedScalar(ValueString(agumentsAsString, ref position).ToString());
+			}
+			else if (parameterType == typeof(char))
+			{
+				// Symmetric with the writer: read the quoted literal and take its single
+				// character. A blob that carries anything other than one character at a char
+				// position is corrupt, not merely surprising, so it fails loudly.
+				ReadOnlySpan<char> written = ValueString(agumentsAsString, ref position);
+				if (written.Length != 1) throw new LanguageException("Parameter definition is not valid");
+				parameter.SetParsedScalar(written[0]);
 			}
 			else if (parameterType == typeof(int))
 			{
@@ -1500,13 +1602,6 @@ namespace Puppeteer
 			else if (parameterType == typeof(double))
 			{
 				parameter.SetParsedScalar(Double.Parse(Value(agumentsAsString, ref position), CultureInfo.InvariantCulture));
-			}
-			else if (parameterType.IsEnum)
-			{
-				// The enum value is journaled by member NAME (WriteSingleValuePrimitive);
-				// it is reconstructed with Enum.Parse. ignoreCase to be tolerant like the enum
-				// binding in the rest of the engine.
-				parameter.SetParsedScalar(Enum.Parse(parameterType, Value(agumentsAsString, ref position).ToString(), ignoreCase: true));
 			}
 			else
 			{
@@ -1590,6 +1685,13 @@ namespace Puppeteer
 					Append((string[])value, sb, databaseType);
 				}
 			}
+			else if (parameterType.GenericTypeArguments[0] == typeof(char))
+			{
+				// One overload covers all three shapes: List<char> and char[] both ARE an
+				// IEnumerable<char>, and the element writer is identical for each, so there is
+				// nothing for a per-shape overload to decide.
+				Append((IEnumerable<char>)value, sb, databaseType);
+			}
 			else if (parameterType.GenericTypeArguments[0] == typeof(bool))
 			{
 				if (parameterType == typeof(List<bool>))
@@ -1659,9 +1761,22 @@ namespace Puppeteer
 		private void WriteSingleValuePrimitive(Parameter parameter, StringBuilder sb, DatabaseType databaseType)
 		{
 			Type parameterType = parameter.ParameterType;
-			if (parameterType == typeof(string))
+			// The symbol marker rides the string wire: its value IS a member name. Reusing the
+			// string writer rather than adding a branch keeps the quoting rules from drifting
+			// between them, and the declared type at this position is what tells the reader which
+			// of the two it is looking at.
+			if (parameterType == typeof(string) || parameterType == typeof(Enum))
 			{
 				Append((string)parameter.GetValue(), sb, databaseType);
+			}
+			else if (parameterType == typeof(char))
+			{
+				// A char is journaled as a one-character quoted literal ('L'), exactly like a
+				// string, so the backend's escaping covers a value that is itself a quote, a
+				// comma or a brace — any of which would otherwise break the blob. No suffix is
+				// needed to tell it apart from a string (as `1L` does for long): the blob is
+				// positional and the declared type at that position says which one to read.
+				Append(((char)parameter.GetValue()).ToString(), sb, databaseType);
 			}
 			else if (parameterType == typeof(int))
 			{
@@ -1687,23 +1802,10 @@ namespace Puppeteer
 			{
 				Append((double)parameter.GetValue(), sb);
 			}
-			else if (parameterType.IsEnum)
-			{
-				AppendEnum(parameterType, parameter.GetValue(), sb);
-			}
 			else
 			{
 				throw new LanguageException("invalid type");
 			}
-		}
-
-		// Journals an enum value by its member NAME (symbolic and readable: 'FL', not
-		// its ordinal), comma-free so as not to break the comma-separated blob. A value without
-		// a named member (undefined combination) falls back to the ordinal in "D" format, which is still
-		// comma-free and round-trips via Enum.Parse.
-		private void AppendEnum(Type enumType, object value, StringBuilder sb)
-		{
-			sb.Append(Enum.GetName(enumType, value) ?? Enum.Format(enumType, value, "D"));
 		}
 
 		private void Append(double[] values, StringBuilder sb)
@@ -1908,6 +2010,19 @@ namespace Puppeteer
 				return true;
 			}
 			return false;
+		}
+
+		private void Append(IEnumerable<char> values, StringBuilder sb, DatabaseType databaseType)
+		{
+			var isFirst = true;
+			sb.Append('{');
+			foreach (var value in values)
+			{
+				if (!isFirst) sb.Append(',');
+				LiteralString.Write(sb, value.ToString(), databaseType);
+				isFirst = false;
+			}
+			sb.Append('}');
 		}
 
 		private void Append(List<string> values, StringBuilder sb, DatabaseType databaseType)

@@ -142,7 +142,39 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 		}
 
-		internal bool RecoveringState { get; set; } = false;
+		private bool recoveringState = false;
+
+		// The engine's replay signal — true while already-journaled entries are being
+		// re-applied (rehydration, catch-up, replicated entries). The DOMAIN reads the
+		// same fact through two derived surfaces: the ItIsThePresent global the DSL
+		// exposes, and the host-facing ExecutionContext. Both are derived HERE, from
+		// the flag's single write point, so no replay path can ever raise the engine's
+		// signal without the domain's: with the flags split, a re-applied entry ran
+		// its present-gated side effects as a live act, carrying the replayed entry's
+		// Now instead of the live clock.
+		internal bool RecoveringState
+		{
+			get { return recoveringState; }
+			set
+			{
+				recoveringState = value;
+				SignalReplayWindowToDomain(value);
+			}
+		}
+
+		private void SignalReplayWindowToDomain(bool replaying)
+		{
+			// A Reaction-owned table has no ActorHandler; the flag exists on the
+			// ActorV1 plane only (ActorV2 has neither the global nor the context).
+			if (ActorHandler == null) return;
+			if (!(ActorHandler.Actor is ActorV1 actor)) return;
+
+			SetVariable("ItIsThePresent", !replaying, typeof(bool));
+			if (replaying)
+				ExecutionContext.Current.EnterReplayWindow(DateTime.Now, actor);
+			else
+				ExecutionContext.Current.SetContext(DateTime.Now, true, actor);
+		}
 
 		// Transient check that TellStatement.Execute bakes into the TellEnvelope.Check
 		// of the tells emitted during the body of a Causation.Continue(check:, ...).

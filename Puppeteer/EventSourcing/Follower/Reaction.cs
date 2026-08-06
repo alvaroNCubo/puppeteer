@@ -1,5 +1,6 @@
 using Puppeteer.EventSourcing.DB;
 using Puppeteer.EventSourcing.Interpreter;
+using Puppeteer.EventSourcing.Interpreter.Formatters;
 using Puppeteer.EventSourcing.Interpreter.Libraries;
 using System;
 using System.Collections.Generic;
@@ -34,21 +35,35 @@ namespace Puppeteer.EventSourcing.Follower
 	{
 		private readonly Reactions reactions;
 		private readonly string name;
+		// Push destination of the DECLARING SCOPE, carried down the fluent chain so it can
+		// be installed on the Reaction the leaf activation verb creates. Null for a
+		// reaction declared directly on actor.Reactions (it uses the actor's default sink).
+		// Carried as constructor state on purpose — not as a field on Reactions — so an
+		// unfinished chain can never leak its scope onto the next declaration.
+		private readonly IOutputSink scopeSink;
+		private readonly IOutputFormatter scopeFormat;
 
 		internal ReactionModeBuilder(Reactions reactions, string name)
+			: this(reactions, name, null, null)
+		{
+		}
+
+		internal ReactionModeBuilder(Reactions reactions, string name, IOutputSink scopeSink, IOutputFormatter scopeFormat)
 		{
 			this.reactions = reactions;
 			this.name = name;
+			this.scopeSink = scopeSink;
+			this.scopeFormat = scopeFormat;
 		}
 
 		public ReactionActivationBuilder Cue()
 		{
-			return new ReactionActivationBuilder(reactions, name, ReactionMode.Cue);
+			return new ReactionActivationBuilder(reactions, name, ReactionMode.Cue, scopeSink, scopeFormat);
 		}
 
 		public ReactionActivationBuilder Job()
 		{
-			return new ReactionActivationBuilder(reactions, name, ReactionMode.Job);
+			return new ReactionActivationBuilder(reactions, name, ReactionMode.Job, scopeSink, scopeFormat);
 		}
 	}
 
@@ -57,27 +72,36 @@ namespace Puppeteer.EventSourcing.Follower
 		private readonly Reactions reactions;
 		private readonly string name;
 		private readonly ReactionMode mode;
+		private readonly IOutputSink scopeSink;
+		private readonly IOutputFormatter scopeFormat;
 
 		internal ReactionActivationBuilder(Reactions reactions, string name, ReactionMode mode)
+			: this(reactions, name, mode, null, null)
+		{
+		}
+
+		internal ReactionActivationBuilder(Reactions reactions, string name, ReactionMode mode, IOutputSink scopeSink, IOutputFormatter scopeFormat)
 		{
 			this.reactions = reactions;
 			this.name = name;
 			this.mode = mode;
+			this.scopeSink = scopeSink;
+			this.scopeFormat = scopeFormat;
 		}
 
 		public Reaction DirectorOnly()
 		{
-			return reactions.CreateReaction(name, mode, ReactionActivation.DirectorOnly);
+			return reactions.CreateReaction(name, mode, ReactionActivation.DirectorOnly, scopeSink, scopeFormat);
 		}
 
 		public Reaction CastOnly()
 		{
-			return reactions.CreateReaction(name, mode, ReactionActivation.CastOnly);
+			return reactions.CreateReaction(name, mode, ReactionActivation.CastOnly, scopeSink, scopeFormat);
 		}
 
 		public Reaction Company()
 		{
-			return reactions.CreateReaction(name, mode, ReactionActivation.Company);
+			return reactions.CreateReaction(name, mode, ReactionActivation.Company, scopeSink, scopeFormat);
 		}
 	}
 
@@ -788,6 +812,47 @@ namespace Puppeteer.EventSourcing.Follower
 			}
 		}
 
+		// F3 .Aged: the settling gate governs the FIRING of a complete match, so it belongs to
+		// the leg that CLOSES the trajectory — the last Seek. On any earlier leg there is
+		// nothing to gate (that leg does not complete the match) and the span would be
+		// accepted, persisted and never consulted. Validated here, not inside Aged(...), because
+		// the builder cannot know which Seek is the closing one until the chain is complete.
+		private void ValidateAgedOnClosingSeek()
+		{
+			for (int i = 0; i < reactionEngines.Count - 1; i++)
+			{
+				if (!reactionEngines[i].AgedSpan.HasValue) continue;
+
+				throw new LanguageException(
+					$"Seek '{reactionEngines[i].PatternDescription}' declares Aged(...), but it is not the closing seek " +
+					$"('{reactionEngines[reactionEngines.Count - 1].PatternDescription}' is). Aged(...) is the settling gate of " +
+					"the CLOSING seek: it delays the firing of a COMPLETE match until its closing event lies 'span' behind the " +
+					"front of the journal. On an earlier seek there is no match to hold back. Move it to the closing seek, or " +
+					"remove it. To express a distance BETWEEN two seeks use Within(...) instead.");
+			}
+		}
+
+		// F3 .Aged: true when the closing seek declares a settling gate, so a complete match can
+		// park instead of firing. Read by the resume plane, which must keep a parked match's
+		// anchor reachable across runs (see UseParkedFrontierClamp).
+		private bool HasAgedClosingSeek => reactionEngines.Count > 0
+			&& reactionEngines[reactionEngines.Count - 1].AgedSpan.HasValue;
+
+		// F3 .Aged, resume plane. A parked match survives a run boundary only if the next run
+		// re-reads the events that built it. Coverage already gets that from the closed-frontier
+		// (UseClosedFrontierResume). Outside coverage the resume cursor is the per-seek scalar
+		// checkpoint, which is written by whichever match FIRES — so a match that fires later in
+		// the pass can push the cursor past the anchor of a match still parked, and that parked
+		// match is then lost for good. The fix is not to replace that cursor (it is more
+		// conservative than the frontier for incomplete trajectories, which the frontier does not
+		// track outside coverage) but to CLAMP it: the persisted frontier is (oldest parked
+		// anchor - 1) and the scalar cursor may never resume past it. Re-reading more is
+		// idempotent — the elision commits by membership — so the clamp is safe in both
+		// directions. Disabled under Shadow/SkipPreview, which never touches the checkpoint.
+		private bool UseParkedFrontierClamp => HasAgedClosingSeek
+			&& !IsCoverageElide
+			&& !actorHandler.SkipPreviewEnabled;
+
 		internal int MaxDepth
 		{
 			get
@@ -826,6 +891,16 @@ namespace Puppeteer.EventSourcing.Follower
 			// This is the single chokepoint (invoked by both Reactions.Execute and the
 			// Cued/Continuous path), so a replicated fan-out does not re-fire on the
 			// wrong node.
+			// Re-entrancy contract (ActorHandler.GuardAgainstNestedPerform): no perform may
+			// nest a Reaction. Being the single chokepoint, this one call covers every path an
+			// author can reach — Reactions.Execute, its relocated twin, and a direct
+			// Reaction.Execute. The legal drivers arrive holding no lock (Cue on its own
+			// thread, Job from outside any perform), so only a Reaction driven from inside a
+			// perform is refused. It is checked BEFORE the activation gate: the shape is
+			// forbidden whatever this node's role is, and a refusal must not depend on whether
+			// the Reaction would have run here.
+			actorHandler.GuardAgainstNestedReaction(this.Name);
+
 			if (!ActivationAllowsRole(activation, actorHandler.IsActingAsDirector))
 				return;
 
@@ -857,6 +932,9 @@ namespace Puppeteer.EventSourcing.Follower
 
 			// (c) Quantifiers are mandatory on a multi-seek reaction (see ValidateQuantifiersPresent).
 			ValidateQuantifiersPresent();
+
+			// F3 .Aged: the settling gate belongs to the closing seek (see ValidateAgedOnClosingSeek).
+			ValidateAgedOnClosingSeek();
 
 			var diaryStorage = DiaryStorage;
 
@@ -945,6 +1023,18 @@ namespace Puppeteer.EventSourcing.Follower
 				// at the frontier, without re-reading. In any other case (local Job/Cue, or empty snapshot) the
 				// window [closed, high-water] is re-read; closedFrontier=0 on the first Execute => genesis.
 				afterEntryId = restoredFromSnapshot ? highWater : closedFrontier;
+			}
+			else if (UseParkedFrontierClamp && reactionId > 0)
+			{
+				// F3 .Aged outside coverage: clamp the scalar resume cursor so it never starts past
+				// the anchor of a match left parked by the previous run (see UseParkedFrontierClamp).
+				// highWater == 0 means no run has ever persisted a frontier, so there is nothing to
+				// clamp against and the scalar cursor stands on its own.
+				var (highWater, parkedFrontier) = diaryStorage.GetReactionFrontier(reactionId);
+				if (highWater > 0 && parkedFrontier < afterEntryId)
+				{
+					afterEntryId = parkedFrontier;
+				}
 			}
 
 			// PHASE 5: register a Temporal instance as the global 'time' in the table.
@@ -1088,6 +1178,18 @@ namespace Puppeteer.EventSourcing.Follower
 					diaryStorage.SaveReactionMatchSnapshot(reactionId, CoverageSnapshotCodec.Encode(openMatches));
 				}
 			}
+			else if (UseParkedFrontierClamp && reactionId > 0)
+			{
+				// F3 .Aged outside coverage: persist (oldest parked anchor - 1) as the ceiling the
+				// scalar resume cursor may not cross. NO monotonic clamp here — unlike the coverage
+				// frontier this value is not itself the cursor but a bound on one, and a later run
+				// that parks an OLDER anchor must be able to lower it. Over-lowering only re-reads.
+				var (prevHighWater, _) = diaryStorage.GetReactionFrontier(reactionId);
+				long scanned = lastProcessedEntryId > 0 ? lastProcessedEntryId : 0;
+				long highWater = Math.Max(prevHighWater, scanned);
+
+				diaryStorage.SaveReactionFrontier(reactionId, highWater, matchTree.ComputeClosedFrontier(highWater));
+			}
 
 			// Step 9: clean up resources (incomplete nodes, pools, etc.).
 			matchTree.Clear();
@@ -1172,6 +1274,28 @@ namespace Puppeteer.EventSourcing.Follower
 		// action is not an Outbox emit.
 		private string outboxDestination;
 		private string outboxPayloadTemplate;
+
+		// Ephemeral push destination OF THIS REACTION (Paper 9 / OutputTarget). Null =
+		// use the actor's default sink (ActorHandler.OutputTarget) — today's behavior.
+		//
+		// Why per-reaction and not only per-actor: a Performance wrapper built with the
+		// N-projection ctor SHARES the actor, the hook and therefore the handler, so two
+		// wrappers cannot hold two default sinks — the second assignment silently replaced
+		// the first. But the thing that has to be routed is the PROJECTION, and a
+		// projection IS a Reaction (its name is already the discriminator carried on every
+		// PushDocument). So the sink belongs here, and the wrapper is just who declares it.
+		private IOutputSink outputSink;
+		private IOutputFormatter outputSinkFormatter;
+
+		// Set by the declaring scope (Choreography's PerformanceV2.Reactions facade) so a
+		// reaction declared through a projection wrapper pushes to THAT wrapper's sink.
+		// Reactions declared directly on actor.Reactions keep both null and fall back to
+		// the actor's default sink.
+		internal void SetOutputTarget(IOutputSink sink, IOutputFormatter format)
+		{
+			this.outputSink = sink;
+			this.outputSinkFormatter = sink == null ? null : (format ?? new ToonFormatter());
+		}
 
 		// Plane terminator helpers — invoked by the Plane types when the
 		// developer calls `.Program.Emit(...)` / `.Causation.Continue(...)`
@@ -1388,7 +1512,16 @@ namespace Puppeteer.EventSourcing.Follower
 					}
 				}
 
-				string emitted = actorHandler.PerformEmit(this.scriptForCmd, parameters);
+				// Effective push destination: this reaction's own sink when the declaring
+				// scope installed one (a projection wrapper), otherwise the actor's default.
+				// Resolved BEFORE the emit because PerformEmit only captures the projection
+				// document when there is somewhere to push it.
+				IOutputSink sink = this.outputSink ?? actorHandler.OutputTarget;
+				IOutputFormatter sinkFormat = this.outputSink != null
+					? this.outputSinkFormatter
+					: actorHandler.OutputTargetFormatter;
+
+				string emitted = actorHandler.PerformEmit(this.scriptForCmd, parameters, sink, sinkFormat);
 
 				// Push channel (Paper 9 / OutputTarget): if a sink is configured and
 				// the projection is non-empty, deliver it. This is the EPHEMERAL
@@ -1400,7 +1533,6 @@ namespace Puppeteer.EventSourcing.Follower
 				// keys. The sink receives the immutable document only — never the
 				// pooled Output buffer. PerformEmit already released the read lock, so
 				// this hand-off does not stall other readers.
-				IOutputSink sink = actorHandler.OutputTarget;
 				if (sink != null && !string.IsNullOrEmpty(emitted))
 				{
 					var push = new PushDocument(emitted, this.name, triggeringEntryId, occurredAt, SnapshotBindings(matchedParameters));
@@ -1767,7 +1899,7 @@ namespace Puppeteer.EventSourcing.Follower
 				return null;
 			}
 
-			var args = new Parameters(entry.Program.Parameters.ParametersAsString(), actorHandler.Libraries);
+			var args = new Parameters(entry.Program.Parameters.ParametersAsString());
 			try
 			{
 				args.LoadArguments(actionData.Arguments);
@@ -1890,12 +2022,7 @@ namespace Puppeteer.EventSourcing.Follower
 				// and build real Parameters for IN/INOUT/EVAL from actionData.Arguments.
 				var cacheParameters = entry.Program.Parameters;
 
-				// Re-parse WITH the actor's domain type resolver so a parameter typed as a
-				// domain enum (e.g. `channel:SaleChannel`) resolves instead of throwing
-				// "not a valid primitive or known domain enum". Without the resolver the
-				// string-round-trip only accepts primitives, so ANY reaction observing an
-				// action that carries an enum parameter failed to resolve (in push AND batch).
-				var eventParameters = new Parameters(cacheParameters.ParametersAsString(), actorHandler.Libraries);
+				var eventParameters = new Parameters(cacheParameters.ParametersAsString());
 
 				// (b) read-only-reuse: value deserialization is NON-FATAL for the reaction's
 				// matching. Observed values come from the invocation channel

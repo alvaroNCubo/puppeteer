@@ -125,11 +125,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		// object — the data that travels to the receiver. Reactions never compute: a
 		// captured `@token` arg is a parameter reference whose value was matched from
 		// the journal and is already present (and already serialized) in the program's
-		// live Parameters, so it is read BY NAME. A literal arg evaluates directly and
-		// is typed from its runtime value. Values are serialized in order via
-		// ArgumentsAsString; the parameter names/types never travel (the receiver
-		// applies them positionally to the command it already holds). Returns null
-		// when the message carries no payload.
+		// live Parameters, so it is read BY NAME from that source. A literal arg
+		// evaluates directly and is typed from its runtime value. Values are serialized
+		// in order via ArgumentsAsString; the parameter names/types never travel (the
+		// receiver applies them positionally to the command it already holds). Returns
+		// null when the message carries no payload.
 		private protected Parameters CollectWithValues(AstExpression[] withArgs)
 		{
 			if (withArgs == null || withArgs.Length == 0) return null;
@@ -139,20 +139,33 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			for (int i = 0; i < withArgs.Length; i++)
 			{
 				AstExpression arg = withArgs[i];
+				collected ??= new Parameters();
+				string slot = PositionalSlotName(i);
 				if (arg is Id id && source != null && source.ContainsParameter(id.Name))
 				{
 					Parameter p = source[id.Name];
-					collected ??= new Parameters();
-					collected[p.Name, p.ParameterType] = p.GetValue();
+					collected[slot, p.ParameterType] = p.GetValue();
 					continue;
 				}
 
 				object value = arg.Execute();
-				collected ??= new Parameters();
-				string name = "arg" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
-				collected[name, value?.GetType() ?? typeof(object)] = value;
+				collected[slot, value?.GetType() ?? typeof(object)] = value;
 			}
 			return collected;
+		}
+
+		// The name of the payload slot at <position>. The `with` payload is a POSITIONAL
+		// list, so the slot is named by its position and by NOTHING else.
+		//
+		// A Parameters set is keyed BY NAME and overwrites the slot when the name repeats.
+		// Naming a captured slot after the capture therefore made the payload name-keyed,
+		// which loses a POSITION whenever two `with` arguments resolve to the same name:
+		// one value fewer crosses, and every position after the collision shifts by one.
+		// It fails silently in both directions — the arity the hearer expects is the
+		// hearer's own declaration, and nothing on the sending side compares the two.
+		private protected static string PositionalSlotName(int position)
+		{
+			return "arg" + position.ToString(CultureInfo.InvariantCulture);
 		}
 
 		// Resolve a `with` argument to its runtime VALUE without requiring the arg to

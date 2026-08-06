@@ -806,25 +806,44 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 	}
 
-	// Expose: expose expression alias;
-	// Represents a pattern that matches 'expose' statements in the script.
-	// Examples:
-	//   expose _:int total;      → match alias "total" with type int.
-	//   expose 100 total;        → match alias "total" with literal value 100.
-	//   expose _ total;          → match any value at alias "total".
-	//   expose $x total;         → capture the alias "total" value into $x (Step 13).
-	internal class ExposeNode : ExpressionNode
+	// One <expression> <alias> pair of an 'expose' pattern.
+	internal class ExposePairNode
 	{
 		internal ParameterNode Expression { get; }
 		internal string Alias { get; }
 
-		internal ExposeNode(ParameterNode expression, string alias)
+		internal ExposePairNode(ParameterNode expression, string alias)
 		{
 			ArgumentNullException.ThrowIfNull(expression);
 			ArgumentNullException.ThrowIfNull(alias);
 
 			Expression = expression;
 			Alias = alias;
+		}
+	}
+
+	// Expose: expose expression alias [, expression alias]*;
+	// Represents a pattern that matches 'expose' statements in the script. The statement
+	// side of the grammar publishes a comma list of pairs in a single 'expose', so the
+	// pattern side carries the same list. Every pair is a conjunct: the node matches only
+	// when each alias it names is present in the entry's exposed data and each expression
+	// matches the value found there.
+	// Examples:
+	//   expose _:int total;      → match alias "total" with type int.
+	//   expose 100 total;        → match alias "total" with literal value 100.
+	//   expose _ total;          → match any value at alias "total".
+	//   expose $x total;         → capture the alias "total" value into $x (Step 13).
+	//   expose $x total, $y tax; → capture both aliases, both required.
+	internal class ExposeNode : ExpressionNode
+	{
+		internal IReadOnlyList<ExposePairNode> Pairs { get; }
+
+		internal ExposeNode(IReadOnlyList<ExposePairNode> pairs)
+		{
+			ArgumentNullException.ThrowIfNull(pairs);
+			if (pairs.Count == 0) throw new ArgumentException("An 'expose' pattern needs at least one expression/alias pair.", nameof(pairs));
+
+			Pairs = pairs;
 		}
 	}
 

@@ -122,11 +122,16 @@ namespace Puppeteer
 				_playbill, _playbillSchemaName, _playbillValues);
 		}
 
-		// Bind the ordered payload values carried by a received tell (envelope.Values)
-		// into this command, reusing the pool. The source holds the values; this copies
-		// value by value into the rented set — no new allocation beyond the pooled
-		// instance, and no parameter declarations re-derived from the script. A Dispatch
-		// handler writes: receiver.Using("sink.Apply(@token);").WithParameters(env.Values).PerformCommand();
+		// Bind a caller-supplied set of values into this command, reusing the pool. The
+		// source holds the values; this copies value by value into the rented set — no new
+		// allocation beyond the pooled instance, and no parameter declarations re-derived
+		// from the script.
+		//
+		// The copy is BY NAME, so the source's parameter names must be the ones the script
+		// references. A received tell's payload does NOT satisfy that: it is positional and
+		// carries no names of its own (the hearer owns the signature). To apply a carried
+		// payload, declare the hearer's own signature and load the ordered values into it
+		// first — the round-trip ToldMapping.BuildValues performs — then pass THAT set here.
 		//
 		// source is also retained as the write-back target: because the operation runs
 		// against the pooled COPY, any Out/InOut result computed by the script would

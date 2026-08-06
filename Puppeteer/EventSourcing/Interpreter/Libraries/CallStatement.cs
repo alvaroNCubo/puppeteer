@@ -40,12 +40,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			expression.PreparePatternMatching(patternAst, ref position);
 		}
 
-		// B.3.1: include the call expression so method name + arg shape propagate.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(CallStatement));
-			expression.AccumulatePromotionCandidateHash(ref hc);
-		}
 
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{

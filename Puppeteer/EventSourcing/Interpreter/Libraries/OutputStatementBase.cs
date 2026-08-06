@@ -38,6 +38,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			}
 		}
 
+
 		internal override Expression ExecuteExpression(ParameterExpression parametersParam, ParameterExpression outputParam)
 		{
 			var expressions = new List<Expression>();
@@ -184,16 +185,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			{
 				return CreateAppendExpressionForGenericCollection(result, resultType, outputParam);
 			}
-			else if (
-				resultType != typeof(string) &&
-				typeof(object).IsAssignableFrom(resultType) &&
-				resultType.IsClass &&
-				!resultType.IsArray &&
-				typeof(System.Collections.IEnumerable).IsAssignableFrom(resultType)
-			)
-			{
-				return CreateAppendExpressionForEnumerableClass(result, resultType, outputParam);
-			}
 			else
 			{
 				return CreateAppendExpressionForType(result, resultType, outputParam);
@@ -252,25 +243,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 					outputAppendMethod,
 					Expression.Call(AsSpanMethod, Expression.Constant(alias)),
 					castedCollection
-				)
-			);
-		}
-
-		private Expression CreateAppendExpressionForEnumerableClass(Expression result, Type resultType, ParameterExpression outputParam)
-		{
-			result = Expression.Condition(
-				Expression.Equal(result, Expression.Constant(null, resultType)),
-				Expression.Constant(string.Empty),
-				Expression.Call(result, resultType.GetMethod("ToString", Type.EmptyTypes))
-			);
-
-			return Expression.IfThen(
-				Expression.Property(outputParam, EstaEscribiendoProperty),
-				Expression.Call(
-					outputParam,
-					AppendStringMethod,
-					Expression.Call(AsSpanMethod, Expression.Constant(alias)),
-					result
 				)
 			);
 		}
@@ -340,7 +312,24 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		internal override void ValidateStatically()
 		{
 			expression.ValidateStatically();
+			RefuseMaterial();
 		}
+
+		// The output plane emits values, and the projection over the material is the
+		// actor's to author. An emitted expression whose static type is known to be
+		// material has no rendering the framework could produce without asking the
+		// object to render itself, so it is refused here -- at authoring time, the
+		// same way a non-boolean condition is refused. A type the static pass cannot
+		// decide (object) is left to the sink guard, which sees the runtime type.
+		private void RefuseMaterial()
+		{
+			Type emitted = expression.ComputeType();
+			if (ProjectionLeaf.IsMaterial(emitted))
+			{
+				throw ProjectionLeaf.MaterialCannotBeProjected(GetCommandName(), alias, emitted);
+			}
+		}
+
 
 		internal override void PreparePatternMatching(PatternListNode patternAst, ref int position)
 		{

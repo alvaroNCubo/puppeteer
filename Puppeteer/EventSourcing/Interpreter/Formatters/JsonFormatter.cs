@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
-using System.Reflection;
 using System.Text;
 
 namespace Puppeteer.EventSourcing.Interpreter.Formatters
@@ -428,17 +426,14 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 				}
 				else
 				{
-					MethodInfo possiblePrint = value.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-					if (possiblePrint != null)
-					{
-						StringBuilder outputTemp = new StringBuilder();
-						possiblePrint.Invoke(value, new object[] { outputTemp });
-						sink.Append(outputTemp.ToString());
-					}
-					else
-					{
-						sink.Append(value.ToString());
-					}
+					// A sequence of unknown element type: each element is decided
+					// here, on its runtime type. A leaf without a branch of its own
+					// (long, char, an enum) renders as itself; material does not
+					// render at all -- the sink emits values, and a rendering of the
+					// material would be the material authoring the projection.
+					Type elementType = value.GetType();
+					if (!ProjectionLeaf.IsLeaf(elementType)) throw ProjectionLeaf.MaterialReachedTheSink(elementType);
+					sink.Append(value.ToString());
 				}
 				needsCommaArr = true;
 			}
@@ -543,17 +538,11 @@ namespace Puppeteer.EventSourcing.Interpreter.Formatters
 			}
 			else
 			{
-				MethodInfo possiblePrint = values.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(x => x.Name.ToLower() == "print" && x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType == typeof(StringBuilder));
-				if (possiblePrint != null)
-				{
-					StringBuilder outputTemp = new StringBuilder();
-					possiblePrint.Invoke(values, new object[] { outputTemp });
-					WritePairExp(name, outputTemp.ToString());
-				}
-				else
-				{
-					WritePairExp(name, values);
-				}
+				// The static pass could not decide this value's type, so the refusal
+				// lands here instead: the sink emits values, never material. A leaf
+				// without a branch of its own (long, char) renders as itself.
+				if (!ProjectionLeaf.IsLeaf(type)) throw ProjectionLeaf.MaterialReachedTheSink(type);
+				WritePairExp(name, values);
 			}
 		}
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Choreography.Dispatch;
@@ -24,6 +25,18 @@ namespace Choreography.Theater
         // via .Transpiler(...) to expose a different authoring notation over the
         // same shared actor/journal.
         private INotationTranspiler transpilerPrototype = IdentityTranspiler.Instance;
+
+        // True when this instance came from the N-projection ctor, i.e. it is a second
+        // FACE over an actor someone else owns. It decides what OutputTarget means here:
+        // the owner sets the actor's default sink, a wrapper only sets the destination of
+        // the projections declared through IT (see OutputTarget / Reactions below).
+        private readonly bool isProjectionWrapper;
+
+        // Push destination of THIS face. Handed to every Reaction declared through this
+        // instance's Reactions facade. Null = this face declares nothing of its own and
+        // its reactions fall back to the actor's default sink.
+        private IOutputSink outputSink;
+        private IOutputFormatter outputSinkFormat;
 
         // Playbill state — lazily constructed when .Playbill(name, builder) is
         // called for the first time. Auto-provision: backend creates its tables/
@@ -82,6 +95,7 @@ namespace Choreography.Theater
             actorV2 = source.actorV2;
             hook = source.hook;
             ActorInstance = source.ActorInstance;
+            isProjectionWrapper = true;
             // formatterPrototype starts null; caller can override with .Formatter()
         }
 
@@ -383,10 +397,89 @@ namespace Choreography.Theater
         // revert to pull-only. Ephemeral channel; durable delivery is the
         // Outbox Reaction plane. The sink receives the immutable document
         // string, never the engine's pooled buffer.
+        // A projection wrapper (the N-projection ctor) SHARES the actor's handler, so it
+        // cannot hold a second default sink: assigning one would silently replace the
+        // owner's. What it can own is the destination of the projections declared through
+        // its own Reactions facade, which is what the readable form actually means:
+        //
+        //     PerformanceV2 cashier          = new PerformanceV2(...);
+        //     PerformanceV2 cashierFragments = new PerformanceV2(cashier);
+        //     cashier.OutputTarget(X);            // the actor's default
+        //     cashierFragments.OutputTarget(Y);   // only ITS projections
+        //     cashier.Reactions.DefineReaction("MovementProjection")...     // pushes to X
+        //     cashierFragments.Reactions.DefineReaction("AuthFragments")... // pushes to Y
+        //
+        // So: the owner keeps setting the actor's default (unchanged behavior for every
+        // existing caller), a wrapper records only its own. Reactions declared directly on
+        // actor.Reactions always use the default.
         public PerformanceV2 OutputTarget(IOutputSink transport, IOutputFormatter format = null)
         {
-            hook.SetOutputTarget(transport, format);
+            outputSink = transport;
+            outputSinkFormat = transport == null ? null : (format ?? new ToonFormatter());
+
+            if (!isProjectionWrapper) hook.SetOutputTarget(transport, format);
+
+            // Late assignment: projections this face already declared adopt the new sink,
+            // so OutputTarget and DefineReaction can be written in either order.
+            foreach (Reaction declared in DeclaredReactions())
+            {
+                declared.SetOutputTarget(outputSink, outputSinkFormat);
+            }
             return this;
+        }
+
+        // ── Reactions with the scope of this face (Paper 9 substrate) ──────
+
+        // Declare projections that belong to THIS face. Same actor, same journal, same
+        // reaction collection as actor.Reactions — the only thing the facade adds is
+        // WHERE the projection is pushed: the sink of this Performance, not the actor's
+        // single default. A projection IS a reaction (its name is already the
+        // discriminator on every PushDocument), so the reaction is the right thing to
+        // route, and this face is who says where.
+        public ScopedReactions Reactions => new ScopedReactions(this);
+
+        // Names declared through this face. Only the NAME is recorded, because the
+        // Reaction itself is not created until the leaf activation verb runs, several
+        // links down the fluent chain — and a chain the caller never finished must not
+        // leave a half-registered reaction behind. Resolved against the actor's single
+        // reaction collection on demand.
+        private readonly List<string> scopedReactionNames = new List<string>();
+
+        private IEnumerable<Reaction> DeclaredReactions()
+        {
+            foreach (string declaredName in scopedReactionNames)
+            {
+                foreach (Reaction candidate in actorV2.Reactions)
+                {
+                    if (string.Equals(candidate.Name, declaredName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        yield return candidate;
+                        break;
+                    }
+                }
+            }
+        }
+
+        public sealed class ScopedReactions
+        {
+            private readonly PerformanceV2 face;
+
+            internal ScopedReactions(PerformanceV2 face)
+            {
+                this.face = face;
+            }
+
+            public ReactionModeBuilder DefineReaction(string name)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(name);
+                ReactionModeBuilder builder = face.actorV2.Reactions.DefineReaction(name, face.outputSink, face.outputSinkFormat);
+                face.scopedReactionNames.Add(name);
+                return builder;
+            }
+
+            // The projections this face owns, so the caller can inspect them (and so a
+            // later OutputTarget knows which ones to re-bind).
+            public IEnumerable<Reaction> Declared => face.DeclaredReactions();
         }
 
         // ── Dispatch / Saga (existing) ─────────────────────────────────────

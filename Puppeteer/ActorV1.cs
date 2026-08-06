@@ -72,18 +72,5 @@ namespace Puppeteer
 			return base.Handler.ComandForDairy(script, arguments);
 		}
 
-		// B.3.4: configure automatic Script → Action promotion threshold.
-		// V1 endpoints write Script-shaped text; once a candidate has been
-		// observed N times (per the threshold) it is materialized into an
-		// equivalent V2 Action, and subsequent live writes are journaled as
-		// Invocation rows rather than Script rows. Default threshold is 30;
-		// pass a lower value to promote sooner during ramp-up testing or a
-		// higher one to keep recurrent endpoints as Scripts for longer.
-		// Threshold must be >= 1.
-		public void InternalAutomaticPromotion(int threshold)
-		{
-			base.Handler.SetPromotionCandidateThreshold(threshold);
-		}
-
 	}
 }

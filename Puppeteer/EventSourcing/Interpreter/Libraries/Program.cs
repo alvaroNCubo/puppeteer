@@ -434,7 +434,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			var referencedParamsAndGlobalVarDeclationsExp = new List<ParameterExpression>();
 			foreach (Parameter referencedParameter in referencedParams)
 			{
-				referencedParamsAndGlobalVarDeclationsExp.Add(referencedParameter.ParameterDeclarationExpression());
+				referencedParamsAndGlobalVarDeclationsExp.Add(referencedParameter.ParameterDeclarationExpression(parametersParam));
 				cmds.Add(referencedParameter.ParameterInitializationExpression());
 			}
 
@@ -447,9 +447,8 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				// DIRECT top-level local needs its VariableSymbol storage declared and
 				// initialized in this lambda's block — mirroring BlockStatement.
 				if (source is NewInstanceStatement topLevelAssignment
-					&& topLevelAssignment.LValue is Id lValueId
-					&& lValueId.IsLocalVariable
-					&& lValueId.IsOriginalLValueDeclaration)
+					&& topLevelAssignment.TryGetDeclaredVariable(out Id lValueId)
+					&& lValueId.IsLocalVariable)
 				{
 					cmds.Add(topLevelAssignment.AllocateLocalStorageExpression(parametersParam));
 					ParameterExpression localStorage = (ParameterExpression)topLevelAssignment.LocalStorageExpression;
@@ -605,7 +604,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             {
                 if (argument.ParameterModifier == Parameter.Eval)
                 {
-                    var resultEval = EvaluateEvalParameters(argument);
+                    var resultEval = EvaluateEvalParameters(argument, arguments);
                     argument.Value = resultEval;
                 }
             }
@@ -613,6 +612,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 
 		private Dictionary<string, (string EvalScript, Func<Parameters, Output, string> Executable)> _executableEvalParameter = new Dictionary<string, (string, Func<Parameters, Output, string>)>();
+
+		// `this.parameters` is used here for the SHAPE only — the slot names and declared types the
+		// sub-program resolves against. Which INSTANCE it reads and writes is decided per call, by
+		// the Parameters handed to the compiled delegate; see EvaluateEvalParameters.
 		private Program CreateEvalProgram(Parameter parameter)
 		{
 			Parser parser = new Parser(this.libraries, this.symbolTable);
@@ -627,8 +630,26 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			return evalProgram;
 		}
 
-		private object EvaluateEvalParameters(Parameter parameter)
+		// The eval sub-program is a `<name> = (<type>)(<expression>);` assignment INTO the parameter
+		// slot: running it IS how the value is computed, and reading that slot back is how it is
+		// retrieved. Both halves therefore have to name the SAME instance, and it must be the
+		// CALLER's set — the one the body binds its parameters from and the one ArgumentsAsString
+		// journals. So the compiled sub-program is executed against `arguments`, never against
+		// `this.parameters`.
+		//
+		// `this.parameters` is the caller's set only while the Program has not compiled yet
+		// (LoadArguments rebinds it under exactly that condition). A rehydrated Action is compiled
+		// while REPLAYING its journaled invocations, so from the first live invocation onward
+		// `this.parameters` is the Action's own header-built set and `arguments` is the caller's —
+		// two different instances, permanently. Executing against the former deposited the
+		// computed value there while the caller's slot stayed null: the body bound default(T) and
+		// the invocation was journaled with the '?' null marker in a non-nullable slot, a row the
+		// reader cannot accept and which permissive rehydration then drops from rebuilt state. A
+		// sibling parameter READ by the expression came from that stale set for the same reason.
+		private object EvaluateEvalParameters(Parameter parameter, Parameters arguments)
 		{
+			ArgumentNullException.ThrowIfNull(arguments);
+
 			var evalScript = parameter.EvalScript;
 			if (!_executableEvalParameter.TryGetValue(parameter.Name, out var evalParameterCacheEntry) || evalParameterCacheEntry.EvalScript != evalScript)
 			{
@@ -642,7 +663,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				parameter.Program.idParameters = null;
 			}
 			var output = Output.RentWithoutOutput();
-			evalParameterCacheEntry.Executable(this.parameters, output);
+			evalParameterCacheEntry.Executable(arguments, output);
 			Output.Return(output);
 
 			return parameter.GetValue();
@@ -702,38 +723,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
                 source.PreparePatternMatching(patternAst, ref position);
             }
         }
-
-		// B.3.1: promotion-candidate structural hash override. Walks the
-		// top-level statements to mix their contributions; descendant
-		// Statement/Expression subclasses override AccumulatePromotionCandidateHash
-		// to propagate structure while holding literal values blind. Cached
-		// on first read since the AST is treated as immutable post-parse.
-		internal override void AccumulatePromotionCandidateHash(ref HashCode hc)
-		{
-			hc.Add(nameof(Program));
-			hc.Add(statements.Count);
-			foreach (Statement source in statements)
-			{
-				source.AccumulatePromotionCandidateHash(ref hc);
-			}
-		}
-
-		private int promotionCandidateHash;
-		private bool promotionCandidateHashComputed;
-		internal int PromotionCandidateHash
-		{
-			get
-			{
-				if (!promotionCandidateHashComputed)
-				{
-					HashCode hc = new HashCode();
-					AccumulatePromotionCandidateHash(ref hc);
-					promotionCandidateHash = hc.ToHashCode();
-					promotionCandidateHashComputed = true;
-				}
-				return promotionCandidateHash;
-			}
-		}
 
         internal PatternMatcher CreatePatternMatcher(ActorHandler.ConcurrentParametersPool parametersPool)
         {

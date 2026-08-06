@@ -92,19 +92,96 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 			// ForEachRawRecord like any other entry — the ReplicateRecord dispatch
 			// below decodes them and routes to WriteDefineEntry on the remote.
 
+			// The watermark is a hint, not the authority on what the canonical store holds:
+			// the remote write commits BEFORE the watermark reaches disk, so every
+			// interruption in that window leaves the watermark behind records already
+			// committed remotely. Replaying below the canonical store's own head re-sends
+			// them, which is fatal where the entry id is a primary key (the throw escapes
+			// the Diary constructor, so the actor never rehydrates) and silent divergence
+			// where it is not (the duplicates are accepted and the replay applies the same
+			// journaled invocations twice). Heal the watermark up to the head first, so a
+			// lagging watermark costs nothing on this boot and none of the following ones.
+			//
+			// Scope of the rule: it recognizes the canonical store as holding a PREFIX of
+			// the local journal, which is what in-order replication produces. A canonical
+			// journal mutated out of band (rows removed below its head) is not reconstructed
+			// by the replay — recovering that is an operator decision, not a replay one.
+			long canonicalHead = remoteStore.LastJournaledEntryId();
+			if (lastReplicated < canonicalHead)
+			{
+				lastReplicated = canonicalHead;
+				progress.LastReplicatedEntryId = canonicalHead;
+				progress.Save();
+			}
+
+			int replayed = 0;
+
 			localStore.ForEachRawRecord(lastReplicated, (entryId, rawRecord) =>
 			{
-				ReplicateRecord(entryId, rawRecord);
+				try
+				{
+					ReplicateRecord(entryId, rawRecord);
+				}
+				catch
+				{
+					// Persist the records the canonical store did accept before letting the
+					// failure out. Without this the throw discards the progress of the whole
+					// prefix, the next start replays it from the same watermark and fails
+					// identically: the failure suppresses exactly the progress that would
+					// avoid it, turning a transient rejection into an actor that never boots.
+					// Best effort on purpose: a watermark that cannot be written must not
+					// replace the rejection the caller needs to see.
+					SaveProgressBestEffort();
+					throw;
+				}
+
 				progress.LastReplicatedEntryId = entryId;
+				if (++replayed % PERSIST_PROGRESS_INTERVAL == 0) progress.Save();
 			});
 
 			progress.Save();
 		}
 
+		// Nothing may escape this method: it is the body of a thread, and an unhandled exception
+		// on a thread terminates the process. Losing replication is a degradation the design
+		// already covers — the local journal holds every record and the next start replays what
+		// did not reach the canonical store — while taking the host down with it is not. The
+		// path that made this concrete was persisting the watermark: replacing that file can
+		// fail for reasons that belong to the filesystem, not to the journal (another handle on
+		// it, no space, no permission), and it did abort the process.
 		private void ReplicationLoop()
+		{
+			try
+			{
+				DrainUntilStopped();
+			}
+			catch (Exception ex)
+			{
+				remoteStore.Logger.Error($"ReplicationAgent loop ended on an unexpected error: {ex.Message}", ex);
+				System.Threading.Interlocked.Increment(ref _replicationFailureCount);
+				_lastReplicationError = ex.Message;
+			}
+
+			try
+			{
+				FlushRemaining();
+			}
+			catch (Exception ex)
+			{
+				remoteStore.Logger.Error($"ReplicationAgent flush ended on an unexpected error: {ex.Message}", ex);
+			}
+		}
+
+		private void DrainUntilStopped()
 		{
 			while (!stopping)
 			{
+				// Arm the signal BEFORE draining. Resetting it after the drain discarded an
+				// EnqueueRecord that arrived while the drain was running, so that record sat
+				// in the queue for a whole retry delay although it had been signalled — and
+				// the watermark stayed that far behind for the same span.
+				signal.Reset();
+
 				int batch = 0;
 				try
 				{
@@ -121,11 +198,17 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 						ReplicateRecord(item.entryId, item.record);
 						pendingRecords.TryDequeue(out _);
 						progress.LastReplicatedEntryId = item.entryId;
-						if (++batch % PERSIST_PROGRESS_INTERVAL == 0) progress.Save();
+						if (++batch % PERSIST_PROGRESS_INTERVAL == 0) SaveProgressBestEffort();
 					}
 				}
 				catch (Exception ex)
 				{
+					// `continue` skips the Save below, so persist here what this pass did
+					// deliver: the records the canonical store accepted before the rejection
+					// must not be replayed by the next start. Best effort — a watermark that
+					// cannot be written must not take the retry loop down with it.
+					if (batch > 0) SaveProgressBestEffort();
+
 					remoteStore.Logger.Error($"ReplicationAgent error: {ex.Message}", ex);
 					System.Threading.Interlocked.Increment(ref _replicationFailureCount);
 					_lastReplicationError = ex.Message;
@@ -133,16 +216,13 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					continue;
 				}
 
-				if (batch > 0) progress.Save();
+				if (batch > 0) SaveProgressBestEffort();
 
 				if (pendingRecords.IsEmpty)
 					drainComplete.Set();
 
-				signal.Reset();
 				signal.Wait(RETRY_DELAY_MS);
 			}
-
-			FlushRemaining();
 		}
 
 		// paper05-lab5 diagnostic: visible counters of replication failures so the
@@ -213,11 +293,33 @@ namespace Puppeteer.EventSourcing.DB.FileSystem
 					pendingRecords.TryDequeue(out _);
 					progress.LastReplicatedEntryId = item.entryId;
 				}
-				progress.Save();
 			}
 			catch (Exception ex)
 			{
 				remoteStore.Logger.Error($"ReplicationAgent flush error: {ex.Message}", ex);
+			}
+
+			// Reached on both outcomes, where before it was the last statement inside the
+			// try: a rejection half-way through the flush skipped the Save entirely, so the
+			// records the canonical store had already accepted were replayed by the next start.
+			SaveProgressBestEffort();
+		}
+
+		// Every Save that happens on the replication thread, and the one that keeps the
+		// progress of a failed replay, goes through here: persisting the watermark must never
+		// become the failure itself. The caller is either propagating another exception that
+		// must reach it intact, or running on a thread whose escape would take the process down.
+		// Losing the watermark only costs re-walking the local journal on the next start, which
+		// is now free of consequence because the replay is bounded by the canonical head.
+		private void SaveProgressBestEffort()
+		{
+			try
+			{
+				progress.Save();
+			}
+			catch (Exception ex)
+			{
+				remoteStore.Logger.Error($"ReplicationAgent could not persist the replication watermark: {ex.Message}", ex);
 			}
 		}
 

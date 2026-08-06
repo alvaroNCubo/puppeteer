@@ -16,7 +16,17 @@ namespace Puppeteer
 	{
 		internal readonly ActorHandler Handler;
 
-		public CompilationModePolicy CompiledModePolicy = CompilationModePolicy.Automatic;
+		// Delegates to the handler, which owns the policy: Actor faces that share a handler
+		// (the V1->V2 bridge) share the engine, so reading or writing through either face
+		// reaches the same value. Readable by hosts that want to report the mode; writable
+		// only inside the framework and its friend test assemblies, because choosing the
+		// engine by hand is a test affordance — production runs Automatic and lets the
+		// invocation path decide (V1 scripts interpreted, V2 parametric commands compiled).
+		public CompilationModePolicy CompiledModePolicy
+		{
+			get => Handler.CompiledModePolicy;
+			internal set => Handler.CompiledModePolicy = value;
+		}
 
 		protected internal Actor(string name)
 			: this(name, Array.Empty<Assembly>())

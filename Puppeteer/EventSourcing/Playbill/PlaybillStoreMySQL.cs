@@ -56,25 +56,40 @@ namespace Puppeteer.EventSourcing.Playbill
 					INDEX IX_PlaybillRecords_SchemaName (SchemaName)
 				) ENGINE=InnoDB CHARSET=utf8mb4;";
 
-			using (var connection = new MySqlConnection(ConnectionString))
+			// The connection is CONSTRUCTED inside the guarded block: the driver's
+			// connection-string builder validates while parsing, so a key the backend
+			// does not know throws before Open() is ever reached. Left outside, that
+			// throw escapes as a context-free driver exception on the provisioning
+			// path, naming neither the actor nor the Playbill. Provisioning failures
+			// report as LanguageException regardless of whether the string or the
+			// server was the problem.
+			try
 			{
-				try
+				using (var connection = new MySqlConnection(ConnectionString))
 				{
-					connection.Open();
-					using (var command = new MySqlCommand(sql, connection))
+					try
 					{
-						command.ExecuteNonQuery();
+						connection.Open();
+						using (var command = new MySqlCommand(sql, connection))
+						{
+							command.ExecuteNonQuery();
+						}
+					}
+					finally
+					{
+						connection.Close();
 					}
 				}
-				catch (MySqlException e)
-				{
-					Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
-					throw new LanguageException($"Failed to provision Playbill tables on MySQL for actor '{ActorName}': {e.Message}");
-				}
-				finally
-				{
-					connection.Close();
-				}
+			}
+			catch (MySqlException e)
+			{
+				Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
+				throw new LanguageException($"Failed to provision Playbill tables on MySQL for actor '{ActorName}': {e.Message}");
+			}
+			catch (ArgumentException e)
+			{
+				Logger.Error($"EnsureTables Playbill on actor '{ActorName}': {e.Message}", e);
+				throw new LanguageException($"Failed to provision Playbill tables on MySQL for actor '{ActorName}': the connection string was rejected while parsing: {e.Message}");
 			}
 		}
 

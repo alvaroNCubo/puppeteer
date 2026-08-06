@@ -50,16 +50,6 @@ namespace Choreography.Theater
             return this;
         }
 
-        // B.3.4: configure automatic Script → Action promotion threshold for
-        // legacy V1 endpoints hosted by this PerformanceV1. Delegates to the
-        // underlying ActorV1.InternalAutomaticPromotion; see ActorV1 for the
-        // mechanism rationale. Per Alvaro's signed shape "p.InternalAutomaticPromotion(5)".
-        public PerformanceV1 InternalAutomaticPromotion(int threshold)
-        {
-            GetActorV1().InternalAutomaticPromotion(threshold);
-            return this;
-        }
-
         // PerformanceV1 is the legacy actor surface; per sign-off 2026-05-19
         // it does NOT expose Formatter API and always emits JSON (the legacy
         // contract that EvalStatement V1 relies on for its {} slice mechanic).
