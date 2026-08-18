@@ -83,20 +83,85 @@ namespace Puppeteer
 			if (position != parameters.Length) throw new LanguageException("Parameter definition is not valid");
 		}
 
+		// The Eval script is the only field of a parameter declaration that carries arbitrary
+		// DSL text, and it is written verbatim into a list whose parameters are separated by
+		// ','. Delimiting it on the FIRST comma therefore truncated every script that contained
+		// one — any multi-argument call, `obj.Method(a, b)` — mid-expression: re-parsing then
+		// resumed where the next parameter's modifier was expected, met a non-letter and threw
+		// "Parameter name is not valid". The write path never re-parses what it emits, so the
+		// declaration was already durable by the time anyone noticed; the failure surfaced only
+		// in the readers (Reaction argument binding, transport deserialization), one whole
+		// replay pass at a time.
+		//
+		// A comma is a separator only where it is not part of the script's own syntax. An Eval
+		// script is a DSL statement, and a statement has no top-level comma: every comma it can
+		// contain is nested inside a call/index/block bracket or inside a string literal. So the
+		// field ends at the first comma seen at bracket depth zero and outside a literal, which
+		// delimits correctly WITHOUT changing the persisted format — declarations written before
+		// this fix (necessarily comma-free, or they could not be read back at all) still parse
+		// identically. Escapes follow the lexer: inside a literal a backslash consumes a
+		// following quote or backslash.
+		//
+		// Unbalanced brackets or an unterminated literal are rejected rather than tolerated: the
+		// scan would otherwise run to the end of the declaration and swallow every parameter
+		// that follows, dropping them silently instead of failing.
 		private ReadOnlySpan<char> EvalScript(string parameters, ref int position)
 		{
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(parameters);
 			if (position < 0) throw new ArgumentOutOfRangeException(nameof(position));
 
 			int initialPosition = position;
+			int bracketDepth = 0;
+			char literalQuote = '\0';
 			while (position < parameters.Length)
 			{
 				char currentChar = parameters[position];
-				if (currentChar == ',')
+
+				if (literalQuote != '\0')
+				{
+					if (currentChar == '\\')
+					{
+						position++;
+						if (position < parameters.Length && (parameters[position] == '\'' || parameters[position] == '\\')) position++;
+						continue;
+					}
+					if (currentChar == literalQuote) literalQuote = '\0';
+					position++;
+					continue;
+				}
+
+				if (currentChar == '\'' || currentChar == '"')
+				{
+					literalQuote = currentChar;
+					position++;
+					continue;
+				}
+
+				if (currentChar == '(' || currentChar == '[' || currentChar == '{')
+				{
+					bracketDepth++;
+					position++;
+					continue;
+				}
+
+				if (currentChar == ')' || currentChar == ']' || currentChar == '}')
+				{
+					bracketDepth--;
+					if (bracketDepth < 0) throw new LanguageException("Script Eval is not valid");
+					position++;
+					continue;
+				}
+
+				if (currentChar == ',' && bracketDepth == 0)
 				{
 					break;
 				}
 				position++;
+			}
+
+			if (bracketDepth != 0 || literalQuote != '\0')
+			{
+				throw new LanguageException("Script Eval is not valid");
 			}
 
 			if (initialPosition == position)
@@ -2219,7 +2284,7 @@ namespace Puppeteer
 		{
 			if (string.IsNullOrEmpty(serialized)) return null;
 
-			int separatorIndex = serialized.IndexOf('|');
+			int separatorIndex = TransportSeparatorIndex(serialized);
 			if (separatorIndex < 0) throw new LanguageException("Invalid transport format: missing separator '|'");
 
 			string declarations = serialized.Substring(0, separatorIndex);
@@ -2231,6 +2296,63 @@ namespace Puppeteer
 				parameters.LoadArguments(arguments);
 			}
 			return parameters;
+		}
+
+		// Index of the '|' that separates the declarations half from the arguments half, or -1.
+		//
+		// The declarations are written BEFORE the separator, so a '|' inside an argument VALUE is
+		// never at risk — it always sits past the split point. What is at risk is the Eval script
+		// inside the declarations, the one field carrying arbitrary DSL text: '||' is the logical
+		// OR, and a '|' can also appear inside a string literal. A plain IndexOf finds either one
+		// first and splits the blob mid-declaration, so the declarations no longer parse and the
+		// arguments are read against a truncated signature.
+		//
+		// A LONE '|' is not valid DSL — the lexer rejects it, demanding '||' — so the separator is
+		// unambiguous once the scan skips string literals and consumes '||' as a single token.
+		// Escapes follow the lexer: inside a literal a backslash consumes a following quote or
+		// backslash. The wire format is unchanged, so a blob whose declarations carry no '|' splits
+		// exactly where it did before and previously serialized payloads deserialize identically.
+		private static int TransportSeparatorIndex(string serialized)
+		{
+			int position = 0;
+			char literalQuote = '\0';
+			while (position < serialized.Length)
+			{
+				char currentChar = serialized[position];
+
+				if (literalQuote != '\0')
+				{
+					if (currentChar == '\\')
+					{
+						position++;
+						if (position < serialized.Length && (serialized[position] == '\'' || serialized[position] == '\\')) position++;
+						continue;
+					}
+					if (currentChar == literalQuote) literalQuote = '\0';
+					position++;
+					continue;
+				}
+
+				if (currentChar == '\'' || currentChar == '"')
+				{
+					literalQuote = currentChar;
+					position++;
+					continue;
+				}
+
+				if (currentChar == '|')
+				{
+					if (position + 1 < serialized.Length && serialized[position + 1] == '|')
+					{
+						position += 2;
+						continue;
+					}
+					return position;
+				}
+
+				position++;
+			}
+			return -1;
 		}
 
 		// Dense transport: serialize ONLY the argument values, dropping the
@@ -2277,7 +2399,11 @@ namespace Puppeteer
 				if (!string.Equals(thisParam.Name, otherParam.Name, StringComparison.OrdinalIgnoreCase))
 					return false;
 
-				if (thisParam.ParameterType != otherParam.ParameterType)
+				// Compared through the signature's own canonicalization: one side of this
+				// comparison is typically a live declaration and the other the set rebuilt from
+				// the persisted signature text, which does not encode WHICH admitted collection
+				// shape was declared. See Parameter.SignatureCanonicalType.
+				if (Parameter.SignatureCanonicalType(thisParam.ParameterType) != Parameter.SignatureCanonicalType(otherParam.ParameterType))
 					return false;
 
 				if (thisParam.ParameterModifier != otherParam.ParameterModifier)

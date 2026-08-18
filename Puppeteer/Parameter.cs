@@ -69,6 +69,49 @@ namespace Puppeteer
 			return underlyingType ?? type;
 		}
 
+		// The type a declaration is COMPARED by, as opposed to the type its slot STORES.
+		//
+		// The two cannot be the same function, because the persisted signature is deliberately
+		// canonical: Parameters.WriteParameterType writes EVERY admitted one-level collection —
+		// T[], IEnumerable<T> and List<T> alike — as the single text `T[]`, which re-parses to
+		// IEnumerable<T>. The declared shape is therefore not recoverable from the signature, and
+		// a declaration can only ever equal the one rebuilt from its own persisted text MODULO
+		// that collapse. Comparing the stored types by CLR identity instead asks the rebuilt
+		// declaration to carry a distinction the format does not encode: List<T> is written as
+		// `T[]`, read back as IEnumerable<T>, and then found unequal to itself. The consequences
+		// are silent by construction — the write path keeps journaling and replaying, while a
+		// follower resolving that Action's references reads a structural mismatch on EVERY
+		// invocation and a reaction observing it stops matching, and the Action's frozen
+		// signature stops accepting its own re-invocation after a rehydration.
+		//
+		// Which shape a slot STORES stays as declared, because unlike the persisted text it is
+		// not a lossy encoding of the author's choice: the declared type is what the body's
+		// static validation reads, and the admitted shapes are not interchangeable there (a
+		// List<T> supports the subscript operator, an IEnumerable<T> does not). Collapsing the
+		// storage would silently retract that from every author who declared the concrete shape.
+		// So the collapse lives HERE, at the comparison, which is the only place that must speak
+		// the format's vocabulary rather than the author's.
+		// Total over the whole admitted set, including the array shape a stored slot never holds
+		// (the ctor has already normalized it): the function must agree with the WRITER, which
+		// canonicalizes all three, not with what one caller happens to hand it.
+		internal static Type SignatureCanonicalType(Type parameterType)
+		{
+			ArgumentNullException.ThrowIfNull(parameterType);
+
+			if (parameterType.IsArray)
+				return typeof(IEnumerable<>).MakeGenericType(new[] { parameterType.GetElementType() });
+
+			// ONLY the admitted collection shape, and only when it IS one. Nullable<T> is a
+			// one-argument generic too and is not a collection (the ctor normalizes it away to
+			// its underlying type); any other generic is left alone so that a type the plane does
+			// not admit keeps failing at its declaration instead of the plane widening here by
+			// side effect.
+			if (parameterType.IsGenericType && parameterType.GetGenericTypeDefinition() == typeof(List<>))
+				return typeof(IEnumerable<>).MakeGenericType(parameterType.GenericTypeArguments);
+
+			return parameterType;
+		}
+
 		// The parameter plane admits PRIMITIVE values only: int, long, double, decimal, char,
 		// string, bool, datetime, plus a ONE-LEVEL collection of those (List<T>, IEnumerable<T>,
 		// T[], where T is one of those scalars — never another collection). The admitted set is

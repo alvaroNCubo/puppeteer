@@ -331,8 +331,9 @@ namespace Puppeteer.EventSourcing.Follower
 		}
 
 		// A receiver-type pattern ([_:T] or [name:T]) matches a script call/access when T
-		// names a type the receiver "is-a": any type on the chain from the receiver's static
-		// type up through its base types. When the receiver's static type was not resolved
+		// names a type the receiver "is-a": any type on the is-a closure of the receiver's
+		// static type, i.e. its base classes and its interfaces. When the receiver's static
+		// type was not resolved
 		// (unnamed chained expression) it falls back to the matched member's declaring-type
 		// chain. Plain name equality at the declaring type is the degenerate case. This is
 		// what lets a pattern be written against the receiver's declared type even when the
@@ -344,14 +345,34 @@ namespace Puppeteer.EventSourcing.Follower
 		{
 			if (string.IsNullOrEmpty(patternTypeName)) return false;
 
-			for (Type t = receiverType; t != null; t = t.BaseType)
+			return NameIsOnTheIsAClosureOf(patternTypeName, receiverType)
+				|| NameIsOnTheIsAClosureOf(patternTypeName, declaringType);
+		}
+
+		// The "is-a" closure of a static type: the type itself, its base classes, and every
+		// interface it implements (GetInterfaces is transitive, so base interfaces are included).
+		// Walking the base-class chain alone leaves two shapes unmatchable, because BaseType is
+		// null for an interface and never yields an implemented interface:
+		//   - a receiver whose static type IS an interface (a factory declaring an interface
+		//     return type) can only be named by that interface or one it extends;
+		//   - a receiver statically typed as a concrete type cannot be named by an interface it
+		//     implements, which is the natural way to write a polymorphic pattern.
+		// The closure is taken over the STATIC type only: pattern matching cannot consult the
+		// runtime instance, so a base class of the runtime type is deliberately NOT reachable
+		// from an interface-typed receiver — nothing guarantees statically that an implementor
+		// derives from it.
+		private static bool NameIsOnTheIsAClosureOf(string patternTypeName, Type type)
+		{
+			if (type == null) return false;
+
+			for (Type t = type; t != null; t = t.BaseType)
 			{
 				if (string.Equals(t.Name, patternTypeName, StringComparison.OrdinalIgnoreCase)) return true;
 			}
 
-			for (Type t = declaringType; t != null; t = t.BaseType)
+			foreach (Type contract in type.GetInterfaces())
 			{
-				if (string.Equals(t.Name, patternTypeName, StringComparison.OrdinalIgnoreCase)) return true;
+				if (string.Equals(contract.Name, patternTypeName, StringComparison.OrdinalIgnoreCase)) return true;
 			}
 
 			return false;

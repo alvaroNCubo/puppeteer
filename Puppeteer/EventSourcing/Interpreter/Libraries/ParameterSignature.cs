@@ -49,12 +49,25 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 				if (!parameters.ContainsParameter(descriptor.Name))
 					return false;
 				var parameter = parameters[descriptor.Name];
-				if (parameter.ParameterType != descriptor.ParameterType)
+				if (!TypesAreCompatible(parameter.ParameterType, descriptor.ParameterType))
 					return false;
 				if (!ModifiersAreCompatible(parameter.ParameterModifier, descriptor.ParameterModifier))
 					return false;
 			}
 			return true;
+		}
+
+		// Same round-trip reasoning as ModifiersAreCompatible below, applied to the declared
+		// TYPE. The Define header canonicalizes every admitted one-level collection shape into
+		// one text, so a rehydrated descriptor comes back as IEnumerable<T> whichever of the
+		// three the author declared, while a live re-issue after a restart still supplies the
+		// original shape. Rejecting that mismatch blocked every post-restart invocation of an
+		// Action with a concretely-shaped collection parameter. Compared through the header's own
+		// canonicalization instead: see Parameter.SignatureCanonicalType.
+		private static bool TypesAreCompatible(Type provided, Type expected)
+		{
+			if (provided == expected) return true;
+			return Parameter.SignatureCanonicalType(provided) == Parameter.SignatureCanonicalType(expected);
 		}
 
 		// In (caller-supplied literal) and Eval (value computed transactionally from the

@@ -69,14 +69,25 @@ namespace Puppeteer.EventSourcing
 
 			foreach (var type in LoadTypesFromAssembly(assembly))
 			{
-				var classInfo = new ClassInfo(type);
-
-				if (!classesByName.TryGetValue(type.Name, out var classList))
+				// An interface enters the TYPE table only, never the CLASS table. The two tables
+				// answer different questions: classesByName answers "what can be instantiated or
+				// used as a static receiver", and no interface can be either; typesByName answers
+				// "what type does this name denote", which is what a receiver-type hint in a Reaction
+				// pattern needs in order to name the declared type of a receiver obtained from a
+				// factory whose return type is an interface. Admitting an interface into
+				// classesByName would make it look constructible and would replace the precise
+				// "class not found" diagnostic with a constructor-resolution failure.
+				if (!type.IsInterface)
 				{
-					classList = new List<ClassInfo>();
-					classesByName.Add(type.Name, classList);
+					var classInfo = new ClassInfo(type);
+
+					if (!classesByName.TryGetValue(type.Name, out var classList))
+					{
+						classList = new List<ClassInfo>();
+						classesByName.Add(type.Name, classList);
+					}
+					classList.Add(classInfo);
 				}
-				classList.Add(classInfo);
 
 				// If two assemblies declare a Type with the same Name, the first one wins (stable and predictable).
 				// FindClassesByName returns both via classesByName if the caller needs to resolve the ambiguity.
@@ -144,11 +155,30 @@ namespace Puppeteer.EventSourcing
 			}
 			foreach (Type t in types)
 			{
-				// Includes domain classes and ENUMS. Enums are indexed by name so that the
-				// explicit cast (MyEnum)'Value' resolves them via GetTypeOrThrow. The default
+				// Includes domain classes, ENUMS and INTERFACES. Enums are indexed by name so that
+				// the explicit cast (MyEnum)'Value' resolves them via GetTypeOrThrow. The default
 				// path (parameter/literal/symbol in an enum slot) does NOT depend on this: there
 				// the enum type is discovered from the method/constructor signature.
-				if ((t.IsPublic || t.IsNestedPublic || (t.IsNotPublic && !t.IsNestedPrivate)) && ((t.IsClass && t.IsSubclassOf(typeof(object))) || t.IsEnum))
+				// Interfaces are indexed so that a receiver-type hint in a Reaction pattern can
+				// name the declared type of a receiver whose static type IS an interface. Without
+				// them such a receiver is unnameable: the interface is the only type on its is-a
+				// closure, so no other name can ever match it, and the pattern silently never
+				// fires. IsClass is false for an interface, which is what used to drop it here
+				// (IsSubclassOf(object) is true for an interface and never was the discriminator).
+				// IngestAssembly keeps interfaces out of the CLASS table — they are named, not
+				// instantiated.
+				// The visibility gate asks what to EXCLUDE, not what to include. The inclusion list it
+				// replaces (IsPublic || IsNestedPublic || (IsNotPublic && !IsNestedPrivate)) could never
+				// admit a nested non-public type: IsNotPublic tests the visibility mask against
+				// TypeAttributes.NotPublic, which is 0x0 and therefore reachable only by a top-level
+				// type. A nested type always carries NestedPublic/NestedPrivate/NestedFamily/
+				// NestedAssembly/NestedFamANDAssem/NestedFamORAssem instead, so an assembly-visible
+				// nested type failed all three tests and was dropped with no diagnostic, surfacing much
+				// later as a type the registry does not know. The dead !IsNestedPrivate conjunct records
+				// the intent that was never met: admit every visibility except nested-private. This
+				// single test is exactly that set, and it keeps out the nested-private types the
+				// compiler emits for closures and state machines.
+				if (!t.IsNestedPrivate && ((t.IsClass && t.IsSubclassOf(typeof(object))) || t.IsEnum || t.IsInterface))
 				{
 					result.Add(t);
 				}

@@ -1899,7 +1899,30 @@ namespace Puppeteer.EventSourcing.Follower
 				return null;
 			}
 
-			var args = new Parameters(entry.Program.Parameters.ParametersAsString());
+			string declarations = entry.Program.Parameters.ParametersAsString();
+			Parameters args;
+			try
+			{
+				args = new Parameters(declarations);
+			}
+			catch (Exception ex)
+			{
+				// A declaration that cannot be read back is a CODEC defect, not a data problem in
+				// this one invocation: every invocation of the Action carries the same declaration,
+				// so degrading here would fail identically on every later pass while letting THIS
+				// pass run to completion and advance the resume cursor past an invocation whose
+				// arguments were never bound — a projection silently missing events, which is worse
+				// than one that stops. So the failure stays fatal to the pass (the resume frontier
+				// is persisted only after a clean replay).
+				//
+				// What it must NOT stay is anonymous. The codec's own message names neither the
+				// Action nor the Reaction, so a production stack pointed at the string parser with
+				// nothing to correlate it to. Re-throw with both, plus the declaration that failed.
+				throw new LanguageException(
+					$"[Reaction '{Name}'] the parameter declaration of ActionId={actionData.ActionId} could not be read back: " +
+					$"{ex.Message}. Declaration: '{declarations}'.");
+			}
+
 			try
 			{
 				args.LoadArguments(actionData.Arguments);

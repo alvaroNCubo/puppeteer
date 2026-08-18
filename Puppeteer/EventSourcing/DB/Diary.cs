@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Numerics;
 using System.Threading;
@@ -28,8 +30,25 @@ namespace Puppeteer.EventSourcing.DB
 		private ManualResetEventSlim diskFullGate;
 		private Timer diskSpaceMonitor;
 		private readonly string localBufferPath;
-		private Action<long, byte[]> externalOnRecordWritten;
 		private bool IsBuffered => localBuffer != null;
+
+		// Record-written fan-out. Subscribers live in a FLAT immutable array published
+		// with CAS (registration is lock-free and invocation is a plain loop — no
+		// nested-closure chain, so the call depth stays constant no matter how many
+		// observers a host adds). Notifications are ENQUEUED at write time and the
+		// queue is drained OUTSIDE the writer's exclusive section: a journal record
+		// that is already durable does not need the lock that protected writing it,
+		// so subscriber work (projection push signals, replication hooks) must not be
+		// charged to the actor's single-writer critical path. The deferral gate is
+		// installed by the journal's owner and answers "is the calling thread still
+		// inside its exclusive write section?"; when it says no (or nobody installed
+		// one) the dispatch drains inline, which preserves the historical synchronous
+		// delivery on the writer's own thread.
+		private static readonly Action<long, byte[]>[] NO_RECORD_SUBSCRIBERS = new Action<long, byte[]>[0];
+		private Action<long, byte[]>[] recordWrittenSubscribers = NO_RECORD_SUBSCRIBERS;
+		private readonly ConcurrentQueue<(long entryId, byte[] record)> pendingRecordNotifications = new ConcurrentQueue<(long entryId, byte[] record)>();
+		private int recordNotificationDrainInProgress;
+		internal Func<bool> RecordNotificationDeferralGate { get; set; } = () => false;
 
 		// paper05-lab5: harness-facing observers — make the buffered-vs-direct
 		// distinction visible so the lab can characterize partition/catch-up.
@@ -125,7 +144,7 @@ namespace Puppeteer.EventSourcing.DB
 			buffer.OnRecordWritten = (entryId, record) =>
 			{
 				agent.EnqueueRecord(entryId, record);
-				externalOnRecordWritten?.Invoke(entryId, record);
+				DispatchRecordWritten(entryId, record);
 			};
 			// Phase 5 of the Action refactor: dropped buffer.OnNewActionDefined wiring.
 			// Replication of actions now flows entirely through OnRecordWritten — the
@@ -177,19 +196,15 @@ namespace Puppeteer.EventSourcing.DB
 
 		internal Action<long, byte[]> OnRecordWritten
 		{
+			// Assignment REPLACES the whole subscriber set (the historical contract of
+			// this seam); AddRecordWrittenCallback APPENDS to it. Both publish a fresh
+			// immutable array, so an in-flight dispatch observes either the old set or
+			// the new one, never a torn mix.
 			set
 			{
-				if (IsBuffered)
-				{
-					externalOnRecordWritten = value;
-				}
-				else
-				{
-					// OnRecordWritten lives on DiaryStorage (abstract base) — all
-					// backends (FS / SQL / InMemory) inherit it. FS produces wire
-					// bytes naturally; SQL / InMemory synthesize via BinaryEventCodec.
-					diaryStorage.OnRecordWritten = value;
-				}
+				Interlocked.Exchange(ref recordWrittenSubscribers,
+					value == null ? NO_RECORD_SUBSCRIBERS : new Action<long, byte[]>[] { value });
+				SyncStorageRecordSink();
 			}
 		}
 
@@ -197,42 +212,83 @@ namespace Puppeteer.EventSourcing.DB
 		{
 			if (callback == null) throw new ArgumentNullException(nameof(callback));
 
-			// Lab 3 fix: two Cued reactions race on the same OnRecordWritten
-			// field (each one wraps `previous` around its own callback). Without
-			// CAS-style synchronisation the late-starting wrapper can read
-			// `previous = null` and overwrite the earlier reaction's callback,
-			// silently dropping the push subscription for one of the reactions.
-			// Use Interlocked.CompareExchange so each wrapper deterministically
-			// builds on the latest chain.
-			if (IsBuffered)
+			// Lab 3 fix, restated over the flat array: two concurrent registrations
+			// must not lose each other. CAS over the published array keeps the append
+			// atomic; unlike the previous nested-closure chain, invocation cost per
+			// subscriber stays flat and the call depth is constant.
+			while (true)
 			{
-				while (true)
-				{
-					var previous = externalOnRecordWritten;
-					Action<long, byte[]> next = (entryId, record) =>
-					{
-						previous?.Invoke(entryId, record);
-						callback(entryId, record);
-					};
-					if (System.Threading.Interlocked.CompareExchange(ref externalOnRecordWritten, next, previous) == previous)
-						return;
-				}
+				var previous = Volatile.Read(ref recordWrittenSubscribers);
+				var next = new Action<long, byte[]>[previous.Length + 1];
+				Array.Copy(previous, next, previous.Length);
+				next[previous.Length] = callback;
+				if (Interlocked.CompareExchange(ref recordWrittenSubscribers, next, previous) == previous)
+					break;
 			}
-			else
+			SyncStorageRecordSink();
+		}
+
+		// The storage-side sink is installed only while somebody is listening:
+		// backends gate the wire-bytes synthesis on `OnRecordWritten != null`, so a
+		// journal with zero subscribers must keep paying zero encode cost. In
+		// buffered mode the local buffer's write tail is wired once (replication
+		// agent + dispatch) and DispatchRecordWritten early-returns when nobody
+		// subscribed.
+		private void SyncStorageRecordSink()
+		{
+			if (IsBuffered) return;
+			diaryStorage.OnRecordWritten =
+				Volatile.Read(ref recordWrittenSubscribers).Length == 0 ? null : DispatchRecordWritten;
+		}
+
+		private void DispatchRecordWritten(long entryId, byte[] record)
+		{
+			if (Volatile.Read(ref recordWrittenSubscribers).Length == 0) return;
+
+			// FIFO by construction: records are enqueued in the order the store
+			// completed them (writes are serialized by the journal owner's exclusion),
+			// and the single-flight drain below preserves that order end to end.
+			pendingRecordNotifications.Enqueue((entryId, record));
+
+			if (!RecordNotificationDeferralGate())
+				DrainPendingRecordNotifications();
+		}
+
+		// Single-flight drain: whoever wins the flag delivers everything queued, in
+		// order; a loser returns immediately knowing the winner will pick up the
+		// records it just enqueued. The outer loop closes the race where an enqueue
+		// lands between the winner's last dequeue and the flag release. A subscriber
+		// failure is logged and does not stop the drain: the record is already
+		// durable, so a broken observer must poison neither the remaining observers
+		// nor the writer that happens to be draining.
+		internal void DrainPendingRecordNotifications()
+		{
+			while (!pendingRecordNotifications.IsEmpty)
 			{
-				// OnRecordWritten lives on DiaryStorage (abstract base) — every
-				// backend has it. CAS over the base-class field generalises the
-				// previous DiaryStorageFileSystem-only branch.
-				while (true)
+				if (Interlocked.CompareExchange(ref recordNotificationDrainInProgress, 1, 0) != 0)
+					return;
+
+				try
 				{
-					var previous = diaryStorage.OnRecordWritten;
-					Action<long, byte[]> next = (entryId, record) =>
+					while (pendingRecordNotifications.TryDequeue(out (long entryId, byte[] record) notification))
 					{
-						previous?.Invoke(entryId, record);
-						callback(entryId, record);
-					};
-					if (System.Threading.Interlocked.CompareExchange(ref diaryStorage.OnRecordWritten, next, previous) == previous)
-						return;
+						var subscribers = Volatile.Read(ref recordWrittenSubscribers);
+						for (int i = 0; i < subscribers.Length; i++)
+						{
+							try
+							{
+								subscribers[i](notification.entryId, notification.record);
+							}
+							catch (Exception ex)
+							{
+								Debug.WriteLine($"[Diary.OnRecordWritten] subscriber failed for EntryId {notification.entryId}: {ex.GetType().Name}: {ex.Message}");
+							}
+						}
+					}
+				}
+				finally
+				{
+					Volatile.Write(ref recordNotificationDrainInProgress, 0);
 				}
 			}
 		}

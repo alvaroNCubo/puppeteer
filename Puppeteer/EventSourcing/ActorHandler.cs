@@ -650,6 +650,8 @@ namespace Puppeteer.EventSourcing
 			finally
 			{
 				rwLock.ExitWriteLock();
+				// Post-commit fan-out outside the exclusive section (see PerformCmd).
+				dairy?.DrainPendingRecordNotifications();
 			}
 		}
 
@@ -751,6 +753,8 @@ namespace Puppeteer.EventSourcing
 			finally
 			{
 				rwLock.ExitWriteLock();
+				// Post-commit fan-out outside the exclusive section (see PerformCmd).
+				dairy?.DrainPendingRecordNotifications();
 			}
 		}
 
@@ -904,6 +908,19 @@ namespace Puppeteer.EventSourcing
 			return dairy?.Storage?.MaterializationCheckpointStorage;
 		}
 
+		// Record-written notifications must not run inside the actor's exclusive
+		// write section: the gate tells the Diary whether the dispatching thread is
+		// still that section's owner, in which case the notification is queued and
+		// the write path drains it right after releasing the lock (see the
+		// DrainPendingRecordNotifications calls next to each ExitWriteLock that can
+		// journal). Threads that write without holding this actor's write lock (the
+		// async command path under its own semaphore, replication raw writes) keep
+		// the historical inline delivery.
+		private void WireRecordNotificationDeferral(Diary dairy)
+		{
+			dairy.RecordNotificationDeferralGate = () => rwLock.IsWriteLockHeld;
+		}
+
 		// Phase 2 — Materialize v2 wire verb (a) EnviameDesde. Materialization.cs accesses
 		// the DiaryStorage to enumerate raw journal records without going through the
 		// public rehydration API (which filters elided ones).
@@ -930,6 +947,7 @@ namespace Puppeteer.EventSourcing
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(connection);
 
 			dairy = new Diary(dbType, connection, eventJournalClient: this);
+			WireRecordNotificationDeferral(dairy);
 
 			Console.WriteLine($"Starting {this.GetType()}'s Actor");
 
@@ -970,6 +988,7 @@ namespace Puppeteer.EventSourcing
 				throw new LanguageException($"Actor '{Name}' already has EventSourcingStorage configured.");
 
 			dairy = new Diary(dbType, connection, eventJournalClient: this);
+			WireRecordNotificationDeferral(dairy);
 		}
 
 		internal void EventSourcingStorage(DatabaseType dbType, string connection, ActorFollower actorFollower)
@@ -977,6 +996,7 @@ namespace Puppeteer.EventSourcing
 			ArgumentNullException.ThrowIfNullOrWhiteSpace(connection);
 
 			dairy = new Diary(dbType, connection, eventJournalClient: actorFollower);
+			WireRecordNotificationDeferral(dairy);
 
 			long lastProcessedEntryId = EventSourcingStorage(dairy);
 
@@ -1720,6 +1740,7 @@ namespace Puppeteer.EventSourcing
 				symbolTable.RecoveringState = true;
 
 				dairy = new Diary(dbType, connection, this);
+				WireRecordNotificationDeferral(dairy);
 				await dairy.RehydrateFromEventAsync();
 			}
 			finally
@@ -2565,6 +2586,13 @@ namespace Puppeteer.EventSourcing
 				finally
 				{
 					rwLock.ExitWriteLock();
+					// Post-commit fan-out: the journal entry is already durable, so the
+					// record-written subscribers are notified OUTSIDE the exclusive
+					// section — their work is no longer charged to the actor's
+					// single-writer critical path. Drained in the finally (the drain
+					// never throws) so a command that journaled and then failed still
+					// publishes what it durably wrote.
+					dairy?.DrainPendingRecordNotifications();
 				}
 
 				// Plan 5 of the Tell primitive roadmap: drain envelopes that
@@ -3452,6 +3480,8 @@ namespace Puppeteer.EventSourcing
 				finally
 				{
 					rwLock.ExitWriteLock();
+					// Post-commit fan-out outside the exclusive section (see PerformCmd).
+					dairy?.DrainPendingRecordNotifications();
 				}
 			}
 			catch (Exception e)
