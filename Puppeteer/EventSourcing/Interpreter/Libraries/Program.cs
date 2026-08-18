@@ -683,26 +683,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
             return builderStr;
         }
 
-        // Authored render of the program body: identical to ConvertToString
-        // except that filtered print statements are kept (see AuthoredRenderScope
-        // and OutputStatementIndividual.Write). Used only to compose the once-
-        // written Action (Define) body text, so the developer's prints survive in
-        // the journal. Deliberately NOT cached and NOT sharing builderStr: the
-        // canonical render remains the cache key and the payload for repeated
-        // Script rows. The render is synchronous, so the ambient scope enters and
-        // exits within this call.
-        internal string ConvertToAuthoredString(DatabaseType databaseType)
-        {
-            StringBuilder builder = new StringBuilder();
-            using (AuthoredRenderScope.Enter())
-            {
-                foreach (Statement source in statements)
-                {
-                    source.Write(builder, 0, databaseType);
-                }
-            }
-            return builder.ToString();
-        }
 
         // ConvertToString caches builderStr on the first call. ActorHandler
         // invokes that first render in PrepareCommand, BEFORE Perform — for a

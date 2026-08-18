@@ -12,7 +12,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 	internal class PrintStatementIndividual : OutputStatementIndividual
 	{
-		internal PrintStatementIndividual(AstExpression expression, String alias) : base(expression, alias, wasFiltered: true)
+		internal PrintStatementIndividual(AstExpression expression, String alias) : base(expression, alias)
 		{
 		}
 
@@ -20,8 +20,6 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		{
 			return "Print";
 		}
-
-		protected override bool PreservedInAuthoredBody => true;
 
 		protected override Output GetTargetBuffer(ExecutionOutput output)
 		{

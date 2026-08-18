@@ -12,7 +12,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 	internal class ExposeStatementIndividual : OutputStatementIndividual
 	{
-		internal ExposeStatementIndividual(AstExpression expression, String alias) : base(expression, alias, wasFiltered: false)
+		internal ExposeStatementIndividual(AstExpression expression, String alias) : base(expression, alias)
 		{
 		}
 

@@ -20,7 +20,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 	// be a diagnosis with no treatment — a journaled literal has no declaration anywhere that could
 	// carry the author's intent.
 	//
-	// Backed by AsyncLocal, matching AuthoredRenderScope: the value is captured when the rehydration
+	// Backed by AsyncLocal: the value is captured when the rehydration
 	// pipeline creates its stages, so the resolution a stage performs later — including the LAZY
 	// resolution a compiled Action defers to its first invocation — sees the scope its Program was
 	// replayed under. That ordering is the reason this is not a plain per-call argument.

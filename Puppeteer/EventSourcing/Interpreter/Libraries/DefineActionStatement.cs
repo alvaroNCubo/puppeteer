@@ -119,15 +119,9 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 			// matches exactly what ActorHandler emits to the journal at runtime — and
 			// what the parser reads back.
 			StringBuilder bodySb = new StringBuilder();
-			// Render the body under the authored scope so a parsed Define carrying
-			// developer prints round-trips back to the same sentence the runtime
-			// journaled (ComposeJournalText is fed Program.ConvertToAuthoredString).
-			using (AuthoredRenderScope.Enter())
+			foreach (Statement source in body)
 			{
-				foreach (Statement source in body)
-				{
-					source.Write(bodySb, 0, databaseType);
-				}
+				source.Write(bodySb, 0, databaseType);
 			}
 			result.Append(ComposeJournalText(actionId, parametersText, bodySb.ToString()));
 		}

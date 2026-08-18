@@ -136,18 +136,10 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 		protected abstract string GetCommandName();
 		protected abstract Output GetTargetBuffer(ExecutionOutput output);
 
-		// Whether this filtered output statement is kept in the authored render
-		// (Program.ConvertToAuthoredString, under AuthoredRenderScope). Prints
-		// override this to true so they survive in the once-written Action body;
-		// expose stays false because its data is journaled through its own
-		// exposeData channel, not the body text.
-		protected virtual bool PreservedInAuthoredBody => false;
-
-		internal OutputStatementIndividual(AstExpression expression, String alias, bool wasFiltered)
+		internal OutputStatementIndividual(AstExpression expression, String alias)
 		{
 			this.expression = expression;
 			this.alias = alias;
-			base.WasFiltered = wasFiltered;
 		}
 
 		internal override void Execute(ExecutionOutput output)
@@ -347,7 +339,7 @@ namespace Puppeteer.EventSourcing.Interpreter.Libraries
 
 		internal override void Write(StringBuilder result, int tabs, DatabaseType databaseType)
 		{
-			if (WasFiltered && !(AuthoredRenderScope.Active && PreservedInAuthoredBody)) return;
+			if (WasFiltered) return;
 			if (tabs > 0) result.Append(GenerateTabs(tabs));
 			result.Append(GetCommandName());
 			result.Append(' ');

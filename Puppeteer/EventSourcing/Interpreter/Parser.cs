@@ -996,7 +996,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 
 		private Statement ParsePrintStatement(int[] currLevel, bool isCheck)
 		{
-			if (isCheck && currLevel.Length == 0)
+			// Skip during rehydration, which re-parses journaled COMMANDS with isCheck
+			// overloaded to mean "don't need output". A replayed command body carries the
+			// output statements it was authored with, so refusing them here would make a
+			// journaled command unreplayable.
+			if (isCheck && !parsingRehydration && currLevel.Length == 0)
 			{
 				throw new LanguageException($"'print' is not allowed inside 'check' statements (at line {Row()}, column {Column()}).");
 			}
@@ -1070,7 +1074,11 @@ namespace Puppeteer.EventSourcing.Interpreter
 		{
 			if (isQuery) throw new LanguageException($"'expose' is not allowed inside queries (at line {Row()}, column {Column()}). 'expose' persists data and only makes sense in commands.");
 
-			if (isCheck && currLevel.Length == 0)
+			// Skip during rehydration, which re-parses journaled COMMANDS with isCheck
+			// overloaded to mean "don't need output". A replayed command body carries the
+			// output statements it was authored with, so refusing them here would make a
+			// journaled command unreplayable.
+			if (isCheck && !parsingRehydration && currLevel.Length == 0)
 			{
 				throw new LanguageException($"'expose' is not allowed inside 'check' statements (at line {Row()}, column {Column()}).");
 			}

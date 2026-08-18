@@ -1994,30 +1994,22 @@ namespace Puppeteer.EventSourcing
 				throw new LanguageException($"AddKnownActionFromDefine: parsed Define statement text did not yield a DefineActionStatement (actionId={actionId}). Text: '{defineStatementText}'");
 			}
 
-			// Authored body text = each body statement rendered with Statement.Write
-			// at tabs=0 in IN_MEMORY mode, UNDER AuthoredRenderScope so filtered print
-			// statements are kept. The Define body was journaled with prints
-			// (ComposeJournalText uses Program.ConvertToAuthoredString), so the parsed
-			// defineStmt.Body still carries them; re-rendering WITHOUT the authored scope
-			// would drop the prints here and rebuild a print-free Action, silently losing
-			// the command's output on every re-issue after a restart. Rendering under the
-			// authored scope keeps the prints in the re-parse source so the reconstructed
-			// Program faithfully reproduces the authored body.
+			// Body text = each body statement rendered with Statement.Write at tabs=0 in
+			// IN_MEMORY mode. The Define body was journaled carrying the output statements
+			// the author wrote, so the parsed defineStmt.Body still holds them and this
+			// re-render reproduces the authored body exactly.
 			System.Text.StringBuilder bodySb = new System.Text.StringBuilder();
-			using (AuthoredRenderScope.Enter())
+			foreach (Statement source in defineStmt.Body)
 			{
-				foreach (Statement source in defineStmt.Body)
-				{
-					source.Write(bodySb, 0, DatabaseType.IN_MEMORY);
-				}
+				source.Write(bodySb, 0, DatabaseType.IN_MEMORY);
 			}
-			string authoredBody = bodySb.ToString();
+			string bodyText = bodySb.ToString();
 
 			// Re-parse the authored body as a standalone Program — that is what the
 			// cache stores. Side-stepping a Program "shrink" operation keeps the AST
 			// path uniform with the live cache miss path.
 			Parser bodyPass = ParsersPool.Rent();
-			bodyPass.SetSource(authoredBody);
+			bodyPass.SetSource(bodyText);
 			Program bodyProgram = bodyPass.Parse(isQuery: false, isCheck: false);
 			ParsersPool.Return(bodyPass);
 
@@ -2080,16 +2072,16 @@ namespace Puppeteer.EventSourcing
 			// that created those globals. A Reaction observing this Action reuses the
 			// frozen { globalName -> ForcedType } map to seed its own symbol table, so
 			// its reference resolution no longer depends on which events it replayed.
-			IReadOnlyDictionary<string, Type> globalSignature = FreezeGlobalSignature(authoredBody, bodyProgram.Parameters);
+			IReadOnlyDictionary<string, Type> globalSignature = FreezeGlobalSignature(bodyText, bodyProgram.Parameters);
 
-			// Key by the DatabaseType-consistent AUTHORED render (prints kept) so the live
-			// command path (PrepareCommandProgram / PerformCmdAsync, which now also key by
-			// program.ConvertToAuthoredString(this.DatabaseType)) resolves this rehydrated
-			// Action on the first re-issue instead of journaling a duplicate Define. The
-			// authored render is a parse -> render fixed point, so the key computed here
-			// equals the one the live path computes for the same authored body. The cache
-			// key uses this actor's DatabaseType so both paths agree regardless of backend.
-			_ = actionCommands.Add(actionId, bodyProgram.ConvertToAuthoredString(this.DatabaseType), bodyProgram, globalSignature);
+			// Key by the DatabaseType-consistent canonical render so the live command path
+			// (PrepareCommandProgram / PerformCmdAsync, which key by the same render)
+			// resolves this rehydrated Action on the first re-issue instead of journaling a
+			// duplicate Define. The render is a parse -> render fixed point, so the key
+			// computed here equals the one the live path computes for the same body. The
+			// cache key uses this actor's DatabaseType so both paths agree regardless of
+			// backend.
+			_ = actionCommands.Add(actionId, bodyProgram.ConvertToString(this.DatabaseType), bodyProgram, globalSignature);
 		}
 
 		// A2 (reactions ref-resolution): resolve a throwaway copy of the Action body
@@ -2232,26 +2224,27 @@ namespace Puppeteer.EventSourcing
 				}
 				else
 				{
-					// With user parameters this is an Action. FormatedScriptForDairy keeps
-					// the CANONICAL (print-free) render: it is the Script-row payload and
-					// the Eval re-render base, where eliding prints is correct because a
-					// print does not change actor state.
+					// With user parameters this is an Action. One canonical render serves both
+					// roles: it is the Script-row payload / Eval re-render base AND the Action
+					// IDENTITY key.
+					//
+					// The render carries the output statements the author wrote. It must: a
+					// print is part of the command's OUTPUT contract, so two commands whose
+					// mutation is identical but whose prints differ are DIFFERENT Actions and
+					// must not share one cached Program (otherwise the second re-issues the
+					// first's rendered output). It is also what the journal stores, so the
+					// destination replaying an entry rebuilds the body the origin recorded --
+					// output statements included, at the position they were authored.
+					//
+					// The render is DatabaseType-consistent with the rehydration path
+					// (AddKnownActionFromDefine, which rebuilds the Action from the journaled
+					// Define body): keying both paths by it lets a rehydrated Action be matched
+					// -- not duplicated -- on the first live re-issue. The raw text is registered
+					// as an alias so repeated identical calls still fast-hit without re-rendering.
 					commandPrepared.FormatedScriptForDairy = commandPrepared.Program.ConvertToString(this.DatabaseType);
-					// The Action IDENTITY key, however, must PRESERVE prints. A print is
-					// part of the command's OUTPUT contract, so two commands whose mutation
-					// is identical but whose prints differ are DIFFERENT Actions and must
-					// not share one cached Program (otherwise the second re-issues the
-					// first's rendered output). The authored render (prints kept) is also
-					// DatabaseType-consistent with the rehydration path
-					// (AddKnownActionFromDefine, which rebuilds the Action from the authored
-					// Define body): keying both paths by the authored render lets a
-					// rehydrated Action be matched — not duplicated — on the first live
-					// re-issue. The raw text is registered as an alias so repeated identical
-					// calls still fast-hit without re-rendering.
-					string authoredKey = commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType);
-					// A body that renders to an empty authored form cannot key the cache;
-					// fall back to the raw endpoint text so the non-empty-key contract holds.
-					string identityKey = string.IsNullOrWhiteSpace(authoredKey) ? script : authoredKey;
+					// A body that renders empty cannot key the cache; fall back to the raw
+					// endpoint text so the non-empty-key contract holds.
+					string identityKey = string.IsNullOrWhiteSpace(commandPrepared.FormatedScriptForDairy) ? script : commandPrepared.FormatedScriptForDairy;
 
 					if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
 					{
@@ -2419,13 +2412,13 @@ namespace Puppeteer.EventSourcing
 							// journal rows atomically. defineText is the canonical
 							// `define action <id> (<params>) as <body> end;`
 							// sentence Phase 1's parser reads back during replay.
-							// Authored body: keeps the developer's prints in the once-
-							// written Define sentence (identity/cache key still use the
-							// canonical FormatedScriptForDairy elsewhere).
+							// The body carries the output statements the author wrote, so the
+							// once-written Define sentence replays to the same program the
+							// origin recorded.
 							string defineText = DefineActionStatement.ComposeJournalText(
 								nextActionId,
 								parameters.UserParametersAsCanonicalText(),
-								commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType));
+								commandPrepared.Program.ConvertToString(this.DatabaseType));
 							dairy.WriteDefineWithFirstInvocation(
 								nextActionId,
 								defineText,
@@ -2473,7 +2466,7 @@ namespace Puppeteer.EventSourcing
 								string defineText = DefineActionStatement.ComposeJournalText(
 									newActionId,
 									parameters.UserParametersAsCanonicalText(),
-									commandPrepared.Program.ConvertToAuthoredString(this.DatabaseType));
+									commandPrepared.Program.ConvertToString(this.DatabaseType));
 								dairy.WriteDefineWithFirstInvocation(
 									newActionId,
 									defineText,
@@ -2719,19 +2712,18 @@ namespace Puppeteer.EventSourcing
 					}
 					else
 					{
-						// See PrepareCommandProgram: FormatedScriptForDairy stays canonical
-						// (print-free), but the Action IDENTITY key preserves prints via the
-						// authored render — a print is part of the output contract, so
-						// commands differing only in their prints are different Actions. The
-						// authored render is DatabaseType-consistent with the rehydration path
-						// (AddKnownActionFromDefine) so a rehydrated Action is matched instead
-						// of duplicated on the first live re-issue. Raw text aliased for fast
+						// See PrepareCommandProgram: one canonical render serves both roles here.
+						// It is the Script-row payload AND the Action IDENTITY key, and it carries
+						// the output statements the author wrote -- a print is part of the output
+						// contract, so commands differing only in their prints are different
+						// Actions. The render is DatabaseType-consistent with the rehydration path
+						// (AddKnownActionFromDefine) so a rehydrated Action is matched instead of
+						// duplicated on the first live re-issue. Raw text aliased for fast
 						// subsequent hits.
 						formatedScriptForDairy = program.ConvertToString(this.DatabaseType);
-						string authoredKey = program.ConvertToAuthoredString(this.DatabaseType);
-						// Empty authored render: fall back to raw text so the non-empty-key
-						// contract holds (see PrepareCommandProgram).
-						string identityKey = string.IsNullOrWhiteSpace(authoredKey) ? script : authoredKey;
+						// Empty render: fall back to raw text so the non-empty-key contract holds
+						// (see PrepareCommandProgram).
+						string identityKey = string.IsNullOrWhiteSpace(formatedScriptForDairy) ? script : formatedScriptForDairy;
 
 						if (actionCommands.TryGetValue(identityKey, out CommandCacheEntry existingAction))
 						{
@@ -2912,7 +2904,7 @@ namespace Puppeteer.EventSourcing
 							string defineText = DefineActionStatement.ComposeJournalText(
 								actionId,
 								parameters.UserParametersAsCanonicalText(),
-								program.ConvertToAuthoredString(this.DatabaseType));
+								program.ConvertToString(this.DatabaseType));
 							await dairy.WriteDefineWithFirstInvocationAsync(
 								actionId,
 								defineText,
