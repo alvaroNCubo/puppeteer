@@ -6,7 +6,7 @@ Puppeteer is a runtime that combines CQRS, the Actor Model, and Event Sourcing w
 
 The primary surface for understanding why this code exists is the companion repository:
 
-> **[alvaroNCubo/puppeteer-papers](https://github.com/alvaroNCubo/puppeteer-papers)** — seven design theory papers introducing the constructs (porosity, program–value separability, the now/deferred partition, cross-actor continuity, journal-as-substrate, infrastructural symptom, server as accidental category) and tracing their consequences.
+> **[alvaroNCubo/puppeteer-papers](https://github.com/alvaroNCubo/puppeteer-papers)** — ten design theory papers introducing the constructs (porosity, program–value separability, the now/deferred partition, cross-actor continuity, journal-as-substrate, infrastructural symptom, server as accidental category, the three authorities of an output, identity before staging, and assembly as the plane at which a composition becomes a verb of a subject) and tracing their consequences.
 
 Each paper treats Puppeteer as one system that happens to satisfy the conditions the construct defines. The contribution of the series is conceptual; this repository is the existence proof.
 
